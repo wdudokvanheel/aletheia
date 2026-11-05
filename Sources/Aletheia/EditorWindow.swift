@@ -31,7 +31,53 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private var approvedClose = false
     private var closing = false
     private var closed = false
-    var onClose: (() -> Void)?
+    private var restoring = false
+    private var closingSession: WindowSession?
+    var onClose: ((WindowSession) -> Void)?
+
+    var session: WindowSession {
+        WindowSession(frame: window?.frame ?? .zero, rootPath: rootURL?.path,
+                      filePaths: documents.map { $0.file.requestedURL.path },
+                      selectedPath: selected?.file.requestedURL.path)
+    }
+
+    func restore(_ state: WindowSession, completion: @escaping @MainActor ([String]) -> Void) {
+        restoring = true
+        window?.setFrame(state.visibleFrame(on: NSScreen.screens.map(\.visibleFrame)), display: true)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var skipped: [String] = []
+            var root: URL?
+            if let path = state.rootPath {
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: path, isDirectory: &directory),
+                   directory.boolValue, FileManager.default.isReadableFile(atPath: path) {
+                    root = URL(fileURLWithPath: path)
+                } else { skipped.append(path) }
+            }
+            // Read in snapshot order and install together, so completion timing cannot reorder tabs.
+            var files: [TextFile] = []
+            for path in state.filePaths {
+                do { files.append(try TextFile.read(URL(fileURLWithPath: path))) }
+                catch { skipped.append("\(path): \(error.localizedDescription)") }
+            }
+            let restoredRoot = root
+            let restoredFiles = files
+            let failures = skipped
+            DispatchQueue.main.async {
+                guard !self.closed else { completion(failures); return }
+                if let restoredRoot { self.setRoot(restoredRoot) }
+                for file in restoredFiles where !self.documents.contains(where: { $0.file.url == file.url }) {
+                    let document = EditorDocument(file: file)
+                    document.onChange = { [weak owner = self] in owner?.refreshTabs(); owner?.updateTitle() }
+                    self.documents.append(document)
+                }
+                let selected = self.documents.first { $0.file.requestedURL.path == state.selectedPath }
+                self.select(selected ?? self.documents.first)
+                self.restoring = false
+                completion(failures)
+            }
+        }
+    }
 
     var hasRoot: Bool { rootURL != nil }
 
@@ -106,7 +152,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     func openFile(_ url: URL) {
-        guard !closing, !closed else { return }
+        guard !closing, !closed, !restoring else { return }
         let canonical = url.resolvingSymlinksInPath()
         if let existing = documents.first(where: { $0.file.url == canonical }) {
             select(existing)
@@ -323,7 +369,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     func prepareToClose(completion: @escaping @MainActor (Bool) -> Void) {
-        guard !closing, !documents.contains(where: \.busy) else { NSSound.beep(); completion(false); return }
+        guard !closing, !restoring, !documents.contains(where: \.busy) else { NSSound.beep(); completion(false); return }
         closing = true
         // Freeze all buffers during a multi-document decision, so earlier approvals stay valid.
         documents.forEach { $0.editor.isEditable = false }
@@ -349,13 +395,21 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if approvedClose { return true }
+        let candidate = session
         prepareToClose { allowed in
-            if allowed { self.approvedClose = true; sender.close() }
+            if allowed {
+                self.closingSession = candidate
+                self.approvedClose = true
+                sender.close()
+            }
         }
         return false
     }
 
-    func windowWillClose(_ notification: Notification) { closed = true; onClose?() }
+    func windowWillClose(_ notification: Notification) {
+        closed = true
+        onClose?(closingSession ?? session)
+    }
 
     private func present(_ error: Error) {
         guard !closed, let window else { return }

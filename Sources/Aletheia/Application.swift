@@ -16,21 +16,33 @@ struct Aletheia {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windows: [EditorWindow] = []
     private var terminating = false
+    private var launched = false
+    private var restoring = false
+    private var pendingOpenFiles: [String] = []
+    private var quitSession: SessionState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        if windows.isEmpty { _ = makeWindow() }
+        launched = true
+        restoreSession()
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private var current: EditorWindow? {
-        windows.first { $0.window === NSApp.keyWindow } ?? windows.last
+        windows.first { $0.window === NSApp.keyWindow }
+            ?? windows.first { $0.window === NSApp.mainWindow } ?? windows.last
     }
 
     @discardableResult private func makeWindow() -> EditorWindow {
         let controller = EditorWindow()
-        controller.onClose = { [weak self, weak controller] in
-            self?.windows.removeAll { $0 === controller }
+        controller.onClose = { [weak self, weak controller] closedSession in
+            guard let self else { return }
+            self.windows.removeAll { $0 === controller }
+            guard !self.terminating else { return }
+            // Closing the final window retains its files; closing one of several removes only that window.
+            let state = self.windows.isEmpty
+                ? SessionState(windows: [closedSession], activeWindowIndex: 0) : self.sessionSnapshot()
+            state.save()
         }
         windows.append(controller)
         controller.showWindow(nil)
@@ -38,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openFolder(_ sender: Any?) {
-        guard !terminating else { return }
+        guard !terminating, !restoring else { return }
         let panel = NSOpenPanel()
         panel.title = "Open Folder"
         panel.canChooseDirectories = true
@@ -53,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openFiles(_ sender: Any?) {
-        guard !terminating else { return }
+        guard !terminating, !restoring else { return }
         let panel = NSOpenPanel()
         panel.title = "Open Files"
         panel.canChooseDirectories = false
@@ -66,25 +78,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func save(_ sender: Any?) { if !terminating { current?.saveSelected(sender) } }
-    @objc private func closeTab(_ sender: Any?) { if !terminating { current?.closeSelectedTab(sender) } }
-    @objc private func closeWindow(_ sender: Any?) { if !terminating { current?.window?.performClose(sender) } }
+    @objc private func save(_ sender: Any?) { if !terminating && !restoring { current?.saveSelected(sender) } }
+    @objc private func closeTab(_ sender: Any?) { if !terminating && !restoring { current?.closeSelectedTab(sender) } }
+    @objc private func closeWindow(_ sender: Any?) { if !terminating && !restoring { current?.window?.performClose(sender) } }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag && !terminating { _ = makeWindow() }
+        if launched && !flag && !terminating && !restoring { restoreSession() }
         return true
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         guard !terminating else { sender.reply(toOpenOrPrint: .failure); return }
-        let controller = current ?? makeWindow()
-        filenames.forEach { controller.openFile(URL(fileURLWithPath: $0)) }
+        // LaunchServices may deliver these before or during launch restoration.
+        pendingOpenFiles.append(contentsOf: filenames)
+        if launched && !restoring { openPendingFiles() }
         sender.reply(toOpenOrPrint: .success)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminating else { return .terminateCancel }
+        guard !terminating, !restoring else { return .terminateCancel }
         guard !windows.isEmpty else { return .terminateNow }
+        // Prompts can select other dirty tabs. Remember the user's selection before they begin.
+        quitSession = sessionSnapshot()
         terminating = true
         // Reply on the next turn even when every window is clean.
         let closingWindows = windows
@@ -93,13 +108,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func confirmQuit(_ closingWindows: [EditorWindow], index: Int) {
-        guard index < closingWindows.count else { NSApp.reply(toApplicationShouldTerminate: true); return }
+        guard index < closingWindows.count else {
+            quitSession?.save()
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
+        }
         closingWindows[index].prepareToClose { allowed in
             if allowed { self.confirmQuit(closingWindows, index: index + 1) }
             else {
                 closingWindows.forEach { $0.cancelPreparedClose() }
                 self.terminating = false
+                self.quitSession = nil
                 NSApp.reply(toApplicationShouldTerminate: false)
+            }
+        }
+    }
+
+    private func sessionSnapshot() -> SessionState {
+        let active = current
+        return SessionState(windows: windows.map(\.session),
+                            activeWindowIndex: windows.firstIndex { $0 === active })
+    }
+
+    private func openPendingFiles() {
+        guard !pendingOpenFiles.isEmpty else { return }
+        let paths = pendingOpenFiles
+        pendingOpenFiles.removeAll()
+        let controller = current ?? makeWindow()
+        paths.forEach { controller.openFile(URL(fileURLWithPath: $0)) }
+    }
+
+    private func restoreSession() {
+        guard !restoring else { return }
+        guard windows.isEmpty else { openPendingFiles(); return }
+        guard let state = SessionState.load(), !state.windows.isEmpty else {
+            _ = makeWindow()
+            openPendingFiles()
+            return
+        }
+        restoring = true
+        let controllers = state.windows.map { _ in makeWindow() }
+        var remaining = controllers.count
+        var skipped: [String] = []
+        for (controller, saved) in zip(controllers, state.windows) {
+            controller.restore(saved) { failures in
+                skipped.append(contentsOf: failures)
+                remaining -= 1
+                guard remaining == 0 else { return }
+                self.restoring = false
+                let activeIndex = state.activeWindowIndex ?? 0
+                let active = controllers.indices.contains(activeIndex) ? controllers[activeIndex] : controllers[0]
+                active.showWindow(nil)
+                active.window?.makeKeyAndOrderFront(nil)
+                self.openPendingFiles()
+                if !skipped.isEmpty, let window = active.window {
+                    let alert = NSAlert()
+                    alert.messageText = "Some session items could not be reopened"
+                    let unique = Array(Set(skipped)).sorted()
+                    alert.informativeText = unique.prefix(8).joined(separator: "\n")
+                        + (unique.count > 8 ? "\n…and \(unique.count - 8) more." : "")
+                    alert.addButton(withTitle: "OK")
+                    alert.beginSheetModal(for: window)
+                }
             }
         }
     }
