@@ -7,6 +7,9 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     let editor = NSTextView()
     let scroll = NSScrollView()
     var busy = false
+    var markdownMode = MarkdownMode.split
+    var isMarkdown: Bool { file.url.pathExtension.lowercased() == "md" }
+    var onContentChange: (() -> Void)?
     var onChange: (() -> Void)?
     private var convertingNewlines = false
 
@@ -46,7 +49,10 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
 
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
                      range editedRange: NSRange, changeInLength delta: Int) {
-        if editedMask.contains(.editedCharacters) { updateDirty() }
+        if editedMask.contains(.editedCharacters) {
+            updateDirty()
+            onContentChange?()
+        }
     }
 
     private func updateDirty() {

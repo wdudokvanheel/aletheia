@@ -9,7 +9,9 @@ fi
 swift build -c "$configuration" --arch arm64
 binary_dir="$(swift build -c "$configuration" --arch arm64 --show-bin-path)"
 app="$PWD/build/Aletheia.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+# Bundle.module searches the main application resource directory first.
+ditto "$binary_dir/Aletheia_Aletheia.bundle" "$app/Contents/Resources/Aletheia_Aletheia.bundle"
 cp "$binary_dir/Aletheia" "$app/Contents/MacOS/Aletheia"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

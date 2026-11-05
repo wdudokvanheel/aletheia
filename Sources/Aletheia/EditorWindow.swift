@@ -24,6 +24,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
     private let editorHost = NSView()
+    private let markdownSplit = NSSplitView()
+    private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
+        trackingMode: .selectOne, target: nil, action: nil)
+    private var preview: MarkdownPreview?
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
     private var documents: [EditorDocument] = []
     private var selected: EditorDocument?
@@ -38,7 +42,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     var session: WindowSession {
         WindowSession(frame: window?.frame ?? .zero, rootPath: rootURL?.path,
                       filePaths: documents.map { $0.file.requestedURL.path },
-                      selectedPath: selected?.file.requestedURL.path)
+                      selectedPath: selected?.file.requestedURL.path,
+                      markdownModes: Dictionary(uniqueKeysWithValues: documents.filter(\.isMarkdown).map {
+                          ($0.file.requestedURL.path, $0.markdownMode)
+                      }))
     }
 
     func restore(_ state: WindowSession, completion: @escaping @MainActor ([String]) -> Void) {
@@ -68,7 +75,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                 if let restoredRoot { self.setRoot(restoredRoot) }
                 for file in restoredFiles where !self.documents.contains(where: { $0.file.url == file.url }) {
                     let document = EditorDocument(file: file)
-                    document.onChange = { [weak owner = self] in owner?.refreshTabs(); owner?.updateTitle() }
+                    self.configure(document)
+                    document.markdownMode = state.markdownModes?[file.requestedURL.path] ?? .split
                     self.documents.append(document)
                 }
                 let selected = self.documents.first { $0.file.requestedURL.path == state.selectedPath }
@@ -123,15 +131,29 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabScroll.translatesAutoresizingMaskIntoConstraints = false
         editorHost.translatesAutoresizingMaskIntoConstraints = false
-        right.addSubview(tabScroll)
+        let header = NSStackView(views: [tabScroll, modeControl])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
+        header.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        right.addSubview(header)
         right.addSubview(editorHost)
+        modeControl.target = self
+        modeControl.action = #selector(changeMarkdownMode(_:))
+        modeControl.controlSize = .small
+        modeControl.isHidden = true
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        markdownSplit.isVertical = true
+        markdownSplit.dividerStyle = .thin
+        markdownSplit.autoresizingMask = [.width, .height]
         NSLayoutConstraint.activate([
-            tabScroll.topAnchor.constraint(equalTo: right.topAnchor),
-            tabScroll.leadingAnchor.constraint(equalTo: right.leadingAnchor),
-            tabScroll.trailingAnchor.constraint(equalTo: right.trailingAnchor),
+            header.topAnchor.constraint(equalTo: right.topAnchor),
+            header.leadingAnchor.constraint(equalTo: right.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: right.trailingAnchor),
             tabScroll.heightAnchor.constraint(equalToConstant: 44),
             tabs.heightAnchor.constraint(equalTo: tabScroll.contentView.heightAnchor),
-            editorHost.topAnchor.constraint(equalTo: tabScroll.bottomAnchor),
+            editorHost.topAnchor.constraint(equalTo: header.bottomAnchor),
             editorHost.leadingAnchor.constraint(equalTo: right.leadingAnchor),
             editorHost.trailingAnchor.constraint(equalTo: right.trailingAnchor),
             editorHost.bottomAnchor.constraint(equalTo: right.bottomAnchor)
@@ -170,7 +192,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                     }
                     if self.rootURL == nil { self.setRoot(file.url.deletingLastPathComponent()) }
                     let document = EditorDocument(file: file)
-                    document.onChange = { [weak owner = self] in owner?.refreshTabs(); owner?.updateTitle() }
+                    self.configure(document)
                     self.documents.append(document)
                     self.select(document)
                 case .failure(let error): self.present(error)
@@ -179,18 +201,62 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         }
     }
 
+    private func configure(_ document: EditorDocument) {
+        document.onChange = { [weak self] in self?.refreshTabs(); self?.updateTitle() }
+        document.onContentChange = { [weak self, weak document] in
+            guard let self, let document, self.selected === document,
+                  document.isMarkdown, document.markdownMode != .editor else { return }
+            self.preview?.contentChanged()
+        }
+    }
+
     private func select(_ document: EditorDocument?) {
         selected?.scroll.removeFromSuperview()
         selected = document
-        placeholder.isHidden = document != nil
-        if let document {
-            document.scroll.frame = editorHost.bounds
-            document.scroll.autoresizingMask = [.width, .height]
-            editorHost.addSubview(document.scroll)
-            window?.makeFirstResponder(document.editor)
-        }
+        layoutEditor()
         refreshTabs()
         updateTitle()
+    }
+
+    @objc private func changeMarkdownMode(_ sender: NSSegmentedControl) {
+        guard let selected, selected.isMarkdown,
+              MarkdownMode.allCases.indices.contains(sender.selectedSegment) else { return }
+        selected.markdownMode = MarkdownMode.allCases[sender.selectedSegment]
+        layoutEditor()
+    }
+
+    private func layoutEditor() {
+        markdownSplit.removeFromSuperview()
+        for view in markdownSplit.arrangedSubviews {
+            markdownSplit.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        selected?.scroll.removeFromSuperview()
+        preview?.webView.removeFromSuperview()
+        placeholder.isHidden = selected != nil
+        modeControl.isHidden = selected?.isMarkdown != true
+        guard let document = selected else { preview?.show(nil); return }
+        let mode = document.isMarkdown ? document.markdownMode : .editor
+        modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
+        if mode != .editor, preview == nil {
+            preview = MarkdownPreview()
+            preview?.onOpen = { [weak self] in self?.openFile($0) }
+        }
+        preview?.show(mode == .editor ? nil : document)
+        let content: NSView
+        switch mode {
+        case .editor: content = document.scroll
+        case .preview: content = preview!.webView
+        case .split:
+            markdownSplit.addArrangedSubview(document.scroll)
+            markdownSplit.addArrangedSubview(preview!.webView)
+            content = markdownSplit
+        }
+        content.frame = editorHost.bounds
+        content.autoresizingMask = [.width, .height]
+        editorHost.addSubview(content)
+        if mode == .split { markdownSplit.setPosition(editorHost.bounds.width / 2, ofDividerAt: 0) }
+        window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
     }
 
     private func refreshTabs() {
@@ -408,6 +474,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         closed = true
+        preview?.show(nil)
         onClose?(closingSession ?? session)
     }
 

@@ -1,10 +1,15 @@
 import Foundation
 
+enum MarkdownMode: String, Codable, Sendable, CaseIterable {
+    case editor, split, preview
+}
+
 struct WindowSession: Codable, Equatable, Sendable {
     var frame: CGRect
     var rootPath: String?
     var filePaths: [String]
     var selectedPath: String?
+    var markdownModes: [String: MarkdownMode]? = nil
 
     func visibleFrame(on screens: [CGRect]) -> CGRect {
         let fallback = CGRect(x: 0, y: 0, width: 1080, height: 720)
