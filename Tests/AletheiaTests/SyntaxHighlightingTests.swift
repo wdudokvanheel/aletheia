@@ -36,6 +36,7 @@ final class SyntaxHighlightingTests: XCTestCase {
         let document = EditorDocument(file: try TextFile.read(url))
         document.scroll.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         document.editor.frame = NSRect(x: 0, y: 0, width: 780, height: 600)
+        document.setHighlightingActive(true)
         return document
     }
 
@@ -112,6 +113,41 @@ final class SyntaxHighlightingTests: XCTestCase {
         XCTAssertFalse(doc.isDirty)
         XCTAssertFalse(doc.editor.undoManager!.canUndo)
         XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: 0, effectiveRange: nil) as? NSColor, SyntaxStyle.comment.color(AppSettings.shared.selectedScheme.syntaxPalette))
+    }
+
+    @MainActor func testRestoredTabsHighlightOnFirstSelection() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let urls = ["first.ts", "second.js", "third.json"].map { root.appendingPathComponent($0) }
+        let sources = ["const first = 1;", "const second = 2;", "{\"third\": 3}"]
+        for (url, source) in zip(urls, sources) { try source.write(to: url, atomically: true, encoding: .utf8) }
+        let controller = EditorWindow()
+        defer { controller.window?.performClose(nil) }
+        let failures: [String] = await withCheckedContinuation { continuation in
+            controller.restore(WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                             rootPath: root.path, filePaths: urls.map(\.path), selectedPath: urls[0].path)) {
+                continuation.resume(returning: $0)
+            }
+        }
+        XCTAssertTrue(failures.isEmpty)
+        // Let launch-time highlighting settle before first visiting the other tabs.
+        try await Task.sleep(for: .milliseconds(400))
+        for (url, source) in zip(urls, sources) {
+            controller.openFile(url) // Select the already-restored document.
+            let editor = try XCTUnwrap(controller.window?.firstResponder as? NSTextView)
+            XCTAssertEqual(editor.string, source)
+            let document = try XCTUnwrap(editor.delegate as? EditorDocument)
+            try await settled(document)
+            let run = try XCTUnwrap(SyntaxHighlighting.runs(in: source,
+                languageID: try XCTUnwrap(SyntaxHighlighting.languageID(for: url))).first)
+            XCTAssertEqual(editor.layoutManager?.temporaryAttribute(.foregroundColor,
+                atCharacterIndex: run.range.location, effectiveRange: nil) as? NSColor,
+                run.style.color(AppSettings.shared.selectedScheme.syntaxPalette), url.lastPathComponent)
+            XCTAssertFalse(document.isDirty)
+            XCTAssertFalse(editor.undoManager!.canUndo)
+        }
     }
 
     func testHugeFilesStayPlain() {

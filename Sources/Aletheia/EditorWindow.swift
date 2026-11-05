@@ -267,7 +267,6 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         modeControl.isHidden = selected?.isMarkdown != true
         guard let document = selected else { preview?.show(nil); return }
         let mode = document.isMarkdown ? document.markdownMode : .editor
-        document.setHighlightingActive(mode != .preview)
         modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
         if mode != .editor, preview == nil {
             preview = MarkdownPreview()
@@ -301,6 +300,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             markdownSplit.addArrangedSubview(preview!.webView)
             markdownSplit.applyPreferredSize()
         }
+        document.setHighlightingActive(mode != .preview)
         window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
     }
 

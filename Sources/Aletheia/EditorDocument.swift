@@ -15,7 +15,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     private var highlightingTask: Task<Void, Never>?
     private var highlightGeneration = 0
     private var syntaxRuns: [SyntaxRun] = []
-    private var highlightingActive = true
+    private var highlightingActive = false
     private var styledRange: NSRange?
     private var renderingSyntax = false
     private(set) var highlightedGeneration = -1
@@ -124,7 +124,6 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(highlightViewportChanged(_:)),
                                                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
-        scheduleHighlighting()
     }
 
     func applyTheme() {
