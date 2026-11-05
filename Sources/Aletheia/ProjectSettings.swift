@@ -46,37 +46,47 @@ final class ProjectSettings {
     }
 }
 
-/// Embedded in the existing Settings window; each assignment is an explicit folder choice.
+/// Native project preferences; each assignment is an explicit folder choice.
 @MainActor
 final class ProjectSettingsView: NSStackView {
+    enum Section { case projects, shortcuts }
+    private let section: Section
     private let settings: ProjectSettings
+    private var clearButtons: [NSButton] = []
     private let baseLabel = NSTextField(labelWithString: "")
     private var labels: [NSTextField] = []
     private var refreshGeneration = UUID()
 
-    init(settings: ProjectSettings) {
+    init(settings: ProjectSettings, section: Section) {
         self.settings = settings
+        self.section = section
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
-        spacing = 8
-        let heading = NSTextField(labelWithString: "Projects")
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
-        addArrangedSubview(heading)
-        let baseButton = NSButton(title: "Base Folder…", target: self, action: #selector(chooseBase))
-        addRow(label: baseLabel, controls: [baseButton])
-        let note = NSTextField(labelWithString: "Number keys open these projects when the project search is empty.")
-        note.font = .systemFont(ofSize: 11)
-        note.textColor = .secondaryLabelColor
-        addArrangedSubview(note)
-        for index in 0..<10 {
-            let label = NSTextField(labelWithString: "")
-            labels.append(label)
-            let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseProject(_:)))
-            choose.tag = index
-            let clear = NSButton(title: "Clear", target: self, action: #selector(clearProject(_:)))
-            clear.tag = index
-            addRow(label: label, controls: [choose, clear])
+        spacing = 12
+        if section == .projects {
+            addArrangedSubview(SettingsPage.heading("Project discovery"))
+            addArrangedSubview(SettingsPage.note("Choose the folder whose projects appear in the project selector."))
+            let baseButton = NSButton(title: "Choose Folder…", target: self, action: #selector(chooseBase))
+            addRow(label: baseLabel, controls: [baseButton])
+            addArrangedSubview(SettingsPage.note("Open the project selector with Control-S, then S. Projects from your tmux sessions also appear there."))
+        } else {
+            addArrangedSubview(SettingsPage.heading("Numbered projects"))
+            addArrangedSubview(SettingsPage.note("Press Control-S, then S to open the project selector. With its search empty, press a number to open the assigned project."))
+            for index in 0..<10 {
+                let label = NSTextField(labelWithString: "")
+                labels.append(label)
+                let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseProject(_:)))
+                choose.tag = index
+                let clear = NSButton(title: "Clear", target: self, action: #selector(clearProject(_:)))
+                clear.tag = index
+                clearButtons.append(clear)
+                let badge = NSTextField(labelWithString: ProjectSettings.digits[index])
+                badge.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
+                badge.alignment = .center
+                badge.widthAnchor.constraint(equalToConstant: 24).isActive = true
+                addRow(label: label, controls: [choose, clear], prefix: badge)
+            }
         }
         updateLabels()
     }
@@ -85,6 +95,7 @@ final class ProjectSettingsView: NSStackView {
 
     func refresh() {
         updateLabels()
+        guard section == .shortcuts else { return }
         refreshGeneration = UUID()
         let request = refreshGeneration
         let base = settings.baseDirectory
@@ -96,10 +107,12 @@ final class ProjectSettingsView: NSStackView {
         }
     }
 
-    private func addRow(label: NSTextField, controls: [NSView]) {
+    private func addRow(label: NSTextField, controls: [NSView], prefix: NSView? = nil) {
         label.lineBreakMode = .byTruncatingMiddle
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [label] + controls)
+        let row = NSStackView(views: (prefix.map { [$0] } ?? []) + [label] + controls)
+        row.alignment = .centerY
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         row.spacing = 8
         addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
@@ -110,7 +123,9 @@ final class ProjectSettingsView: NSStackView {
         baseLabel.toolTip = baseLabel.stringValue
         for (index, label) in labels.enumerated() {
             let project = settings.assignments[index]
-            label.stringValue = "\(ProjectSettings.digits[index])  " + (project.map { "\($0.name) — \($0.directory.path)" } ?? "Unassigned")
+            label.stringValue = project.map { "\($0.name) — \($0.directory.path)" } ?? "Unassigned"
+            label.textColor = project == nil ? .tertiaryLabelColor : .labelColor
+            clearButtons[index].isEnabled = project != nil
             label.toolTip = project?.directory.path
         }
     }

@@ -115,9 +115,7 @@ final class AppSettings: NSObject {
 
     private var settingsWindow: NSWindow?
     private var schemePopup: NSPopUpButton?
-    private var heading: NSTextField?
-    private var detail: NSTextField?
-    private var projectSettingsView: ProjectSettingsView?
+    private var projectSettingsViews: [ProjectSettingsView] = []
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -138,41 +136,48 @@ final class AppSettings: NSObject {
 
     func showWindow() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 600),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "Settings"
-            window.isReleasedWhenClosed = false
-            let label = NSTextField(labelWithString: "Color scheme")
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            let tabs = NSTabViewController()
+            tabs.tabStyle = .toolbar
+            tabs.transitionOptions = []
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
             popup.addItems(withTitles: Self.schemes.map(\.name))
             popup.target = self
             popup.action = #selector(schemeChanged(_:))
-            let note = NSTextField(labelWithString: "Applies to all windows. System follows macOS appearance.")
-            note.font = .systemFont(ofSize: 11)
-            let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults))
-            projectSettingsView = projects
-            let stack = NSStackView(views: [label, popup, note, projects])
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 12
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            window.contentView!.addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
-                stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
-                stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
-                popup.widthAnchor.constraint(equalTo: stack.widthAnchor),
-                projects.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            let appearance = NSStackView(views: [
+                SettingsPage.heading("Color scheme"), popup,
+                SettingsPage.note("Applies immediately to all windows, including the file tree, source editor, and Markdown preview."),
+                SettingsPage.note("Choose System to follow the appearance set in macOS.")
             ])
+            appearance.orientation = .vertical
+            appearance.alignment = .leading
+            appearance.spacing = 16
+            popup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .projects)
+            let shortcuts = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .shortcuts)
+            projectSettingsViews = [projects, shortcuts]
+            for (title, symbol, content) in [
+                ("Appearance", "paintpalette", appearance),
+                ("Projects", "folder", projects),
+                ("Shortcuts", "keyboard", shortcuts)
+            ] {
+                let controller = SettingsPage(title: title, content: content)
+                let item = NSTabViewItem(viewController: controller)
+                item.label = title
+                item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+                tabs.addTabViewItem(item)
+            }
+            let window = NSWindow(contentViewController: tabs)
+            window.setContentSize(NSSize(width: 700, height: 590))
+            window.styleMask = [.titled, .closable]
+            window.title = "Settings"
+            window.toolbarStyle = .preference
+            window.isReleasedWhenClosed = false
             settingsWindow = window
             schemePopup = popup
-            heading = label
-            detail = note
             window.center()
         }
         updateWindow()
-        projectSettingsView?.refresh()
+        projectSettingsViews.forEach { $0.refresh() }
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -184,9 +189,6 @@ final class AppSettings: NSObject {
 
     private func updateWindow() {
         settingsWindow?.appearance = palette.appearance
-        settingsWindow?.backgroundColor = palette.background
-        heading?.textColor = palette.foreground
-        detail?.textColor = palette.muted
         schemePopup?.selectItem(at: Self.schemes.firstIndex { $0.id == selectedSchemeID } ?? 0)
     }
 }
