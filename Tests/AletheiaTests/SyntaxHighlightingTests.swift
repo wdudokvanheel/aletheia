@@ -60,7 +60,7 @@ final class SyntaxHighlightingTests: XCTestCase {
         defer { AppSettings.shared.selectScheme(id: originalScheme) }
         AppSettings.shared.selectScheme(id: "dracula")
         doc.applyTheme()
-        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: keyword.location, effectiveRange: nil) as? NSColor, SyntaxStyle.keyword.color(AppSettings.shared.palette))
+        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: keyword.location, effectiveRange: nil) as? NSColor, SyntaxStyle.keyword.color(AppSettings.shared.selectedScheme.syntaxPalette))
         XCTAssertEqual(doc.editor.selectedRange(), NSRange(location: 0, length: 0))
         XCTAssertEqual(doc.editor.string, original)
         let generation = doc.highlightedGeneration
@@ -88,12 +88,12 @@ final class SyntaxHighlightingTests: XCTestCase {
         doc.setHighlightingActive(true)
         try await settled(doc, after: initial)
         let index = (doc.editor.string as NSString).range(of: "const").location
-        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: index, effectiveRange: nil) as? NSColor, SyntaxStyle.keyword.color(AppSettings.shared.palette))
+        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: index, effectiveRange: nil) as? NSColor, SyntaxStyle.keyword.color(AppSettings.shared.selectedScheme.syntaxPalette))
         let last = doc.highlightedGeneration
         doc.editor.string = "const obsolete = 1;"
         doc.editor.string = "// latest 😀"
         try await settled(doc, after: last)
-        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: 0, effectiveRange: nil) as? NSColor, SyntaxStyle.comment.color(AppSettings.shared.palette))
+        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: 0, effectiveRange: nil) as? NSColor, SyntaxStyle.comment.color(AppSettings.shared.selectedScheme.syntaxPalette))
     }
 
     @MainActor func testScrollAndReloadRefreshVisibleColors() async throws {
@@ -111,7 +111,7 @@ final class SyntaxHighlightingTests: XCTestCase {
         try await settled(doc, after: previous)
         XCTAssertFalse(doc.isDirty)
         XCTAssertFalse(doc.editor.undoManager!.canUndo)
-        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: 0, effectiveRange: nil) as? NSColor, SyntaxStyle.comment.color(AppSettings.shared.palette))
+        XCTAssertEqual(doc.editor.layoutManager?.temporaryAttribute(.foregroundColor, atCharacterIndex: 0, effectiveRange: nil) as? NSColor, SyntaxStyle.comment.color(AppSettings.shared.selectedScheme.syntaxPalette))
     }
 
     func testHugeFilesStayPlain() {

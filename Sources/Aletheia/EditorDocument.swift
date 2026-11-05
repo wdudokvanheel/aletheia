@@ -72,7 +72,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         guard force || styledRange != range else { return }
         styledRange = range
         layout.removeTemporaryAttribute(.foregroundColor, forCharacterRange: NSRange(location: 0, length: editor.string.utf16.count))
-        let palette = AppSettings.shared.palette
+        let palette = AppSettings.shared.selectedScheme.syntaxPalette
         // Runs are ordered and non-overlapping. Find the viewport in logarithmic time.
         var lower = 0
         var upper = syntaxRuns.count

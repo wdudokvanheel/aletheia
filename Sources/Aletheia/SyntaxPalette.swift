@@ -1,0 +1,80 @@
+import AppKit
+
+/// Static syntax roles, independent of UI accents and Git-status colors.
+/// Palette revisions, role adaptations and licenses: docs/theme-provenance.md.
+@MainActor
+struct SyntaxPalette {
+    let comment: NSColor
+    let string: NSColor
+    let keyword: NSColor
+    let number: NSColor
+    let name: NSColor
+    let property: NSColor
+    let markup: NSColor
+    let invalid: NSColor
+
+    private init(_ comment: UInt32, _ string: UInt32, _ keyword: UInt32, _ number: UInt32,
+                 _ name: UInt32, _ property: UInt32, _ markup: UInt32, _ invalid: UInt32) {
+        func color(_ hex: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
+                    green: CGFloat((hex >> 8) & 255) / 255,
+                    blue: CGFloat(hex & 255) / 255, alpha: 1)
+        }
+        self.comment = color(comment)
+        self.string = color(string)
+        self.keyword = color(keyword)
+        self.number = color(number)
+        self.name = color(name)
+        self.property = color(property)
+        self.markup = color(markup)
+        self.invalid = color(invalid)
+    }
+
+    private init() {
+        comment = .secondaryLabelColor
+        string = .systemGreen
+        keyword = .systemPurple
+        number = .systemOrange
+        name = .systemBlue
+        property = .systemTeal
+        markup = .systemBlue
+        invalid = .systemRed
+    }
+
+    static let system = SyntaxPalette()
+
+    // Columns: comment, string, keyword, number, name, property, markup, invalid.
+    static let bundled: [String: SyntaxPalette] = [
+        "catppuccin-latte": .init(0x8c8fa1, 0x40a02b, 0x8839ef, 0xfe640b, 0x1e66f5, 0x7287fd, 0xea76cb, 0xd20f39),
+        "catppuccin-frappe": .init(0x838ba7, 0xa6d189, 0xca9ee6, 0xef9f76, 0x8caaee, 0xbabbf1, 0xf4b8e4, 0xe78284),
+        "catppuccin-macchiato": .init(0x8087a2, 0xa6da95, 0xc6a0f6, 0xf5a97f, 0x8aadf4, 0xb7bdf8, 0xf5bde6, 0xed8796),
+        "catppuccin-mocha": .init(0x7f849c, 0xa6e3a1, 0xcba6f7, 0xfab387, 0x89b4fa, 0xb4befe, 0xf5c2e7, 0xf38ba8),
+        "dracula": .init(0x6272a4, 0xf1fa8c, 0xff79c6, 0xbd93f9, 0x50fa7b, 0x8be9fd, 0xbd93f9, 0xff5555),
+        "nord": .init(0x4c566a, 0xa3be8c, 0x81a1c1, 0xb48ead, 0x88c0d0, 0x8fbcbb, 0x88c0d0, 0xbf616a),
+        "tokyo-night-night": .init(0x565f89, 0x9ece6a, 0xbb9af7, 0xff9e64, 0x7aa2f7, 0x7dcfff, 0x7aa2f7, 0xf7768e),
+        "tokyo-night-storm": .init(0x565f89, 0x9ece6a, 0xbb9af7, 0xff9e64, 0x7aa2f7, 0x7dcfff, 0x7aa2f7, 0xf7768e),
+        "tokyo-night-moon": .init(0x636da6, 0xc3e88d, 0xc099ff, 0xff966c, 0x82aaff, 0x86e1fc, 0x82aaff, 0xff757f),
+        "gruvbox-dark": .init(0x928374, 0xb8bb26, 0xfb4934, 0xd3869b, 0xb8bb26, 0x83a598, 0xfabd2f, 0xfb4934),
+        "gruvbox-dark-hard": .init(0x928374, 0xb8bb26, 0xfb4934, 0xd3869b, 0xb8bb26, 0x83a598, 0xfabd2f, 0xfb4934),
+        "gruvbox-dark-soft": .init(0x928374, 0xb8bb26, 0xfb4934, 0xd3869b, 0xb8bb26, 0x83a598, 0xfabd2f, 0xfb4934),
+        "gruvbox-light": .init(0x928374, 0x79740e, 0x9d0006, 0x8f3f71, 0x79740e, 0x076678, 0xb57614, 0x9d0006),
+        "gruvbox-light-hard": .init(0x928374, 0x79740e, 0x9d0006, 0x8f3f71, 0x79740e, 0x076678, 0xb57614, 0x9d0006),
+        "gruvbox-light-soft": .init(0x928374, 0x79740e, 0x9d0006, 0x8f3f71, 0x79740e, 0x076678, 0xb57614, 0x9d0006),
+        "rose-pine-main": .init(0x6e6a86, 0xf6c177, 0x31748f, 0xf6c177, 0xebbcba, 0x9ccfd8, 0xc4a7e7, 0xeb6f92),
+        "rose-pine-moon": .init(0x6e6a86, 0xf6c177, 0x3e8fb0, 0xf6c177, 0xea9a97, 0x9ccfd8, 0xc4a7e7, 0xeb6f92),
+        "rose-pine-dawn": .init(0x9893a5, 0xea9d34, 0x286983, 0xea9d34, 0xd7827e, 0x56949f, 0x907aa9, 0xb4637a),
+        "solarized-dark": .init(0x586e75, 0x2aa198, 0x859900, 0xd33682, 0x268bd2, 0x839496, 0xcb4b16, 0xdc322f),
+        "solarized-light": .init(0x93a1a1, 0x2aa198, 0x859900, 0xd33682, 0x268bd2, 0x657b83, 0xcb4b16, 0xdc322f),
+        "one-dark": .init(0x5c6370, 0x98c379, 0xc678dd, 0xd19a66, 0x61afef, 0xe86671, 0x61afef, 0xe86671),
+        "one-darker": .init(0x535965, 0x8ebd6b, 0xbf68d9, 0xcc9057, 0x4fa6ed, 0xe55561, 0x4fa6ed, 0xe55561),
+        "one-cool": .init(0x546178, 0x97ca72, 0xca72e4, 0xd99a5e, 0x5ab0f6, 0xef5f6b, 0x5ab0f6, 0xef5f6b),
+        "one-deep": .init(0x455574, 0x8bcd5b, 0xc75ae8, 0xdd9046, 0x41a7fc, 0xf65866, 0x41a7fc, 0xf65866),
+        "one-warm": .init(0x646568, 0x99bc80, 0xc27fd7, 0xc99a6e, 0x68aee8, 0xe16d77, 0x68aee8, 0xe16d77),
+        "one-warmer": .init(0x5a5b5e, 0x8fb573, 0xbb70d2, 0xc49060, 0x57a5e5, 0xde5d68, 0x57a5e5, 0xde5d68),
+        "one-light": .init(0xa0a1a7, 0x50a14f, 0xa626a4, 0xc18401, 0x4078f2, 0xe45649, 0x4078f2, 0xe45649),
+    ]
+}
+
+extension AppColorScheme {
+    var syntaxPalette: SyntaxPalette { SyntaxPalette.bundled[id] ?? .system }
+}

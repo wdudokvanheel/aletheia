@@ -7,7 +7,7 @@ struct SyntaxRun: Sendable {
     let style: SyntaxStyle
 }
 
-enum SyntaxStyle: Sendable {
+enum SyntaxStyle: Sendable, CaseIterable {
     case comment, string, keyword, number, name, property, markup, invalid
 
     init?(_ scope: Scope) {
@@ -22,15 +22,16 @@ enum SyntaxStyle: Sendable {
         else { return nil }
     }
 
-    @MainActor func color(_ palette: EditorPalette) -> NSColor {
+    @MainActor func color(_ palette: SyntaxPalette) -> NSColor {
         switch self {
-        case .comment: palette.muted
-        case .string: palette.added
-        case .keyword: palette.conflict
-        case .number: palette.modified
-        case .name, .markup: palette.accent
-        case .property: palette.staged
-        case .invalid: palette.deleted
+        case .comment: palette.comment
+        case .string: palette.string
+        case .keyword: palette.keyword
+        case .number: palette.number
+        case .name: palette.name
+        case .markup: palette.markup
+        case .property: palette.property
+        case .invalid: palette.invalid
         }
     }
 }

@@ -1,6 +1,6 @@
 import AppKit
 
-/// UI colors only; source syntax highlighting is deliberately independent.
+/// UI and Git colors. SyntaxPalette supplies separate roles for each color scheme.
 @MainActor
 struct EditorPalette {
     let background: NSColor
