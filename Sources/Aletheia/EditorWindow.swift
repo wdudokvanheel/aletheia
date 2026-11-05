@@ -234,6 +234,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func select(_ document: EditorDocument?) {
+        selected?.setHighlightingActive(false)
         selected?.scroll.removeFromSuperview()
         selected = document
         layoutEditor()
@@ -262,6 +263,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         modeControl.isHidden = selected?.isMarkdown != true
         guard let document = selected else { preview?.show(nil); return }
         let mode = document.isMarkdown ? document.markdownMode : .editor
+        document.setHighlightingActive(mode != .preview)
         modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
         if mode != .editor, preview == nil {
             preview = MarkdownPreview()

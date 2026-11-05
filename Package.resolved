@@ -1,0 +1,15 @@
+{
+  "originHash" : "6594b306ac7556ef7cf6ea79bac198e50aa935efcd54ff93d87c966ad35af183",
+  "pins" : [
+    {
+      "identity" : "swifthighlight",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CreatureSurvive/SwiftHighlight.git",
+      "state" : {
+        "revision" : "6e405acc136ab9ee0f6584d28d73cb62a30ee246",
+        "version" : "1.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}
