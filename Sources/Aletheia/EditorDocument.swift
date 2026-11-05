@@ -45,6 +45,16 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         scroll.documentView = editor
     }
 
+    func applyTheme() {
+        let palette = AppSettings.shared.palette
+        editor.backgroundColor = palette.background
+        editor.textColor = palette.foreground
+        editor.insertionPointColor = palette.foreground
+        editor.selectedTextAttributes = [.backgroundColor: palette.accent.withAlphaComponent(0.35),
+                                         .foregroundColor: palette.foreground]
+        scroll.backgroundColor = palette.background
+    }
+
     func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,

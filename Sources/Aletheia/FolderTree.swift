@@ -30,6 +30,10 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     let scroll = NSScrollView()
     private let outline = FileOutlineView()
     private var root: FolderNode?
+    private var gitStatus = GitStatusSnapshot()
+    private var gitRefreshTask: Task<Void, Never>?
+    private var gitRefreshRunning = false
+    private var gitRefreshPending = false
     var onOpen: ((URL) -> Void)?
     var onError: ((Error) -> Void)?
 
@@ -49,12 +53,65 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        applyTheme()
     }
 
     func setRoot(_ url: URL) {
         root = FolderNode(url: url, isDirectory: true)
+        gitStatus = GitStatusSnapshot()
         outline.reloadData()
         if let root { load(root) }
+        refreshGitStatus()
+    }
+
+    func applyTheme() {
+        let palette = AppSettings.shared.palette
+        scroll.backgroundColor = palette.surface
+        outline.backgroundColor = palette.surface
+        refreshVisibleCells()
+    }
+
+    /// Debounce bursts of expansions/saves, with at most one Git process chain in flight.
+    func refreshGitStatus() {
+        gitRefreshTask?.cancel()
+        gitRefreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) }
+            catch { return }
+            self?.startGitRefresh()
+        }
+    }
+
+    private func startGitRefresh() {
+        guard let root else { return }
+        guard !gitRefreshRunning else {
+            gitRefreshPending = true
+            return
+        }
+        gitRefreshRunning = true
+        let url = root.url
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let snapshot = GitStatusSnapshot.read(root: url)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.gitRefreshRunning = false
+                if self.root === root {
+                    self.gitStatus = snapshot
+                    self.refreshVisibleCells()
+                }
+                if self.gitRefreshPending {
+                    self.gitRefreshPending = false
+                    self.refreshGitStatus()
+                }
+            }
+        }
+    }
+
+    private func refreshVisibleCells() {
+        let rows = outline.rows(in: outline.visibleRect)
+        guard rows.location != NSNotFound, rows.length > 0 else { return }
+        for row in rows.location..<NSMaxRange(rows) {
+            if let node = outline.item(atRow: row) as? FolderNode { updateIcon(node) }
+        }
     }
 
     private func load(_ node: FolderNode) {
@@ -139,14 +196,48 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         }
         cell.textField?.stringValue = node.url.lastPathComponent
         configureIcon(cell, node: node)
-        cell.toolTip = node.url.path
         return cell
     }
 
     private func configureIcon(_ cell: NSTableCellView, node: FolderNode) {
-        let symbol = node.isDirectory ? (node.wantsExpanded ? "folder.fill" : "folder") : "doc"
+        let symbol = node.isDirectory ? (node.wantsExpanded ? "folder.fill" : "folder") : Self.fileSymbol(for: node.url)
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        cell.imageView?.contentTintColor = node.isDirectory ? .controlAccentColor : .secondaryLabelColor
+            ?? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
+        let palette = AppSettings.shared.palette
+        let status = gitStatus.status(for: node.url)
+        // Conflict and removal win, then unstaged edits, additions, staged-only, untracked.
+        let color: NSColor
+        if status.contains(.conflict) { color = palette.conflict }
+        else if status.contains(.deleted) { color = palette.deleted }
+        else if status.contains(.unstaged) { color = palette.modified }
+        else if status.contains(.added) { color = palette.added }
+        else if status.contains(.staged) { color = palette.staged }
+        else if status.contains(.untracked) { color = palette.muted }
+        else { color = palette.foreground }
+        cell.textField?.textColor = node.url.lastPathComponent.hasPrefix(".")
+            ? color.blended(withFraction: 0.16, of: .white) ?? color : color
+        cell.imageView?.contentTintColor = status.isEmpty ? (node.isDirectory ? palette.accent : palette.muted) : color
+        cell.toolTip = node.url.path + (status.isEmpty ? "" : "\n" + status.description)
+        if node.isDirectory && status.contains(.deleted) {
+            cell.toolTip! += "\nIncludes deleted paths; files absent from disk are not listed."
+        }
+    }
+
+    static func fileSymbol(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "swift": return "swift"
+        case "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "rb", "go", "rs", "c", "h", "cpp", "hpp", "java", "kt", "sh", "zsh", "bash": return "chevron.left.forwardslash.chevron.right"
+        case "json", "jsonc", "yaml", "yml", "toml", "xml", "plist", "ini", "conf": return "slider.horizontal.3"
+        case "md", "markdown", "txt", "rtf": return "doc.text"
+        case "html", "htm", "css", "scss", "sass", "less": return "globe"
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "ico", "tiff": return "photo"
+        case "pdf": return "doc.richtext"
+        case "zip", "gz", "tar", "bz2", "xz", "7z": return "doc.zipper"
+        case "mp3", "wav", "m4a", "flac", "aac": return "music.note"
+        case "mp4", "mov", "mkv", "webm": return "film"
+        case "ttf", "otf", "woff", "woff2": return "textformat"
+        default: return "doc"
+        }
     }
 
     private func updateIcon(_ node: FolderNode) {
@@ -158,6 +249,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
         guard let node = item as? FolderNode else { return true }
         node.wantsExpanded = true
+        refreshGitStatus()
         updateIcon(node)
         load(node)
         return true

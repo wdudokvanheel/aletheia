@@ -1,0 +1,187 @@
+import AppKit
+
+/// UI colors only; source syntax highlighting is deliberately independent.
+@MainActor
+struct EditorPalette {
+    let background: NSColor
+    let foreground: NSColor
+    let surface: NSColor
+    let muted: NSColor
+    let accent: NSColor
+    let added: NSColor
+    let modified: NSColor
+    let deleted: NSColor
+    let staged: NSColor
+    let conflict: NSColor
+    /// nil follows the system; bundled palettes explicitly choose light or dark controls.
+    let isDark: Bool?
+
+    static let system = EditorPalette()
+
+    private init() {
+        background = .textBackgroundColor
+        foreground = .textColor
+        surface = .windowBackgroundColor
+        muted = .secondaryLabelColor
+        accent = .controlAccentColor
+        added = .systemGreen
+        modified = .systemOrange
+        deleted = .systemRed
+        staged = .systemTeal
+        conflict = .systemPurple
+        isDark = nil
+    }
+
+    fileprivate init(isDark: Bool, _ background: UInt32, _ foreground: UInt32,
+                     _ surface: UInt32, _ muted: UInt32, _ accent: UInt32,
+                     _ added: UInt32, _ modified: UInt32, _ deleted: UInt32,
+                     _ staged: UInt32, _ conflict: UInt32) {
+        func color(_ hex: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
+                    green: CGFloat((hex >> 8) & 255) / 255,
+                    blue: CGFloat(hex & 255) / 255, alpha: 1)
+        }
+        self.background = color(background)
+        self.foreground = color(foreground)
+        self.surface = color(surface)
+        self.muted = color(muted)
+        self.accent = color(accent)
+        self.added = color(added)
+        self.modified = color(modified)
+        self.deleted = color(deleted)
+        self.staged = color(staged)
+        self.conflict = color(conflict)
+        self.isDark = isDark
+    }
+
+    var appearance: NSAppearance? {
+        isDark.map { NSAppearance(named: $0 ? .darkAqua : .aqua)! }
+    }
+}
+
+@MainActor
+struct AppColorScheme {
+    let id: String
+    let name: String
+    let palette: EditorPalette
+
+    // Static sRGB adaptations; exact upstream revisions, mapping and licenses:
+    // docs/theme-provenance.md and docs/theme-licenses.md.
+    static let all: [AppColorScheme] = [
+        .init(id: "system", name: "System", palette: .system),
+        .init(id: "catppuccin-latte", name: "Catppuccin Latte", palette: .init(isDark: false, 0xeff1f5, 0x4c4f69, 0xe6e9ef, 0x6c6f85, 0x1e66f5, 0x40a02b, 0xdf8e1d, 0xd20f39, 0x179299, 0x8839ef)),
+        .init(id: "catppuccin-frappe", name: "Catppuccin Frappé", palette: .init(isDark: true, 0x303446, 0xc6d0f5, 0x292c3c, 0xa5adce, 0x8caaee, 0xa6d189, 0xe5c890, 0xe78284, 0x81c8be, 0xca9ee6)),
+        .init(id: "catppuccin-macchiato", name: "Catppuccin Macchiato", palette: .init(isDark: true, 0x24273a, 0xcad3f5, 0x1e2030, 0xa5adcb, 0x8aadf4, 0xa6da95, 0xeed49f, 0xed8796, 0x8bd5ca, 0xc6a0f6)),
+        .init(id: "catppuccin-mocha", name: "Catppuccin Mocha", palette: .init(isDark: true, 0x1e1e2e, 0xcdd6f4, 0x181825, 0xa6adc8, 0x89b4fa, 0xa6e3a1, 0xf9e2af, 0xf38ba8, 0x94e2d5, 0xcba6f7)),
+        .init(id: "dracula", name: "Dracula", palette: .init(isDark: true, 0x282a36, 0xf8f8f2, 0x44475a, 0x6272a4, 0xbd93f9, 0x50fa7b, 0xf1fa8c, 0xff5555, 0x8be9fd, 0xffb86c)),
+        .init(id: "nord", name: "Nord", palette: .init(isDark: true, 0x2e3440, 0xd8dee9, 0x3b4252, 0x81a1c1, 0x88c0d0, 0xa3be8c, 0xebcb8b, 0xbf616a, 0x8fbcbb, 0xb48ead)),
+        .init(id: "tokyo-night-night", name: "Tokyo Night", palette: .init(isDark: true, 0x1a1b26, 0xc0caf5, 0x16161e, 0xa9b1d6, 0x7aa2f7, 0x9ece6a, 0xe0af68, 0xf7768e, 0x7dcfff, 0xbb9af7)),
+        .init(id: "tokyo-night-storm", name: "Tokyo Night Storm", palette: .init(isDark: true, 0x24283b, 0xc0caf5, 0x1f2335, 0xa9b1d6, 0x7aa2f7, 0x9ece6a, 0xe0af68, 0xf7768e, 0x7dcfff, 0xbb9af7)),
+        .init(id: "tokyo-night-moon", name: "Tokyo Night Moon", palette: .init(isDark: true, 0x222436, 0xc8d3f5, 0x1e2030, 0x828bb8, 0x82aaff, 0xc3e88d, 0xffc777, 0xff757f, 0x86e1fc, 0xc099ff)),
+        .init(id: "gruvbox-dark", name: "Gruvbox Dark", palette: .init(isDark: true, 0x282828, 0xebdbb2, 0x3c3836, 0xa89984, 0x83a598, 0xb8bb26, 0xfabd2f, 0xfb4934, 0x8ec07c, 0xd3869b)),
+        .init(id: "gruvbox-dark-hard", name: "Gruvbox Dark Hard", palette: .init(isDark: true, 0x1d2021, 0xebdbb2, 0x3c3836, 0xa89984, 0x83a598, 0xb8bb26, 0xfabd2f, 0xfb4934, 0x8ec07c, 0xd3869b)),
+        .init(id: "gruvbox-dark-soft", name: "Gruvbox Dark Soft", palette: .init(isDark: true, 0x32302f, 0xebdbb2, 0x3c3836, 0xa89984, 0x83a598, 0xb8bb26, 0xfabd2f, 0xfb4934, 0x8ec07c, 0xd3869b)),
+        .init(id: "gruvbox-light", name: "Gruvbox Light", palette: .init(isDark: false, 0xfbf1c7, 0x3c3836, 0xebdbb2, 0x7c6f64, 0x076678, 0x79740e, 0xb57614, 0x9d0006, 0x427b58, 0x8f3f71)),
+        .init(id: "gruvbox-light-hard", name: "Gruvbox Light Hard", palette: .init(isDark: false, 0xf9f5d7, 0x3c3836, 0xebdbb2, 0x7c6f64, 0x076678, 0x79740e, 0xb57614, 0x9d0006, 0x427b58, 0x8f3f71)),
+        .init(id: "gruvbox-light-soft", name: "Gruvbox Light Soft", palette: .init(isDark: false, 0xf2e5bc, 0x3c3836, 0xebdbb2, 0x7c6f64, 0x076678, 0x79740e, 0xb57614, 0x9d0006, 0x427b58, 0x8f3f71)),
+        .init(id: "rose-pine-main", name: "Rosé Pine", palette: .init(isDark: true, 0x191724, 0xe0def4, 0x1f1d2e, 0x908caa, 0xc4a7e7, 0x95b1ac, 0xf6c177, 0xeb6f92, 0x9ccfd8, 0xebbcba)),
+        .init(id: "rose-pine-moon", name: "Rosé Pine Moon", palette: .init(isDark: true, 0x232136, 0xe0def4, 0x2a273f, 0x908caa, 0xc4a7e7, 0x95b1ac, 0xf6c177, 0xeb6f92, 0x9ccfd8, 0xea9a97)),
+        .init(id: "rose-pine-dawn", name: "Rosé Pine Dawn", palette: .init(isDark: false, 0xfaf4ed, 0x464261, 0xfffaf3, 0x797593, 0x907aa9, 0x6d8f89, 0xea9d34, 0xb4637a, 0x56949f, 0xd7827e)),
+        .init(id: "solarized-dark", name: "Solarized Dark", palette: .init(isDark: true, 0x002b36, 0x839496, 0x073642, 0x586e75, 0x268bd2, 0x859900, 0xb58900, 0xdc322f, 0x2aa198, 0xd33682)),
+        .init(id: "solarized-light", name: "Solarized Light", palette: .init(isDark: false, 0xfdf6e3, 0x657b83, 0xeee8d5, 0x93a1a1, 0x268bd2, 0x859900, 0xb58900, 0xdc322f, 0x2aa198, 0xd33682)),
+        .init(id: "one-dark", name: "One Dark", palette: .init(isDark: true, 0x282c34, 0xabb2bf, 0x31353f, 0x848b98, 0x61afef, 0x98c379, 0xe5c07b, 0xe86671, 0x56b6c2, 0xc678dd)),
+        .init(id: "one-darker", name: "One Darker", palette: .init(isDark: true, 0x1f2329, 0xa0a8b7, 0x282c34, 0x7a818e, 0x4fa6ed, 0x8ebd6b, 0xe2b86b, 0xe55561, 0x48b0bd, 0xbf68d9)),
+        .init(id: "one-cool", name: "One Cool", palette: .init(isDark: true, 0x242b38, 0xa5b0c5, 0x2d3343, 0x7d899f, 0x5ab0f6, 0x97ca72, 0xebc275, 0xef5f6b, 0x4dbdcb, 0xca72e4)),
+        .init(id: "one-deep", name: "One Deep", palette: .init(isDark: true, 0x1a212e, 0x93a4c3, 0x21283b, 0x6c7d9c, 0x41a7fc, 0x8bcd5b, 0xefbd5d, 0xf65866, 0x34bfd0, 0xc75ae8)),
+        .init(id: "one-warm", name: "One Warm", palette: .init(isDark: true, 0x2c2d30, 0xb1b4b9, 0x35373b, 0x8b8d91, 0x68aee8, 0x99bc80, 0xdfbe81, 0xe16d77, 0x5fafb9, 0xc27fd7)),
+        .init(id: "one-warmer", name: "One Warmer", palette: .init(isDark: true, 0x232326, 0xa7aab0, 0x2c2d31, 0x818387, 0x57a5e5, 0x8fb573, 0xdbb671, 0xde5d68, 0x51a8b3, 0xbb70d2)),
+        .init(id: "one-light", name: "One Light", palette: .init(isDark: false, 0xfafafa, 0x383a42, 0xf0f0f0, 0x818387, 0x4078f2, 0x50a14f, 0x986801, 0xe45649, 0x0184bc, 0xa626a4)),
+    ]
+}
+
+@MainActor
+final class AppSettings: NSObject {
+    static let shared = AppSettings()
+    static let didChange = Notification.Name("AletheiaAppearanceDidChange")
+    static let colorSchemeKey = "colorScheme"
+    static let schemes = AppColorScheme.all
+
+    private let defaults: UserDefaults
+    private(set) var selectedSchemeID: String
+    var selectedScheme: AppColorScheme {
+        Self.schemes.first { $0.id == selectedSchemeID } ?? Self.schemes[0]
+    }
+    var palette: EditorPalette { selectedScheme.palette }
+
+    private var settingsWindow: NSWindow?
+    private var schemePopup: NSPopUpButton?
+    private var heading: NSTextField?
+    private var detail: NSTextField?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let saved = defaults.string(forKey: Self.colorSchemeKey)
+        selectedSchemeID = Self.schemes.first { $0.id == saved }?.id ?? "system"
+        super.init()
+    }
+
+    /// Invalid or removed IDs fall back to native System colors.
+    func selectScheme(id: String) {
+        let validID = Self.schemes.first { $0.id == id }?.id ?? "system"
+        guard selectedSchemeID != validID else { return }
+        selectedSchemeID = validID
+        defaults.set(validID, forKey: Self.colorSchemeKey)
+        updateWindow()
+        NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    func showWindow() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 160),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Settings"
+            window.isReleasedWhenClosed = false
+            let label = NSTextField(labelWithString: "Color scheme")
+            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+            popup.addItems(withTitles: Self.schemes.map(\.name))
+            popup.target = self
+            popup.action = #selector(schemeChanged(_:))
+            let note = NSTextField(labelWithString: "Applies to all windows. System follows macOS appearance.")
+            note.font = .systemFont(ofSize: 11)
+            let stack = NSStackView(views: [label, popup, note])
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 12
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            window.contentView!.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
+                stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
+                stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
+                popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            ])
+            settingsWindow = window
+            schemePopup = popup
+            heading = label
+            detail = note
+            window.center()
+        }
+        updateWindow()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func schemeChanged(_ sender: NSPopUpButton) {
+        guard Self.schemes.indices.contains(sender.indexOfSelectedItem) else { return }
+        selectScheme(id: Self.schemes[sender.indexOfSelectedItem].id)
+    }
+
+    private func updateWindow() {
+        settingsWindow?.appearance = palette.appearance
+        settingsWindow?.backgroundColor = palette.background
+        heading?.textColor = palette.foreground
+        detail?.textColor = palette.muted
+        schemePopup?.selectItem(at: Self.schemes.firstIndex { $0.id == selectedSchemeID } ?? 0)
+    }
+}

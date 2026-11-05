@@ -104,6 +104,28 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
         schedule(clear: changed)
     }
 
+    func applyTheme() {
+        let palette = AppSettings.shared.palette
+        webView.underPageBackgroundColor = palette.background
+        guard ready else { return }
+        func css(_ color: NSColor) -> String {
+            let rgb = color.usingColorSpace(.sRGB) ?? color
+            return "rgb(\(Int(rgb.redComponent * 255)), \(Int(rgb.greenComponent * 255)), \(Int(rgb.blueComponent * 255)))"
+        }
+        let colors: [String: String] = palette.isDark == nil ? [:] : [
+            "--background": css(palette.background), "--foreground": css(palette.foreground),
+            "--surface": css(palette.surface), "--muted": css(palette.muted), "--accent": css(palette.accent)
+        ]
+        webView.callAsyncJavaScript("""
+            const style = document.documentElement.style;
+            for (const key of ['--background', '--foreground', '--surface', '--muted', '--accent']) {
+                if (colors[key]) style.setProperty(key, colors[key]); else style.removeProperty(key);
+            }
+            style.colorScheme = scheme;
+            """, arguments: ["colors": colors, "scheme": palette.isDark.map { $0 ? "dark" : "light" } ?? "light dark"],
+            in: nil, in: .page) { _ in }
+    }
+
     func contentChanged() { schedule(clear: false) }
 
     private func schedule(clear: Bool) {
@@ -147,6 +169,7 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         ready = true
+        applyTheme()
         schedule(clear: true)
     }
 

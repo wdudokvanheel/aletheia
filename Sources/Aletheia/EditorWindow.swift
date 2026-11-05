@@ -1,15 +1,21 @@
 import AppKit
 
 @MainActor
-private final class EditorTabView: NSView {
+final class EditorTabView: NSView {
+    var onMiddleClick: (() -> Void)?
+
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber == 2 { onMiddleClick?() }
+        else { super.otherMouseDown(with: event) }
+    }
     var selected = false
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if selected {
-            NSColor.textBackgroundColor.setFill()
+            AppSettings.shared.palette.background.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
-            NSColor.controlAccentColor.setFill()
+            AppSettings.shared.palette.accent.setFill()
             NSRect(x: 8, y: 0, width: bounds.width - 16, height: 2).fill()
         } else {
             NSColor.separatorColor.setFill()
@@ -19,12 +25,25 @@ private final class EditorTabView: NSView {
 }
 
 @MainActor
+private final class EditorHostView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        AppSettings.shared.palette.background.setFill()
+        bounds.fill()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
+@MainActor
 final class EditorWindow: NSWindowController, NSWindowDelegate {
     private let tree = FolderTree()
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
-    private let editorHost = NSView()
+    private let editorHost = EditorHostView()
     private let markdownSplit = NSSplitView()
+    private var contentConstraints: [NSLayoutConstraint] = []
     private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
         trackingMode: .selectOne, target: nil, action: nil)
     private var preview: MarkdownPreview?
@@ -100,6 +119,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         window.delegate = self
         window.center()
         buildLayout()
+        NotificationCenter.default.addObserver(self, selector: #selector(applyTheme),
+            name: AppSettings.didChange, object: nil)
+        applyTheme()
         tree.onOpen = { [weak self] in self?.openFile($0) }
         tree.onError = { [weak self] in self?.present($0) }
     }
@@ -202,6 +224,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func configure(_ document: EditorDocument) {
+        document.applyTheme()
         document.onChange = { [weak self] in self?.refreshTabs(); self?.updateTitle() }
         document.onContentChange = { [weak self, weak document] in
             guard let self, let document, self.selected === document,
@@ -226,11 +249,13 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func layoutEditor() {
-        markdownSplit.removeFromSuperview()
         for view in markdownSplit.arrangedSubviews {
             markdownSplit.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
+        markdownSplit.removeFromSuperview()
+        NSLayoutConstraint.deactivate(contentConstraints)
+        contentConstraints.removeAll()
         selected?.scroll.removeFromSuperview()
         preview?.webView.removeFromSuperview()
         placeholder.isHidden = selected != nil
@@ -248,14 +273,28 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         case .editor: content = document.scroll
         case .preview: content = preview!.webView
         case .split:
-            markdownSplit.addArrangedSubview(document.scroll)
-            markdownSplit.addArrangedSubview(preview!.webView)
+            document.scroll.translatesAutoresizingMaskIntoConstraints = true
+            preview!.webView.translatesAutoresizingMaskIntoConstraints = true
+            document.scroll.isHidden = false
+            preview!.webView.isHidden = false
             content = markdownSplit
         }
-        content.frame = editorHost.bounds
-        content.autoresizingMask = [.width, .height]
+        content.isHidden = false
+        content.translatesAutoresizingMaskIntoConstraints = false
         editorHost.addSubview(content)
-        if mode == .split { markdownSplit.setPosition(editorHost.bounds.width / 2, ofDividerAt: 0) }
+        contentConstraints = [
+            content.leadingAnchor.constraint(equalTo: editorHost.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: editorHost.trailingAnchor),
+            content.topAnchor.constraint(equalTo: editorHost.topAnchor),
+            content.bottomAnchor.constraint(equalTo: editorHost.bottomAnchor)
+        ]
+        NSLayoutConstraint.activate(contentConstraints)
+        editorHost.layoutSubtreeIfNeeded()
+        if mode == .split {
+            markdownSplit.addArrangedSubview(document.scroll)
+            markdownSplit.addArrangedSubview(preview!.webView)
+            markdownSplit.setPosition(editorHost.bounds.width / 2, ofDividerAt: 0)
+        }
         window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
     }
 
@@ -265,6 +304,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         for (index, document) in documents.enumerated() {
             let group = EditorTabView()
             group.selected = document === selected
+            group.onMiddleClick = { [weak self, weak document] in
+                guard let document else { return }
+                self?.close(document)
+            }
             group.translatesAutoresizingMaskIntoConstraints = false
             let button = NSButton(title: document.file.url.lastPathComponent,
                                   target: self, action: #selector(selectTab(_:)))
@@ -272,16 +315,16 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             button.isBordered = false
             button.setButtonType(.momentaryChange)
             button.font = .systemFont(ofSize: 14, weight: group.selected ? .medium : .regular)
-            button.contentTintColor = group.selected ? .labelColor : .secondaryLabelColor
+            button.contentTintColor = group.selected ? AppSettings.shared.palette.foreground : AppSettings.shared.palette.muted
             button.lineBreakMode = .byTruncatingMiddle
             button.toolTip = document.file.requestedURL.path
             let dirty = NSTextField(labelWithString: document.isDirty ? "●" : "")
             dirty.font = .systemFont(ofSize: 9)
-            dirty.textColor = .secondaryLabelColor
+            dirty.textColor = AppSettings.shared.palette.muted
             let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!,
                                  target: self, action: #selector(closeTabButton(_:)))
             close.isBordered = false
-            close.contentTintColor = .secondaryLabelColor
+            close.contentTintColor = AppSettings.shared.palette.muted
             close.imageScaling = .scaleProportionallyDown
             close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
             close.tag = index
@@ -314,6 +357,21 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         tabs.layoutSubtreeIfNeeded()
         if let selectedTab { tabs.scrollToVisible(selectedTab.frame) }
     }
+
+    @objc private func applyTheme() {
+        let palette = AppSettings.shared.palette
+        window?.appearance = palette.isDark.map { NSAppearance(named: $0 ? .darkAqua : .aqua)! }
+        window?.backgroundColor = palette.surface
+        tabScroll.backgroundColor = palette.surface
+        editorHost.needsDisplay = true
+        placeholder.textColor = palette.muted
+        documents.forEach { $0.applyTheme() }
+        tree.applyTheme()
+        preview?.applyTheme()
+        refreshTabs()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { tree.refreshGitStatus() }
 
     func windowDidResize(_ notification: Notification) {
         guard let selected, let index = documents.firstIndex(where: { $0 === selected }),
@@ -386,6 +444,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                 switch result {
                 case .success(let saved):
                     document.file = saved
+                    self.tree.refreshGitStatus()
                     self.refreshTabs()
                     self.updateTitle()
                     completion(true)

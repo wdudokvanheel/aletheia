@@ -156,6 +156,22 @@ final class MarkdownPreviewTests: XCTestCase {
         for (segment, mode) in [(1, MarkdownMode.split), (2, .preview), (0, .editor)] {
             control.selectedSegment = segment
             NSApplication.shared.sendAction(try XCTUnwrap(control.action), to: control.target, from: control)
+            controller.window?.contentView?.layoutSubtreeIfNeeded()
+            let host = try XCTUnwrap(control.superview?.superview?.subviews.last)
+            let visibleContent = try XCTUnwrap(host.subviews.last)
+            XCTAssertFalse(visibleContent.isHidden)
+            XCTAssertGreaterThan(visibleContent.frame.width, 400)
+            XCTAssertGreaterThan(visibleContent.frame.height, 300)
+            XCTAssertEqual(visibleContent.frame.width, host.bounds.width, accuracy: 1)
+            XCTAssertEqual(visibleContent.frame.height, host.bounds.height, accuracy: 1)
+            XCTAssertFalse(visibleContent.hasAmbiguousLayout)
+            if let split = visibleContent as? NSSplitView {
+                XCTAssertEqual(split.arrangedSubviews.count, 2)
+                XCTAssertGreaterThan(split.arrangedSubviews[0].frame.width, 100)
+                XCTAssertGreaterThan(split.arrangedSubviews[1].frame.width, 100)
+            }
+            if mode == .editor { XCTAssertTrue(visibleContent === editor.enclosingScrollView) }
+            if mode == .preview { XCTAssertTrue(visibleContent is WKWebView) }
             XCTAssertEqual(controller.session.markdownModes?[url.path], mode)
             XCTAssertEqual(editor.string, "# Original edited")
             XCTAssertEqual(editor.selectedRange(), selection)
@@ -164,6 +180,42 @@ final class MarkdownPreviewTests: XCTestCase {
         editor.undoManager?.undo()
         XCTAssertEqual(editor.string, "# Original")
         controller.window?.performClose(nil)
+    }
+
+    @MainActor func testThemeAppliesToPreviewAndPreservesEditorUndo() async throws {
+        _ = NSApplication.shared
+        let settings = AppSettings.shared
+        let previous = settings.selectedSchemeID
+        defer { settings.selectScheme(id: previous) }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("# Theme".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        document.editor.insertText(" edited", replacementRange: NSRange(location: 7, length: 0))
+        let selection = document.editor.selectedRange()
+        let preview = MarkdownPreview()
+        preview.show(document)
+        try await eventually { preview.ready }
+        for (id, expected) in [("dracula", "rgb(40, 42, 54)"), ("catppuccin-latte", "rgb(239, 241, 245)")] {
+            settings.selectScheme(id: id)
+            document.applyTheme()
+            preview.applyTheme()
+            try await eventually {
+                try await self.script(preview, "return getComputedStyle(document.body).backgroundColor") as? String == expected
+            }
+            XCTAssertEqual(document.editor.string, "# Theme edited")
+            XCTAssertEqual(document.editor.selectedRange(), selection)
+            XCTAssertTrue(document.isDirty)
+        }
+        document.editor.undoManager?.undo()
+        XCTAssertEqual(document.editor.string, "# Theme")
+        XCTAssertFalse(document.isDirty)
+        settings.selectScheme(id: "system")
+        preview.applyTheme()
+        try await eventually {
+            try await self.script(preview, "return document.documentElement.style.getPropertyValue('--background')") as? String == ""
+        }
+        preview.show(nil)
     }
 
     func testOldSessionLoadsAndModesRoundTrip() throws {

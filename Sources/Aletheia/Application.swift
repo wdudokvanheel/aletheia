@@ -174,6 +174,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
+
     private func buildMenu() {
         let main = NSMenu()
         func menu(_ title: String) -> NSMenu {
@@ -192,6 +194,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let app = menu("Aletheia")
         item("About Aletheia", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "", in: app)
+        app.addItem(.separator())
+        item("Settings…", #selector(showSettings(_:)), ",", in: app, target: self)
         app.addItem(.separator())
         item("Hide Aletheia", #selector(NSApplication.hide(_:)), "h", in: app)
         item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", in: app, modifiers: [.command, .option])
