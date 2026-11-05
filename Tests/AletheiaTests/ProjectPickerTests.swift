@@ -36,6 +36,22 @@ final class ProjectPickerTests: XCTestCase {
         XCTAssertFalse(ProjectCatalog.matches(project, query: "21"))
     }
 
+    func testNameMatchesRankAheadOfIncidentalPathMatches() {
+        let tattoo = PickerProject(name: "tattoo agenda", directory: URL(fileURLWithPath: "/tmp/dudok/workspace/tattoo-agenda"))
+        let fuzzy = PickerProject(name: "dark", directory: URL(fileURLWithPath: "/tmp/dark"))
+        let dkdmk = PickerProject(name: "dkdmk", directory: URL(fileURLWithPath: "/tmp/dkdmk"))
+        let exact = PickerProject(name: "dk", directory: URL(fileURLWithPath: "/tmp/dk"))
+        let input = [tattoo, fuzzy, dkdmk, exact]
+        XCTAssertEqual(ProjectCatalog.ranked(input, query: "dk").map(\.name), ["dk", "dkdmk", "dark", "tattoo agenda"])
+        XCTAssertEqual(ProjectCatalog.ranked(input, query: ""), input)
+        XCTAssertEqual(ProjectCatalog.ranked(input, query: "  DK  ").first, exact)
+    }
+
+    func testQueryCannotMatchAcrossNameAndUnrelatedPath() {
+        let project = PickerProject(name: "dog", directory: URL(fileURLWithPath: "/tmp/kite"))
+        XCTAssertFalse(ProjectCatalog.matches(project, query: "dk"))
+    }
+
     @MainActor func testAssignmentsSeedOnceAndUserChangesRemainAuthoritative() throws {
         let suite = "ProjectSettingsTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
