@@ -57,6 +57,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private var closed = false
     private var restoring = false
     private var closingSession: WindowSession?
+    var projectURL: URL? { rootURL }
+    var onActivate: (() -> Void)?
     var onClose: ((WindowSession) -> Void)?
 
     var session: WindowSession {
@@ -65,6 +67,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                       selectedPath: selected?.file.requestedURL.path,
                       markdownModes: Dictionary(uniqueKeysWithValues: documents.filter(\.isMarkdown).map {
                           ($0.file.requestedURL.path, $0.markdownMode)
+                      }), treeState: tree.session,
+                      scrollPositions: Dictionary(uniqueKeysWithValues: documents.map {
+                          ($0.file.requestedURL.path, $0.scrollPosition)
                       }), treeWidth: split.preferredSize, editorFraction: markdownSplit.preferredSize)
     }
 
@@ -97,11 +102,15 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             let failures = skipped
             DispatchQueue.main.async {
                 guard !self.closed else { completion(failures); return }
-                if let restoredRoot { self.setRoot(restoredRoot) }
+                if let restoredRoot {
+                    self.setRoot(restoredRoot)
+                    if let treeState = state.treeState { self.tree.restore(treeState) }
+                }
                 for file in restoredFiles where !self.documents.contains(where: { $0.file.url == file.url }) {
                     let document = EditorDocument(file: file)
                     self.configure(document)
                     document.markdownMode = state.markdownModes?[file.requestedURL.path] ?? .split
+                    document.restoreScrollPosition(state.scrollPositions?[file.requestedURL.path] ?? FileScrollPosition())
                     self.documents.append(document)
                 }
                 let selected = self.documents.first { $0.file.requestedURL.path == state.selectedPath }
@@ -238,6 +247,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func select(_ document: EditorDocument?) {
+        selected?.setSourceVisible(false)
         selected?.setHighlightingActive(false)
         selected?.scroll.removeFromSuperview()
         selected = document
@@ -254,6 +264,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func layoutEditor() {
+        selected?.setSourceVisible(false)
         for view in markdownSplit.arrangedSubviews {
             markdownSplit.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -302,6 +313,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         }
         document.setHighlightingActive(mode != .preview)
         window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
+        editorHost.layoutSubtreeIfNeeded()
+        document.setSourceVisible(mode != .preview)
     }
 
     private func refreshTabs() {
@@ -377,9 +390,14 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         refreshTabs()
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { tree.refreshGitStatus() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        tree.refreshGitStatus()
+        selected?.restoreSourceScrollAfterLayout()
+        onActivate?()
+    }
 
     func windowDidResize(_ notification: Notification) {
+        selected?.restoreSourceScrollAfterLayout()
         guard let selected, let index = documents.firstIndex(where: { $0 === selected }),
               index < tabs.arrangedSubviews.count else { return }
         tabs.scrollToVisible(tabs.arrangedSubviews[index].frame)

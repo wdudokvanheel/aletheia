@@ -30,6 +30,69 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     let scroll = NSScrollView()
     private let outline = FileOutlineView()
     private var root: FolderNode?
+    private var pendingState: FolderTreeState?
+    private var failedRestorationPaths = Set<String>()
+    private var applyingRestoration = false
+
+    var session: FolderTreeState {
+        if let pendingState { return pendingState }
+        var expanded: [String] = []
+        func collect(_ node: FolderNode) {
+            if node.wantsExpanded { expanded.append(node.url.path) }
+            node.children?.forEach(collect)
+        }
+        root?.children?.forEach(collect)
+        let selected = outline.item(atRow: outline.selectedRow) as? FolderNode
+        return FolderTreeState(expandedPaths: expanded.sorted(), selectedPath: selected?.url.path,
+                               scrollOrigin: scroll.contentView.bounds.origin)
+    }
+
+    func restore(_ state: FolderTreeState) {
+        pendingState = state
+        failedRestorationPaths.removeAll()
+        restoreLoadedBranches()
+    }
+
+    @objc private func viewportChanged(_ notification: Notification) { restoreLoadedBranches() }
+
+    private func restoreLoadedBranches() {
+        guard !applyingRestoration, let state = pendingState, let root else { return }
+        applyingRestoration = true
+        defer { applyingRestoration = false }
+        func canonical(_ path: String) -> String {
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let expanded = Set(state.expandedPaths.map(canonical))
+        var waiting = false
+        func visit(_ node: FolderNode) {
+            guard !failedRestorationPaths.contains(node.url.path) else { return }
+            guard let children = node.children else {
+                load(node)
+                waiting = true
+                return
+            }
+            for child in children where child.isDirectory && expanded.contains(canonical(child.url.path)) {
+                outline.expandItem(child)
+                visit(child)
+            }
+        }
+        visit(root)
+        guard !waiting, scroll.contentSize.width > 0, scroll.contentSize.height > 0 else { return }
+        // Selection restoration must never invoke the single-click file action.
+        if let path = state.selectedPath,
+           let row = (0..<outline.numberOfRows).first(where: {
+               (outline.item(atRow: $0) as? FolderNode).map { canonical($0.url.path) == canonical(path) } == true
+           }) {
+            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        outline.layoutSubtreeIfNeeded()
+        let position = EditorDocument.validPosition(state.scrollOrigin)
+        let maximum = CGPoint(x: max(0, outline.frame.width - scroll.contentSize.width),
+                              y: max(0, outline.frame.height - scroll.contentSize.height))
+        scroll.contentView.scroll(to: CGPoint(x: min(position.x, maximum.x), y: min(position.y, maximum.y)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        pendingState = nil
+    }
     private var gitStatus = GitStatusSnapshot()
     private var gitRefreshTask: Task<Void, Never>?
     private var gitRefreshRunning = false
@@ -53,10 +116,15 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        scroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportChanged(_:)),
+            name: NSView.frameDidChangeNotification, object: scroll.contentView)
         applyTheme()
     }
 
     func setRoot(_ url: URL) {
+        pendingState = nil
+        failedRestorationPaths.removeAll()
         root = FolderNode(url: url, isDirectory: true)
         gitStatus = GitStatusSnapshot()
         outline.reloadData()
@@ -142,13 +210,15 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                     else {
                         let expand = node.wantsExpanded
                         self.outline.reloadItem(node, reloadChildren: true)
-                        if expand { self.outline.expandItem(node) }
+                        if expand, self.pendingState == nil { self.outline.expandItem(node) }
                         self.updateIcon(node)
                     }
                 case .failure(let error):
                     // Keep nil so collapsing/re-expanding can retry after access changes.
+                    self.failedRestorationPaths.insert(node.url.path)
                     self.onError?(error)
                 }
+                self.restoreLoadedBranches()
             }
         }
     }
@@ -248,6 +318,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
         guard let node = item as? FolderNode else { return true }
+        if !applyingRestoration { pendingState = nil }
         node.wantsExpanded = true
         refreshGitStatus()
         updateIcon(node)
@@ -257,12 +328,14 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
         guard let node = item as? FolderNode else { return true }
+        if !applyingRestoration { pendingState = nil }
         node.wantsExpanded = false
         updateIcon(node)
         return true
     }
 
     @objc private func openSelection() {
+        pendingState = nil
         guard let node = outline.item(atRow: outline.clickedRow) as? FolderNode else { return }
         if node.isDirectory {
             if node.wantsExpanded {

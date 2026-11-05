@@ -117,6 +117,7 @@ final class AppSettings: NSObject {
     private var schemePopup: NSPopUpButton?
     private var heading: NSTextField?
     private var detail: NSTextField?
+    private var projectSettingsView: ProjectSettingsView?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -137,7 +138,7 @@ final class AppSettings: NSObject {
 
     func showWindow() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 160),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 600),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Settings"
             window.isReleasedWhenClosed = false
@@ -149,7 +150,9 @@ final class AppSettings: NSObject {
             popup.action = #selector(schemeChanged(_:))
             let note = NSTextField(labelWithString: "Applies to all windows. System follows macOS appearance.")
             note.font = .systemFont(ofSize: 11)
-            let stack = NSStackView(views: [label, popup, note])
+            let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults))
+            projectSettingsView = projects
+            let stack = NSStackView(views: [label, popup, note, projects])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 12
@@ -159,7 +162,8 @@ final class AppSettings: NSObject {
                 stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
                 stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
                 stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
-                popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
+                popup.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                projects.widthAnchor.constraint(equalTo: stack.widthAnchor)
             ])
             settingsWindow = window
             schemePopup = popup
@@ -168,6 +172,7 @@ final class AppSettings: NSObject {
             window.center()
         }
         updateWindow()
+        projectSettingsView?.refresh()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

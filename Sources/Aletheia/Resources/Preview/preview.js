@@ -10,9 +10,26 @@ const config = {
   ALLOW_ARIA_ATTR: false
 };
 let generation = 0;
+let committed = null;
+let restoration = null;
+function reportScroll() {
+  if (!committed || restoration) return;
+  window.webkit?.messageHandlers.previewScroll?.postMessage({
+    ...committed, x: window.scrollX, y: window.scrollY
+  });
+}
+window.addEventListener('scroll', reportScroll, { passive: true });
+// A user's navigation takes precedence over late image sizing.
+for (const event of ['wheel', 'touchstart', 'keydown']) {
+  window.addEventListener(event, () => { restoration = null; }, { passive: true });
+}
 function invalidatePreview(value, clear) {
   generation = value;
-  if (clear) document.getElementById('content').replaceChildren();
+  restoration = null;
+  if (clear) {
+    committed = null;
+    document.getElementById('content').replaceChildren();
+  }
 }
 function renderMarkdown(markdown, base) {
   const fragment = DOMPurify.sanitize(parser.parse(markdown), { ...config, RETURN_DOM_FRAGMENT: true });
@@ -41,10 +58,31 @@ function renderMarkdown(markdown, base) {
   holder.append(fragment);
   return holder.innerHTML;
 }
-function commitPreview(html, value, resetScroll) {
+function commitPreview(html, value, resetScroll, token = '', position = { x: 0, y: 0 }) {
   if (value !== generation) return false;
-  const y = resetScroll ? 0 : window.scrollY;
-  document.getElementById('content').innerHTML = html;
-  window.scrollTo(0, y);
+  const valid = n => Number.isFinite(n) ? Math.max(0, n) : 0;
+  const target = resetScroll ? { x: valid(position.x), y: valid(position.y) }
+                             : { x: window.scrollX, y: window.scrollY };
+  const identity = { generation: value, token };
+  committed = identity;
+  restoration = target;
+  const content = document.getElementById('content');
+  content.innerHTML = html;
+  const images = [...content.querySelectorAll('img')].filter(image => !image.complete);
+  let remaining = images.length;
+  const restore = () => {
+    if (committed !== identity || generation !== value || restoration !== target) return;
+    window.scrollTo(target.x, target.y); // WebKit clamps to the rendered document bounds.
+    if (remaining === 0) {
+      restoration = null;
+      reportScroll();
+    }
+  };
+  for (const image of images) {
+    const settled = () => { remaining--; restore(); };
+    image.addEventListener('load', settled, { once: true });
+    image.addEventListener('error', settled, { once: true });
+  }
+  restore();
   return true;
 }

@@ -6,6 +6,48 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     private let undo = UndoManager()
     let editor = NSTextView()
     let scroll = NSScrollView()
+    private var pendingSourcePosition: CGPoint?
+    private var sourceVisible = false
+    var previewPosition: CGPoint = .zero
+    var scrollPosition: FileScrollPosition {
+        FileScrollPosition(source: pendingSourcePosition ?? scroll.contentView.bounds.origin,
+                           preview: previewPosition)
+    }
+
+    func restoreScrollPosition(_ position: FileScrollPosition) {
+        pendingSourcePosition = Self.validPosition(position.source)
+        previewPosition = Self.validPosition(position.preview)
+    }
+
+    static func validPosition(_ point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x.isFinite ? max(0, point.x) : 0,
+                y: point.y.isFinite ? max(0, point.y) : 0)
+    }
+
+    func setSourceVisible(_ visible: Bool) {
+        if !visible, sourceVisible, pendingSourcePosition == nil {
+            pendingSourcePosition = Self.validPosition(scroll.contentView.bounds.origin)
+        }
+        sourceVisible = visible
+        if visible { restoreSourceScrollAfterLayout() }
+    }
+
+    func restoreSourceScrollAfterLayout() {
+        guard sourceVisible, scroll.window != nil, !scroll.isHiddenOrHasHiddenAncestor,
+              scroll.contentSize.width > 0, scroll.contentSize.height > 0,
+              let position = pendingSourcePosition,
+              let layout = editor.layoutManager, let container = editor.textContainer else { return }
+        // Finish wrapping at the actual pane width before clamping against EOF.
+        scroll.layoutSubtreeIfNeeded()
+        layout.ensureLayout(for: container)
+        editor.sizeToFit()
+        let maximum = CGPoint(x: max(0, editor.frame.width - scroll.contentSize.width),
+                              y: max(0, editor.frame.height - scroll.contentSize.height))
+        pendingSourcePosition = nil
+        scroll.contentView.scroll(to: CGPoint(x: min(position.x, maximum.x), y: min(position.y, maximum.y)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
     var busy = false
     var markdownMode = MarkdownMode.split
     var isMarkdown: Bool { file.url.pathExtension.lowercased() == "md" }

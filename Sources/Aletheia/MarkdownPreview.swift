@@ -70,6 +70,15 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
 }
 
 @MainActor
+private final class PreviewScrollHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: MarkdownPreview?
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any] else { return }
+        owner?.receiveScroll(body)
+    }
+}
+
+@MainActor
 final class MarkdownPreview: NSObject, WKNavigationDelegate {
     let webView: WKWebView
     let resources = PreviewResources()
@@ -78,7 +87,9 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     private(set) var generation = 0
     private(set) var renderCount = 0
     private(set) var ready = false
+    private var committedGeneration: Int?
     private var resetScroll = true
+    private let scrollHandler = PreviewScrollHandler()
     var onOpen: ((URL) -> Void)?
 
     override init() {
@@ -88,15 +99,27 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        scrollHandler.owner = self
+        configuration.userContentController.add(scrollHandler, name: "previewScroll")
         webView.navigationDelegate = self
         webView.allowsLinkPreview = false
         webView.load(URLRequest(url: PreviewResources.origin))
+    }
+
+    func receiveScroll(_ body: [String: Any]) {
+        guard let token = body["token"] as? String, token == resources.token,
+              let value = body["generation"] as? Int,
+              value == generation || value == committedGeneration,
+              let x = body["x"] as? Double, let y = body["y"] as? Double,
+              x.isFinite, y.isFinite, let document else { return }
+        document.previewPosition = EditorDocument.validPosition(CGPoint(x: x, y: y))
     }
 
     func show(_ document: EditorDocument?) {
         let changed = self.document !== document
         self.document = document
         if changed {
+            committedGeneration = nil
             resources.directory = document?.file.url.deletingLastPathComponent()
             resources.token = UUID().uuidString
             resetScroll = true
@@ -152,10 +175,15 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
                 guard !Task.isCancelled, value == self.generation, self.document === document,
                       let html = html as? String else { return }
                 _ = try await self.webView.callAsyncJavaScript(
-                    "return commitPreview(html, value, reset)",
-                    arguments: ["html": html, "value": value, "reset": self.resetScroll],
+                    "return commitPreview(html, value, reset, token, position)",
+                    arguments: ["html": html, "value": value, "reset": self.resetScroll,
+                                "token": self.resources.token,
+                                "position": ["x": document.previewPosition.x, "y": document.previewPosition.y]],
                     in: nil, contentWorld: .page)
-                if value == self.generation { self.resetScroll = false }
+                if value == self.generation {
+                    self.committedGeneration = value
+                    self.resetScroll = false
+                }
             } catch {
                 guard value == self.generation else { return }
                 // Keep the editor usable and make a renderer failure visible.

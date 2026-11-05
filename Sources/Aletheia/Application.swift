@@ -14,15 +14,28 @@ struct Aletheia {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var windows: [EditorWindow] = []
+    private(set) var windows: [EditorWindow] = []
     private var terminating = false
     private var launched = false
     private var restoring = false
     private var pendingOpenFiles: [String] = []
     private var quitSession: SessionState?
+    private var projectSessions: ProjectSessions
+    private let defaults: UserDefaults
+    private weak var activeProjectWindow: EditorWindow?
+    private var picker: ProjectPicker?
+    private var keyMonitor: Any?
+    private var prefixPending = false
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        projectSessions = ProjectSessions.load(from: defaults)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        installProjectShortcut()
         launched = true
         restoreSession()
         NSApp.activate(ignoringOtherApps: true)
@@ -39,10 +52,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.windows.removeAll { $0 === controller }
             guard !self.terminating else { return }
-            // Closing the final window retains its files; closing one of several removes only that window.
-            let state = self.windows.isEmpty
-                ? SessionState(windows: [closedSession], activeWindowIndex: 0) : self.sessionSnapshot()
-            state.save()
+            self.projectSessions.remember(closedSession, active: self.windows.isEmpty)
+            self.persistOpenProjects()
+        }
+        controller.onActivate = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            self.prefixPending = false
+            self.activeProjectWindow = controller
+            guard !self.restoring, !self.terminating else { return }
+            self.persistOpenProjects()
         }
         windows.append(controller)
         controller.showWindow(nil)
@@ -58,9 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = false
         panel.begin { result in
             guard result == .OK, let url = panel.url, !self.terminating else { return }
-            let controller = self.current.flatMap { $0.hasRoot ? nil : $0 } ?? self.makeWindow()
-            controller.setRoot(url)
-            controller.showWindow(nil)
+            self.openProject(url)
         }
     }
 
@@ -73,8 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = true
         panel.begin { result in
             guard result == .OK, !self.terminating else { return }
-            let controller = self.current ?? self.makeWindow()
-            panel.urls.forEach { controller.openFile($0) }
+            self.openRequestedFiles(panel.urls.map(\.path))
         }
     }
 
@@ -109,7 +124,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func confirmQuit(_ closingWindows: [EditorWindow], index: Int) {
         guard index < closingWindows.count else {
-            quitSession?.save()
+            if let state = quitSession {
+                for (index, session) in state.windows.enumerated() {
+                    projectSessions.remember(session, active: index == state.activeWindowIndex)
+                }
+                projectSessions.save(to: defaults)
+            }
             NSApp.reply(toApplicationShouldTerminate: true)
             return
         }
@@ -125,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func sessionSnapshot() -> SessionState {
-        let active = current
+        let active = activeProjectWindow ?? current
         return SessionState(windows: windows.map(\.session),
                             activeWindowIndex: windows.firstIndex { $0 === active })
     }
@@ -134,45 +154,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !pendingOpenFiles.isEmpty else { return }
         let paths = pendingOpenFiles
         pendingOpenFiles.removeAll()
-        let controller = current ?? makeWindow()
-        paths.forEach { controller.openFile(URL(fileURLWithPath: $0)) }
+        openRequestedFiles(paths)
     }
 
-    private func restoreSession() {
+    private func openRequestedFiles(_ paths: [String]) {
+        guard let first = paths.first else { return }
+        if current?.hasRoot != true {
+            let folder = URL(fileURLWithPath: first).deletingLastPathComponent()
+            // Queue until the project has finished restoring its existing tabs.
+            pendingOpenFiles.append(contentsOf: paths)
+            openProject(folder)
+            return
+        }
+        paths.forEach { current?.openFile(URL(fileURLWithPath: $0)) }
+    }
+
+    private func persistOpenProjects() {
+        guard !restoring, !terminating else { return }
+        for controller in windows {
+            projectSessions.remember(controller.session, active: controller === activeProjectWindow)
+        }
+        projectSessions.save(to: defaults)
+    }
+
+    func openProject(_ url: URL) {
+        guard !terminating, !restoring else { return }
+        if let existing = windows.first(where: {
+            $0.projectURL.map { ProjectSessions.sameProject($0, url) } ?? false
+        }) {
+            existing.window?.deminiaturize(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            activeProjectWindow = existing
+            persistOpenProjects()
+            openPendingFiles()
+            return
+        }
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue,
+              FileManager.default.isReadableFile(atPath: url.path) else {
+            let alert = NSAlert()
+            alert.messageText = "Project folder is unavailable"
+            alert.informativeText = url.path
+            alert.runModal()
+            return
+        }
+        let saved = projectSessions.session(for: url)
+        restoring = true
+        let controller = makeWindow()
+        controller.setRoot(url)
+        activeProjectWindow = controller
+        if let saved {
+            controller.restore(saved) { failures in
+                self.finishRestoring(controller, failures: failures)
+            }
+        } else {
+            finishRestoring(controller, failures: [])
+        }
+    }
+
+    private func finishRestoring(_ controller: EditorWindow, failures: [String]) {
+        restoring = false
+        controller.window?.makeKeyAndOrderFront(nil)
+        activeProjectWindow = controller
+        persistOpenProjects()
+        openPendingFiles()
+        if !failures.isEmpty, let window = controller.window {
+            let alert = NSAlert()
+            alert.messageText = "Some session items could not be reopened"
+            let unique = Array(Set(failures)).sorted()
+            alert.informativeText = unique.prefix(8).joined(separator: "\n")
+                + (unique.count > 8 ? "\n…and \(unique.count - 8) more." : "")
+            alert.addButton(withTitle: "OK")
+            alert.beginSheetModal(for: window)
+        }
+    }
+
+    func restoreSession() {
         guard !restoring else { return }
         guard windows.isEmpty else { openPendingFiles(); return }
-        guard let state = SessionState.load(), !state.windows.isEmpty else {
+        guard let saved = projectSessions.mostRecent else {
             _ = makeWindow()
             openPendingFiles()
             return
         }
         restoring = true
-        let controllers = state.windows.map { _ in makeWindow() }
-        var remaining = controllers.count
-        var skipped: [String] = []
-        for (controller, saved) in zip(controllers, state.windows) {
-            controller.restore(saved) { failures in
-                skipped.append(contentsOf: failures)
-                remaining -= 1
-                guard remaining == 0 else { return }
-                self.restoring = false
-                let activeIndex = state.activeWindowIndex ?? 0
-                let active = controllers.indices.contains(activeIndex) ? controllers[activeIndex] : controllers[0]
-                active.showWindow(nil)
-                active.window?.makeKeyAndOrderFront(nil)
-                self.openPendingFiles()
-                if !skipped.isEmpty, let window = active.window {
-                    let alert = NSAlert()
-                    alert.messageText = "Some session items could not be reopened"
-                    let unique = Array(Set(skipped)).sorted()
-                    alert.informativeText = unique.prefix(8).joined(separator: "\n")
-                        + (unique.count > 8 ? "\n…and \(unique.count - 8) more." : "")
-                    alert.addButton(withTitle: "OK")
-                    alert.beginSheetModal(for: window)
-                }
-            }
+        let controller = makeWindow()
+        controller.restore(saved) { failures in
+            self.finishRestoring(controller, failures: failures)
         }
     }
+
+    @objc private func showProjects(_ sender: Any?) {
+        guard !terminating, !restoring, current?.window?.attachedSheet == nil else { return }
+        if picker == nil { picker = ProjectPicker() }
+        picker?.present(relativeTo: current?.window) { [weak self] url in self?.openProject(url) }
+    }
+
+    private func installProjectShortcut() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            let consumed = MainActor.assumeIsolated { () -> Bool in
+                guard let self else { return false }
+                guard event.type == .keyDown else { self.prefixPending = false; return false }
+                let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+                let key = event.charactersIgnoringModifiers?.lowercased()
+                if modifiers == .control, key == "s" {
+                    self.prefixPending = true
+                    return true
+                }
+                if self.prefixPending {
+                    self.prefixPending = false
+                    if modifiers.isEmpty, key == "s" { self.showProjects(nil); return true }
+                    if event.keyCode == 53 { return true }
+                }
+                return false
+            }
+            return consumed ? nil : event
+        }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) { prefixPending = false }
 
     @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
 
@@ -205,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let file = menu("File")
         item("Open File…", #selector(openFiles(_:)), "o", in: file, target: self)
         item("Open Folder…", #selector(openFolder(_:)), "o", in: file, target: self, modifiers: [.command, .shift])
+        item("Switch Project… (⌃S, S)", #selector(showProjects(_:)), "", in: file, target: self)
         file.addItem(.separator())
         item("Save", #selector(save(_:)), "s", in: file, target: self)
         item("Close Tab", #selector(closeTab(_:)), "w", in: file, target: self)
