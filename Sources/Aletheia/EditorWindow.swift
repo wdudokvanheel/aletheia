@@ -1,0 +1,309 @@
+import AppKit
+
+@MainActor
+final class EditorWindow: NSWindowController, NSWindowDelegate {
+    private let tree = FolderTree()
+    private let tabs = NSStackView()
+    private let editorHost = NSView()
+    private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
+    private var documents: [EditorDocument] = []
+    private var selected: EditorDocument?
+    private var rootURL: URL?
+    private var approvedClose = false
+    private var closing = false
+    private var closed = false
+    var onClose: (() -> Void)?
+
+    var hasRoot: Bool { rootURL != nil }
+
+    init() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        super.init(window: window)
+        window.title = "Aletheia"
+        window.minSize = NSSize(width: 620, height: 360)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        buildLayout()
+        tree.onOpen = { [weak self] in self?.openFile($0) }
+        tree.onError = { [weak self] in self?.present($0) }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func buildLayout() {
+        let split = NSSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.autoresizingMask = [.width, .height]
+        let right = NSView()
+        split.addArrangedSubview(tree.scroll)
+        split.addArrangedSubview(right)
+        window?.contentView = split
+        split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+        split.setPosition(230, ofDividerAt: 0)
+
+        let tabScroll = NSScrollView()
+        tabScroll.hasHorizontalScroller = true
+        tabScroll.autohidesScrollers = true
+        tabScroll.drawsBackground = false
+        tabs.orientation = .horizontal
+        tabs.spacing = 2
+        tabs.alignment = .centerY
+        tabs.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
+        tabScroll.documentView = tabs
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        tabScroll.translatesAutoresizingMaskIntoConstraints = false
+        editorHost.translatesAutoresizingMaskIntoConstraints = false
+        right.addSubview(tabScroll)
+        right.addSubview(editorHost)
+        NSLayoutConstraint.activate([
+            tabScroll.topAnchor.constraint(equalTo: right.topAnchor),
+            tabScroll.leadingAnchor.constraint(equalTo: right.leadingAnchor),
+            tabScroll.trailingAnchor.constraint(equalTo: right.trailingAnchor),
+            tabScroll.heightAnchor.constraint(equalToConstant: 38),
+            tabs.heightAnchor.constraint(equalTo: tabScroll.contentView.heightAnchor),
+            editorHost.topAnchor.constraint(equalTo: tabScroll.bottomAnchor),
+            editorHost.leadingAnchor.constraint(equalTo: right.leadingAnchor),
+            editorHost.trailingAnchor.constraint(equalTo: right.trailingAnchor),
+            editorHost.bottomAnchor.constraint(equalTo: right.bottomAnchor)
+        ])
+        placeholder.textColor = .secondaryLabelColor
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        editorHost.addSubview(placeholder)
+        NSLayoutConstraint.activate([
+            placeholder.centerXAnchor.constraint(equalTo: editorHost.centerXAnchor),
+            placeholder.centerYAnchor.constraint(equalTo: editorHost.centerYAnchor)
+        ])
+    }
+
+    func setRoot(_ url: URL) {
+        rootURL = url.resolvingSymlinksInPath()
+        tree.setRoot(rootURL!)
+        updateTitle()
+    }
+
+    func openFile(_ url: URL) {
+        guard !closing, !closed else { return }
+        let canonical = url.resolvingSymlinksInPath()
+        if let existing = documents.first(where: { $0.file.url == canonical }) {
+            select(existing)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try TextFile.read(url) }
+            DispatchQueue.main.async {
+                guard !self.closed, !self.closing else { return }
+                switch result {
+                case .success(let file):
+                    if let existing = self.documents.first(where: { $0.file.url == file.url }) {
+                        self.select(existing)
+                        return
+                    }
+                    if self.rootURL == nil { self.setRoot(file.url.deletingLastPathComponent()) }
+                    let document = EditorDocument(file: file)
+                    document.onChange = { [weak owner = self] in owner?.refreshTabs(); owner?.updateTitle() }
+                    self.documents.append(document)
+                    self.select(document)
+                case .failure(let error): self.present(error)
+                }
+            }
+        }
+    }
+
+    private func select(_ document: EditorDocument?) {
+        selected?.scroll.removeFromSuperview()
+        selected = document
+        placeholder.isHidden = document != nil
+        if let document {
+            document.scroll.frame = editorHost.bounds
+            document.scroll.autoresizingMask = [.width, .height]
+            editorHost.addSubview(document.scroll)
+            window?.makeFirstResponder(document.editor)
+        }
+        refreshTabs()
+        updateTitle()
+    }
+
+    private func refreshTabs() {
+        for view in tabs.arrangedSubviews { tabs.removeArrangedSubview(view); view.removeFromSuperview() }
+        for (index, document) in documents.enumerated() {
+            let group = NSStackView()
+            group.orientation = .horizontal
+            group.spacing = 0
+            let button = NSButton(title: (document.isDirty ? "● " : "") + document.file.url.lastPathComponent,
+                                  target: self, action: #selector(selectTab(_:)))
+            button.tag = index
+            button.bezelStyle = .inline
+            button.setButtonType(.toggle)
+            button.state = document === selected ? .on : .off
+            button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            button.toolTip = document.file.requestedURL.path
+            let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!,
+                                 target: self, action: #selector(closeTabButton(_:)))
+            close.bezelStyle = .inline
+            close.tag = index
+            close.isEnabled = !document.busy && !closing
+            group.addArrangedSubview(button)
+            group.addArrangedSubview(close)
+            tabs.addArrangedSubview(group)
+        }
+        tabs.layoutSubtreeIfNeeded()
+        tabs.setFrameSize(tabs.fittingSize)
+    }
+
+    private func updateTitle() {
+        let folder = rootURL?.lastPathComponent ?? "Aletheia"
+        window?.title = selected.map { "\($0.file.url.lastPathComponent) — \(folder)" } ?? folder
+        window?.representedURL = selected?.file.requestedURL
+        window?.isDocumentEdited = documents.contains(where: \.isDirty)
+    }
+
+    @objc private func selectTab(_ sender: NSButton) { select(documents[sender.tag]) }
+    @objc private func closeTabButton(_ sender: NSButton) { close(documents[sender.tag]) }
+    @objc func closeSelectedTab(_ sender: Any?) {
+        if let selected { close(selected) } else { window?.performClose(sender) }
+    }
+    @objc func saveSelected(_ sender: Any?) {
+        if let selected { save(selected) { _ in } }
+    }
+
+    private func close(_ document: EditorDocument) {
+        guard !closing, !document.busy else { NSSound.beep(); return }
+        closing = true
+        confirm(document) { allowed in
+            self.cancelPreparedClose()
+            guard allowed, let index = self.documents.firstIndex(where: { $0 === document }) else { return }
+            self.documents.remove(at: index)
+            if self.selected === document {
+                self.select(self.documents.isEmpty ? nil : self.documents[min(index, self.documents.count - 1)])
+            } else { self.refreshTabs(); self.updateTitle() }
+        }
+    }
+
+    private func confirm(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
+        guard !document.busy else { NSSound.beep(); completion(false); return }
+        guard document.isDirty else { completion(true); return }
+        select(document)
+        let alert = NSAlert()
+        alert.messageText = "Save changes to “\(document.file.url.lastPathComponent)”?"
+        alert.informativeText = "Your changes will be lost if you discard them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.beginSheetModal(for: window!) { response in
+            switch response {
+            case .alertFirstButtonReturn: self.save(document, completion: completion)
+            case .alertSecondButtonReturn: completion(true)
+            default: completion(false)
+            }
+        }
+    }
+
+    private func save(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
+        guard !document.busy else { completion(false); return }
+        guard document.isDirty else { completion(true); return }
+        document.editor.breakUndoCoalescing()
+        document.busy = true
+        document.editor.isEditable = false
+        let text = document.editor.string
+        let file = document.file
+        refreshTabs()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try file.save(text) }
+            DispatchQueue.main.async {
+                document.busy = false
+                document.editor.isEditable = !self.closing
+                switch result {
+                case .success(let saved):
+                    document.file = saved
+                    self.refreshTabs()
+                    self.updateTitle()
+                    completion(true)
+                case .failure(TextFile.FileError.changed):
+                    self.resolveConflict(document, completion: completion)
+                case .failure(let error):
+                    self.refreshTabs()
+                    self.present(error)
+                    completion(false)
+                }
+            }
+        }
+    }
+
+    private func resolveConflict(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(document.file.url.lastPathComponent)” changed on disk"
+        alert.informativeText = "Reload discards your unsaved edits and reads the current file. Keep Edits retains your buffer without overwriting the file."
+        alert.addButton(withTitle: "Keep Edits")
+        alert.addButton(withTitle: "Reload from Disk")
+        alert.beginSheetModal(for: window!) { response in
+            guard response == .alertSecondButtonReturn else {
+                self.refreshTabs()
+                completion(false)
+                return
+            }
+            document.busy = true
+            document.editor.isEditable = false
+            let requestedURL = document.file.requestedURL
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result { try TextFile.read(requestedURL) }
+                DispatchQueue.main.async {
+                    document.busy = false
+                    document.editor.isEditable = !self.closing
+                    switch result {
+                    case .success(let file):
+                        // Reload explicitly abandons these edits, but cancels any pending close.
+                        document.reload(file)
+                    case .failure(let error): self.present(error)
+                    }
+                    self.refreshTabs()
+                    completion(false)
+                }
+            }
+        }
+    }
+
+    func prepareToClose(completion: @escaping @MainActor (Bool) -> Void) {
+        guard !closing, !documents.contains(where: \.busy) else { NSSound.beep(); completion(false); return }
+        closing = true
+        // Freeze all buffers during a multi-document decision, so earlier approvals stay valid.
+        documents.forEach { $0.editor.isEditable = false }
+        confirmNext(documents, index: 0) { allowed in
+            if !allowed { self.cancelPreparedClose() }
+            completion(allowed)
+        }
+    }
+
+    func cancelPreparedClose() {
+        closing = false
+        documents.forEach { $0.editor.isEditable = !$0.busy }
+        refreshTabs()
+    }
+
+    private func confirmNext(_ documents: [EditorDocument], index: Int, completion: @escaping @MainActor (Bool) -> Void) {
+        guard index < documents.count else { completion(true); return }
+        confirm(documents[index]) { allowed in
+            if allowed { self.confirmNext(documents, index: index + 1, completion: completion) }
+            else { completion(false) }
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if approvedClose { return true }
+        prepareToClose { allowed in
+            if allowed { self.approvedClose = true; sender.close() }
+        }
+        return false
+    }
+
+    func windowWillClose(_ notification: Notification) { closed = true; onClose?() }
+
+    private func present(_ error: Error) {
+        guard !closed, let window else { return }
+        NSAlert(error: error).beginSheetModal(for: window)
+    }
+}
