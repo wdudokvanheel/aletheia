@@ -128,7 +128,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         super.init(window: window)
-        window.title = "Aletheia"
+        window.title = AppMetadata.title
         window.minSize = NSSize(width: 620, height: 360)
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -404,8 +404,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func updateTitle() {
-        let folder = rootURL?.lastPathComponent ?? "Aletheia"
-        window?.title = selected.map { "\($0.file.url.lastPathComponent) — \(folder)" } ?? folder
+        let context = [selected?.file.url.lastPathComponent, rootURL?.lastPathComponent]
+            .compactMap { $0 }
+        window?.title = (context + [AppMetadata.title]).joined(separator: " — ")
         window?.representedURL = selected?.file.requestedURL
         window?.isDocumentEdited = documents.contains(where: \.isDirty)
     }

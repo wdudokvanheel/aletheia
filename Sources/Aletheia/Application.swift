@@ -276,6 +276,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
 
+    @objc private func showAbout(_ sender: Any?) {
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Aletheia",
+            .applicationVersion: AppMetadata.version,
+            .version: AppMetadata.build,
+            .credits: NSAttributedString(string: AppMetadata.description)
+        ])
+    }
+
     private func buildMenu() {
         let main = NSMenu()
         func menu(_ title: String) -> NSMenu {
@@ -293,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         let app = menu("Aletheia")
-        item("About Aletheia", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "", in: app)
+        item("About Aletheia", #selector(showAbout(_:)), "", in: app, target: self)
         app.addItem(.separator())
         item("Settings…", #selector(showSettings(_:)), ",", in: app, target: self)
         app.addItem(.separator())
