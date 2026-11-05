@@ -52,9 +52,8 @@ final class ProjectSettingsView: NSStackView {
     enum Section { case projects, shortcuts }
     private let section: Section
     private let settings: ProjectSettings
-    private var clearButtons: [NSButton] = []
+    private var assignmentMenus: [NSPopUpButton] = []
     private let baseLabel = NSTextField(labelWithString: "")
-    private var labels: [NSTextField] = []
     private var refreshGeneration = UUID()
 
     init(settings: ProjectSettings, section: Section) {
@@ -73,20 +72,35 @@ final class ProjectSettingsView: NSStackView {
         } else {
             addArrangedSubview(SettingsPage.heading("Numbered projects"))
             addArrangedSubview(SettingsPage.note("Press Control-S, then S to open the project selector. With its search empty, press a number to open the assigned project."))
+            let assignments = NSStackView()
+            assignments.orientation = .vertical
+            assignments.alignment = .leading
+            assignments.spacing = 8
             for index in 0..<10 {
-                let label = NSTextField(labelWithString: "")
-                labels.append(label)
-                let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseProject(_:)))
-                choose.tag = index
-                let clear = NSButton(title: "Clear", target: self, action: #selector(clearProject(_:)))
-                clear.tag = index
-                clearButtons.append(clear)
                 let badge = NSTextField(labelWithString: ProjectSettings.digits[index])
-                badge.font = .monospacedSystemFont(ofSize: 13, weight: .semibold)
+                badge.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
                 badge.alignment = .center
-                badge.widthAnchor.constraint(equalToConstant: 24).isActive = true
-                addRow(label: label, controls: [choose, clear], prefix: badge)
+                badge.isBezeled = true
+                badge.bezelStyle = .roundedBezel
+                badge.drawsBackground = true
+                badge.backgroundColor = .controlBackgroundColor
+                badge.textColor = .secondaryLabelColor
+                badge.widthAnchor.constraint(equalToConstant: 30).isActive = true
+                let menu = NSPopUpButton(frame: .zero, pullsDown: true)
+                menu.lineBreakMode = .byTruncatingMiddle
+                menu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                assignmentMenus.append(menu)
+                let row = NSStackView(views: [badge, menu])
+                row.alignment = .centerY
+                row.spacing = 12
+                assignments.addArrangedSubview(row)
+                NSLayoutConstraint.activate([
+                    row.widthAnchor.constraint(equalTo: assignments.widthAnchor),
+                    row.heightAnchor.constraint(equalToConstant: 32)
+                ])
             }
+            addArrangedSubview(assignments)
+            assignments.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
         }
         updateLabels()
     }
@@ -107,10 +121,10 @@ final class ProjectSettingsView: NSStackView {
         }
     }
 
-    private func addRow(label: NSTextField, controls: [NSView], prefix: NSView? = nil) {
+    private func addRow(label: NSTextField, controls: [NSView]) {
         label.lineBreakMode = .byTruncatingMiddle
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: (prefix.map { [$0] } ?? []) + [label] + controls)
+        let row = NSStackView(views: [label] + controls)
         row.alignment = .centerY
         label.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         row.spacing = 8
@@ -121,12 +135,30 @@ final class ProjectSettingsView: NSStackView {
     private func updateLabels() {
         baseLabel.stringValue = settings.baseDirectory.path
         baseLabel.toolTip = baseLabel.stringValue
-        for (index, label) in labels.enumerated() {
-            let project = settings.assignments[index]
-            label.stringValue = project.map { "\($0.name) — \($0.directory.path)" } ?? "Unassigned"
-            label.textColor = project == nil ? .tertiaryLabelColor : .labelColor
-            clearButtons[index].isEnabled = project != nil
-            label.toolTip = project?.directory.path
+        let assignments = settings.assignments
+        for (index, popup) in assignmentMenus.enumerated() {
+            let project = assignments[index]
+            popup.removeAllItems()
+            // A pull-down menu's first item is its persistent button title.
+            popup.addItem(withTitle: project?.name ?? "Assign a project…")
+            popup.toolTip = project?.directory.path ?? "Choose a project for key \(ProjectSettings.digits[index])"
+            if let project {
+                let path = NSMenuItem(title: project.directory.path, action: nil, keyEquivalent: "")
+                path.isEnabled = false
+                popup.menu?.addItem(path)
+                popup.menu?.addItem(.separator())
+            }
+            let choose = NSMenuItem(title: project == nil ? "Choose Folder…" : "Change Folder…",
+                                    action: #selector(chooseProject(_:)), keyEquivalent: "")
+            choose.target = self
+            choose.tag = index
+            popup.menu?.addItem(choose)
+            if project != nil {
+                let clear = NSMenuItem(title: "Remove Assignment", action: #selector(clearProject(_:)), keyEquivalent: "")
+                clear.target = self
+                clear.tag = index
+                popup.menu?.addItem(clear)
+            }
         }
     }
 
@@ -149,7 +181,7 @@ final class ProjectSettingsView: NSStackView {
         }
     }
 
-    @objc private func chooseProject(_ sender: NSButton) {
+    @objc private func chooseProject(_ sender: NSMenuItem) {
         let index = sender.tag
         chooseFolder(initial: settings.assignments[index]?.directory ?? settings.baseDirectory) { [weak self] url in
             self?.settings.assign(PickerProject(name: url.lastPathComponent, directory: url), to: index)
@@ -157,7 +189,7 @@ final class ProjectSettingsView: NSStackView {
         }
     }
 
-    @objc private func clearProject(_ sender: NSButton) {
+    @objc private func clearProject(_ sender: NSMenuItem) {
         settings.assign(nil, to: sender.tag)
         updateLabels()
     }
