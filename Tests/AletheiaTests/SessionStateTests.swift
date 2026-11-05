@@ -9,7 +9,7 @@ final class SessionStateTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name) }
         let first = WindowSession(frame: CGRect(x: -700, y: 40, width: 800, height: 600),
                                   rootPath: "/project", filePaths: ["/project/b.md", "/project/a.ts"],
-                                  selectedPath: "/project/a.ts")
+                                  selectedPath: "/project/a.ts", treeWidth: 310, editorFraction: 0.4)
         let second = WindowSession(frame: CGRect(x: 50, y: 60, width: 900, height: 700),
                                    rootPath: nil, filePaths: [], selectedPath: nil)
         let state = SessionState(windows: [first, second], activeWindowIndex: 1)

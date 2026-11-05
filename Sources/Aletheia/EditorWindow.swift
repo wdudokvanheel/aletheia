@@ -42,7 +42,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
     private let editorHost = EditorHostView()
-    private let markdownSplit = NSSplitView()
+    private let split = PaneSplitView(proportional: false, preferredSize: 230)
+    private let markdownSplit = PaneSplitView(proportional: true, preferredSize: 0.5)
     private var contentConstraints: [NSLayoutConstraint] = []
     private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
         trackingMode: .selectOne, target: nil, action: nil)
@@ -64,12 +65,17 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                       selectedPath: selected?.file.requestedURL.path,
                       markdownModes: Dictionary(uniqueKeysWithValues: documents.filter(\.isMarkdown).map {
                           ($0.file.requestedURL.path, $0.markdownMode)
-                      }))
+                      }), treeWidth: split.preferredSize, editorFraction: markdownSplit.preferredSize)
     }
 
     func restore(_ state: WindowSession, completion: @escaping @MainActor ([String]) -> Void) {
         restoring = true
+        if let width = state.treeWidth, width.isFinite, width > 0 { split.preferredSize = width }
+        if let fraction = state.editorFraction, fraction.isFinite, fraction > 0, fraction < 1 {
+            markdownSplit.preferredSize = fraction
+        }
         window?.setFrame(state.visibleFrame(on: NSScreen.screens.map(\.visibleFrame)), display: true)
+        split.applyPreferredSize()
         DispatchQueue.global(qos: .userInitiated).async {
             var skipped: [String] = []
             var root: URL?
@@ -129,7 +135,6 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func buildLayout() {
-        let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.autoresizingMask = [.width, .height]
@@ -137,8 +142,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         split.addArrangedSubview(tree.scroll)
         split.addArrangedSubview(right)
         window?.contentView = split
-        split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-        split.setPosition(230, ofDividerAt: 0)
+        split.applyPreferredSize()
 
         tabScroll.hasHorizontalScroller = true
         tabScroll.autohidesScrollers = true
@@ -295,7 +299,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         if mode == .split {
             markdownSplit.addArrangedSubview(document.scroll)
             markdownSplit.addArrangedSubview(preview!.webView)
-            markdownSplit.setPosition(editorHost.bounds.width / 2, ofDividerAt: 0)
+            markdownSplit.applyPreferredSize()
         }
         window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
     }

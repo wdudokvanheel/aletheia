@@ -139,12 +139,14 @@ final class MarkdownPreviewTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
                                   filePaths: [url.path], selectedPath: url.path,
-                                  markdownModes: [url.path: .editor])
+                                  markdownModes: [url.path: .editor], treeWidth: 260, editorFraction: 0.4)
         let controller = EditorWindow()
         let failures: [String] = await withCheckedContinuation { continuation in
             controller.restore(state) { continuation.resume(returning: $0) }
         }
         XCTAssertTrue(failures.isEmpty)
+        XCTAssertEqual(controller.session.treeWidth, 260)
+        XCTAssertEqual(controller.session.editorFraction, 0.4)
         let editor = try XCTUnwrap(controller.window?.firstResponder as? NSTextView)
         editor.insertText(" edited", replacementRange: NSRange(location: 10, length: 0))
         let selection = editor.selectedRange()
@@ -153,7 +155,7 @@ final class MarkdownPreviewTests: XCTestCase {
             return view.subviews.lazy.compactMap { findControl($0) }.first
         }
         let control = try XCTUnwrap(controller.window?.contentView.flatMap(findControl))
-        for (segment, mode) in [(1, MarkdownMode.split), (2, .preview), (0, .editor)] {
+        for (segment, mode) in [(1, MarkdownMode.split), (2, .preview), (1, .split), (0, .editor)] {
             control.selectedSegment = segment
             NSApplication.shared.sendAction(try XCTUnwrap(control.action), to: control.target, from: control)
             controller.window?.contentView?.layoutSubtreeIfNeeded()
@@ -166,6 +168,8 @@ final class MarkdownPreviewTests: XCTestCase {
             XCTAssertEqual(visibleContent.frame.height, host.bounds.height, accuracy: 1)
             XCTAssertFalse(visibleContent.hasAmbiguousLayout)
             if let split = visibleContent as? NSSplitView {
+                XCTAssertEqual(split.arrangedSubviews[0].frame.width,
+                               (split.bounds.width - split.dividerThickness) * 0.4, accuracy: 1)
                 XCTAssertEqual(split.arrangedSubviews.count, 2)
                 XCTAssertGreaterThan(split.arrangedSubviews[0].frame.width, 100)
                 XCTAssertGreaterThan(split.arrangedSubviews[1].frame.width, 100)
@@ -223,6 +227,8 @@ final class MarkdownPreviewTests: XCTestCase {
             {"frame":[[0,0],[900,600]],"filePaths":["/a.md"],"selectedPath":"/a.md"}
             """.utf8)
         var state = try JSONDecoder().decode(WindowSession.self, from: old)
+        XCTAssertNil(state.treeWidth)
+        XCTAssertNil(state.editorFraction)
         XCTAssertNil(state.markdownModes)
         state.markdownModes = ["/a.md": .preview]
         XCTAssertEqual(try JSONDecoder().decode(WindowSession.self, from: JSONEncoder().encode(state)), state)

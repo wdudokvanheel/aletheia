@@ -11,6 +11,9 @@ struct WindowSession: Codable, Equatable, Sendable {
     var selectedPath: String?
     var markdownModes: [String: MarkdownMode]? = nil
 
+    var treeWidth: CGFloat? = nil
+    var editorFraction: CGFloat? = nil
+
     func visibleFrame(on screens: [CGRect]) -> CGRect {
         let fallback = CGRect(x: 0, y: 0, width: 1080, height: 720)
         let proposed = [frame.origin.x, frame.origin.y, frame.width, frame.height].allSatisfy(\.isFinite)
