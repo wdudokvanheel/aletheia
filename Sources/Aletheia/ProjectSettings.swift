@@ -7,7 +7,6 @@ final class ProjectSettings {
     private let defaults: UserDefaults
     private static let baseKey = "projectBaseDirectory"
     private static let assignmentsKey = "numberedProjects"
-    private static let seededKey = "numberedProjectsInitialized"
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
@@ -34,15 +33,9 @@ final class ProjectSettings {
         save(values)
     }
 
-    func seedIfNeeded(_ running: [PickerProject]) {
-        guard !defaults.bool(forKey: Self.seededKey) else { return }
-        save(Array((running.map(Optional.some) + Array(repeating: nil, count: 10)).prefix(10)))
-    }
-
     private func save(_ values: [PickerProject?]) {
         guard let data = try? JSONEncoder().encode(values) else { return }
         defaults.set(data, forKey: Self.assignmentsKey)
-        defaults.set(true, forKey: Self.seededKey)
     }
 }
 
@@ -54,7 +47,6 @@ final class ProjectSettingsView: NSStackView {
     private let settings: ProjectSettings
     private var assignmentMenus: [NSPopUpButton] = []
     private let baseLabel = NSTextField(labelWithString: "")
-    private var refreshGeneration = UUID()
 
     init(settings: ProjectSettings, section: Section) {
         self.settings = settings
@@ -68,7 +60,7 @@ final class ProjectSettingsView: NSStackView {
             addArrangedSubview(SettingsPage.note("Choose the folder whose projects appear in the project selector."))
             let baseButton = NSButton(title: "Choose Folder…", target: self, action: #selector(chooseBase))
             addRow(label: baseLabel, controls: [baseButton])
-            addArrangedSubview(SettingsPage.note("Open the project selector with Control-S, then S. Projects from your tmux sessions also appear there."))
+            addArrangedSubview(SettingsPage.note("Open the project selector with Control-S, then S."))
         } else {
             addArrangedSubview(SettingsPage.heading("Numbered projects"))
             addArrangedSubview(SettingsPage.note("Press Control-S, then S to open the project selector. With its search empty, press a number to open the assigned project."))
@@ -109,16 +101,6 @@ final class ProjectSettingsView: NSStackView {
 
     func refresh() {
         updateLabels()
-        guard section == .shortcuts else { return }
-        refreshGeneration = UUID()
-        let request = refreshGeneration
-        let base = settings.baseDirectory
-        Task { [weak self] in
-            let catalog = await Task.detached(priority: .userInitiated) { ProjectCatalog.read(base: base) }.value
-            guard let self, self.refreshGeneration == request else { return }
-            self.settings.seedIfNeeded(catalog.running)
-            self.updateLabels()
-        }
     }
 
     private func addRow(label: NSTextField, controls: [NSView]) {
