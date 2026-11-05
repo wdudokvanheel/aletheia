@@ -23,7 +23,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         editor.isAutomaticTextReplacementEnabled = false
         editor.isAutomaticSpellingCorrectionEnabled = false
         editor.isContinuousSpellCheckingEnabled = false
-        editor.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        editor.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
         editor.textColor = .textColor
         editor.backgroundColor = .textBackgroundColor
         editor.textContainerInset = NSSize(width: 12, height: 12)

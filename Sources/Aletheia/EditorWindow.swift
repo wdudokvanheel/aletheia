@@ -1,9 +1,28 @@
 import AppKit
 
 @MainActor
+private final class EditorTabView: NSView {
+    var selected = false
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if selected {
+            NSColor.textBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+            NSColor.controlAccentColor.setFill()
+            NSRect(x: 8, y: 0, width: bounds.width - 16, height: 2).fill()
+        } else {
+            NSColor.separatorColor.setFill()
+            NSRect(x: bounds.width - 1, y: 9, width: 1, height: bounds.height - 18).fill()
+        }
+    }
+}
+
+@MainActor
 final class EditorWindow: NSWindowController, NSWindowDelegate {
     private let tree = FolderTree()
     private let tabs = NSStackView()
+    private let tabScroll = NSScrollView()
     private let editorHost = NSView()
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
     private var documents: [EditorDocument] = []
@@ -45,14 +64,15 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         split.setPosition(230, ofDividerAt: 0)
 
-        let tabScroll = NSScrollView()
         tabScroll.hasHorizontalScroller = true
         tabScroll.autohidesScrollers = true
-        tabScroll.drawsBackground = false
+        tabScroll.drawsBackground = true
+        tabScroll.backgroundColor = .windowBackgroundColor
+        tabScroll.scrollerStyle = .overlay
         tabs.orientation = .horizontal
-        tabs.spacing = 2
+        tabs.spacing = 3
         tabs.alignment = .centerY
-        tabs.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
+        tabs.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 6)
         tabScroll.documentView = tabs
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -63,7 +83,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             tabScroll.topAnchor.constraint(equalTo: right.topAnchor),
             tabScroll.leadingAnchor.constraint(equalTo: right.leadingAnchor),
             tabScroll.trailingAnchor.constraint(equalTo: right.trailingAnchor),
-            tabScroll.heightAnchor.constraint(equalToConstant: 38),
+            tabScroll.heightAnchor.constraint(equalToConstant: 44),
             tabs.heightAnchor.constraint(equalTo: tabScroll.contentView.heightAnchor),
             editorHost.topAnchor.constraint(equalTo: tabScroll.bottomAnchor),
             editorHost.leadingAnchor.constraint(equalTo: right.leadingAnchor),
@@ -129,29 +149,64 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     private func refreshTabs() {
         for view in tabs.arrangedSubviews { tabs.removeArrangedSubview(view); view.removeFromSuperview() }
+        var selectedTab: NSView?
         for (index, document) in documents.enumerated() {
-            let group = NSStackView()
-            group.orientation = .horizontal
-            group.spacing = 0
-            let button = NSButton(title: (document.isDirty ? "● " : "") + document.file.url.lastPathComponent,
+            let group = EditorTabView()
+            group.selected = document === selected
+            group.translatesAutoresizingMaskIntoConstraints = false
+            let button = NSButton(title: document.file.url.lastPathComponent,
                                   target: self, action: #selector(selectTab(_:)))
             button.tag = index
-            button.bezelStyle = .inline
-            button.setButtonType(.toggle)
-            button.state = document === selected ? .on : .off
-            button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            button.isBordered = false
+            button.setButtonType(.momentaryChange)
+            button.font = .systemFont(ofSize: 14, weight: group.selected ? .medium : .regular)
+            button.contentTintColor = group.selected ? .labelColor : .secondaryLabelColor
+            button.lineBreakMode = .byTruncatingMiddle
             button.toolTip = document.file.requestedURL.path
+            let dirty = NSTextField(labelWithString: document.isDirty ? "●" : "")
+            dirty.font = .systemFont(ofSize: 9)
+            dirty.textColor = .secondaryLabelColor
             let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!,
                                  target: self, action: #selector(closeTabButton(_:)))
-            close.bezelStyle = .inline
+            close.isBordered = false
+            close.contentTintColor = .secondaryLabelColor
+            close.imageScaling = .scaleProportionallyDown
+            close.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
             close.tag = index
             close.isEnabled = !document.busy && !closing
-            group.addArrangedSubview(button)
-            group.addArrangedSubview(close)
+            for view in [button, dirty, close] {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                group.addSubview(view)
+            }
+            let titleWidth = (button.title as NSString).size(withAttributes: [.font: button.font!]).width
+            NSLayoutConstraint.activate([
+                group.widthAnchor.constraint(equalToConstant: min(280, max(150, titleWidth + 76))),
+                group.heightAnchor.constraint(equalToConstant: 36),
+                button.leadingAnchor.constraint(equalTo: group.leadingAnchor, constant: 10),
+                button.topAnchor.constraint(equalTo: group.topAnchor),
+                button.bottomAnchor.constraint(equalTo: group.bottomAnchor),
+                button.trailingAnchor.constraint(equalTo: dirty.leadingAnchor, constant: -5),
+                dirty.widthAnchor.constraint(equalToConstant: 10),
+                dirty.centerYAnchor.constraint(equalTo: group.centerYAnchor),
+                dirty.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -4),
+                close.widthAnchor.constraint(equalToConstant: 24),
+                close.heightAnchor.constraint(equalToConstant: 26),
+                close.centerYAnchor.constraint(equalTo: group.centerYAnchor),
+                close.trailingAnchor.constraint(equalTo: group.trailingAnchor, constant: -4)
+            ])
             tabs.addArrangedSubview(group)
+            if group.selected { selectedTab = group }
         }
         tabs.layoutSubtreeIfNeeded()
-        tabs.setFrameSize(tabs.fittingSize)
+        tabs.setFrameSize(NSSize(width: tabs.fittingSize.width, height: tabScroll.contentSize.height))
+        tabs.layoutSubtreeIfNeeded()
+        if let selectedTab { tabs.scrollToVisible(selectedTab.frame) }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let selected, let index = documents.firstIndex(where: { $0 === selected }),
+              index < tabs.arrangedSubviews.count else { return }
+        tabs.scrollToVisible(tabs.arrangedSubviews[index].frame)
     }
 
     private func updateTitle() {
