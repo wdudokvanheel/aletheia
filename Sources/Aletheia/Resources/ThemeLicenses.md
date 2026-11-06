@@ -388,3 +388,37 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+
+## ayu-theme/ayu-colors (ayu 9.1.0)
+
+Source: https://github.com/ayu-theme/ayu-colors
+Published palette: https://registry.npmjs.org/ayu/-/ayu-9.1.0.tgz
+Archive SHA-256: `1c9735d39ec51a2e75bd9925c6a966e31200dfb5c3ec40b5d15d780d59fe5078`.
+
+Adapted static UI and syntax colors from `dist/generated/{light,mirage,dark}.js`;
+no upstream runtime code is included. Shared syntax roles and staged/conflict
+colors are Aletheia adaptations.
+
+```text
+MIT License
+
+Copyright (c) Konstantin Pschera <me@kons.ch> (kons.ch)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

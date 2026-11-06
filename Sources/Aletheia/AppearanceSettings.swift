@@ -69,6 +69,9 @@ struct AppColorScheme {
     // docs/theme-provenance.md and docs/theme-licenses.md.
     static let all: [AppColorScheme] = [
         .init(id: "system", name: "System", palette: .system),
+        .init(id: "ayu-light", name: "Ayu Light", palette: .init(isDark: false, 0xfcfcfc, 0x5c6166, 0xf8f9fa, 0x828e9f, 0xf29718, 0x6cbf43, 0x478acc, 0xff7383, 0x4cbf99, 0xa37acc)),
+        .init(id: "ayu-mirage", name: "Ayu Mirage", palette: .init(isDark: true, 0x242936, 0xcccac2, 0x1f2430, 0x707a8c, 0xffcc66, 0x87d96c, 0x80bfff, 0xf27983, 0x95e6cb, 0xdfbfff)),
+        .init(id: "ayu-dark", name: "Ayu Dark", palette: .init(isDark: true, 0x10141c, 0xbfbdb6, 0x0d1017, 0x5a6378, 0xe6b450, 0x70bf56, 0x73b8ff, 0xf26d78, 0x95e6cb, 0xd2a6ff)),
         .init(id: "catppuccin-latte", name: "Catppuccin Latte", palette: .init(isDark: false, 0xeff1f5, 0x4c4f69, 0xe6e9ef, 0x6c6f85, 0x1e66f5, 0x40a02b, 0xdf8e1d, 0xd20f39, 0x179299, 0x8839ef)),
         .init(id: "catppuccin-frappe", name: "Catppuccin Frappé", palette: .init(isDark: true, 0x303446, 0xc6d0f5, 0x292c3c, 0xa5adce, 0x8caaee, 0xa6d189, 0xe5c890, 0xe78284, 0x81c8be, 0xca9ee6)),
         .init(id: "catppuccin-macchiato", name: "Catppuccin Macchiato", palette: .init(isDark: true, 0x24273a, 0xcad3f5, 0x1e2030, 0xa5adcb, 0x8aadf4, 0xa6da95, 0xeed49f, 0xed8796, 0x8bd5ca, 0xc6a0f6)),
