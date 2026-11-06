@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/file-icons/atom",
+  "revision": "fa4bc4850eb5bbc0d192c127fb4be10af3f049b2",
+  "sha256": {
+    "lib/icons/.icondb.js": "97ba61752b8ee55cd6ab8375565fdea2f5cf69b9dd9856681737ad1e4544f412",
+    "styles/icons.less": "a80bbd3661b7ae6151f1b058aaa89e1ed2c13a5565d2511d04d5d4b16c5fa2e0",
+    "fonts/devopicons.woff2": "8124aa3adefdacaa5a06d5af0f9779ddbce616dea7ffc904ac806c3a2e22aa78",
+    "fonts/file-icons.woff2": "2e0230d1e87121c44c66125114d49b5e071853ab8056cab0d6159cf2c03ba4df",
+    "fonts/fontawesome.woff2": "2adefcbc041e7d18fcf2d417879dc5a09997aa64d675b7a3c4b6ce33da13f3fe",
+    "fonts/mfixx.woff2": "8f4d8c28b7ca1a1f74597d47b03f6a6b8d0b53ce744abc7d6e92d5b3fd822b00"
+  }
+}

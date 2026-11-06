@@ -271,7 +271,9 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     private func configureIcon(_ cell: NSTableCellView, node: FolderNode) {
         let symbol = node.isDirectory ? (node.wantsExpanded ? "folder.fill" : "folder") : Self.fileSymbol(for: node.url)
-        cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let fileIcon = node.isDirectory ? nil : FileIcons.shared.rule(for: node.url)
+        cell.imageView?.image = fileIcon.flatMap { FileIcons.shared.image(for: $0.icon) }
+            ?? NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             ?? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         let palette = AppSettings.shared.palette
         let status = gitStatus.status(for: node.url)
@@ -286,7 +288,9 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         else { color = palette.foreground }
         cell.textField?.textColor = node.url.lastPathComponent.hasPrefix(".")
             ? color.blended(withFraction: 0.16, of: .white) ?? color : color
-        cell.imageView?.contentTintColor = status.isEmpty ? (node.isDirectory ? palette.accent : palette.muted) : color
+        let dark = (palette.background.usingColorSpace(.sRGB)?.brightnessComponent ?? 1) < 0.5
+        let iconColor = fileIcon.flatMap { FileIcons.shared.color(for: $0, dark: dark) }
+        cell.imageView?.contentTintColor = status.isEmpty ? (node.isDirectory ? palette.accent : iconColor ?? palette.muted) : color
         cell.toolTip = node.url.path + (status.isEmpty ? "" : "\n" + status.description)
         if node.isDirectory && status.contains(.deleted) {
             cell.toolTip! += "\nIncludes deleted paths; files absent from disk are not listed."
