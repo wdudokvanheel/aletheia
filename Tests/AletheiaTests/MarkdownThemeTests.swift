@@ -26,14 +26,16 @@ final class MarkdownThemeTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         let layout = try XCTUnwrap(document.editor.layoutManager)
-        for id in ["ayu-light", "ayu-dark", "ayu-mirage"] {
-            AppSettings.shared.selectScheme(id: id)
+        let parsedGeneration = document.highlightedGeneration
+        for scheme in AppSettings.schemes {
+            AppSettings.shared.selectScheme(id: scheme.id)
             // No delay: Settings must synchronously recolor already parsed tokens.
             for run in runs {
                 XCTAssertEqual(layout.temporaryAttribute(.foregroundColor, atCharacterIndex: run.range.location,
                                                          effectiveRange: nil) as? NSColor,
                                run.style.color(AppSettings.shared.selectedScheme.syntaxPalette))
             }
+            XCTAssertEqual(document.highlightedGeneration, parsedGeneration)
         }
         func control(in view: NSView) -> NSSegmentedControl? {
             (view as? NSSegmentedControl) ?? view.subviews.lazy.compactMap { control(in: $0) }.first
