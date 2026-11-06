@@ -115,6 +115,9 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         outline.delegate = self
         outline.target = self
         outline.action = #selector(openSelection)
+        outline.setDraggingSourceOperationMask(.copy, forLocal: false)
+        outline.setDraggingSourceOperationMask([], forLocal: true)
+        outline.verticalMotionCanBeginDrag = true
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -269,6 +272,13 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? FolderNode)?.isDirectory == true
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
+        guard let node = item as? FolderNode else { return nil }
+        // Share the existing on-disk item, including its original symlink path.
+        // Unsaved editor content is never implicitly saved or exported by a drag.
+        return node.url as NSURL
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
