@@ -1,6 +1,6 @@
 import Foundation
 
-/// The exact bytes and filesystem identity last read or saved. No file watcher or autosave.
+/// The exact bytes and filesystem identity last read or saved. No autosave.
 struct TextFile: Sendable {
     let requestedURL: URL
     let url: URL
@@ -69,6 +69,10 @@ struct TextFile: Sendable {
         }
         return TextFile(requestedURL: requestedURL, url: url, text: text, hasBOM: bom,
                         newline: newline, bytes: bytes, identity: before)
+    }
+
+    func matches(_ other: TextFile) -> Bool {
+        url == other.url && identity == other.identity && bytes == other.bytes
     }
 
     func save(_ text: String) throws -> TextFile {

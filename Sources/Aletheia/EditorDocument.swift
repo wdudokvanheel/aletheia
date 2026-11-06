@@ -48,6 +48,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
+    var diskUnavailable = false { didSet { updateDirty() } }
     var busy = false
     var markdownMode = MarkdownMode.split
     var isMarkdown: Bool { file.url.pathExtension.lowercased() == "md" }
@@ -191,7 +192,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     private func updateDirty() {
-        let dirty = !editor.string.utf8.elementsEqual(file.text.utf8)
+        let dirty = diskUnavailable || !editor.string.utf8.elementsEqual(file.text.utf8)
         guard dirty != isDirty else { return }
         isDirty = dirty
         onChange?()
@@ -211,9 +212,17 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     func reload(_ file: TextFile) {
+        let selection = editor.selectedRange()
+        let position = scrollPosition
+        diskUnavailable = false
         self.file = file
         editor.string = file.text
         editor.undoManager?.removeAllActions()
+        editor.setSelectedRange(NSRange(location: min(selection.location, editor.string.utf16.count), length: 0))
+        restoreScrollPosition(position)
+        restoreSourceScrollAfterLayout()
+        scheduleHighlighting()
+        onContentChange?()
         updateDirty()
     }
 }

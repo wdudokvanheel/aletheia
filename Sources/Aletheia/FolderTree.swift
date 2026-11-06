@@ -6,6 +6,7 @@ final class FolderNode {
     let isDirectory: Bool
     var children: [FolderNode]?
     var loading = false
+    var refreshAgain = false
     var wantsExpanded = false
 
     init(url: URL, isDirectory: Bool) {
@@ -66,6 +67,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         var waiting = false
         func visit(_ node: FolderNode) {
             guard !failedRestorationPaths.contains(node.url.path) else { return }
+            if node.loading { waiting = true; return }
             guard let children = node.children else {
                 load(node)
                 waiting = true
@@ -125,7 +127,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     func setRoot(_ url: URL) {
         pendingState = nil
         failedRestorationPaths.removeAll()
-        root = FolderNode(url: url, isDirectory: true)
+        root = FolderNode(url: url.resolvingSymlinksInPath(), isDirectory: true)
         gitStatus = GitStatusSnapshot()
         outline.reloadData()
         if let root { load(root) }
@@ -182,8 +184,32 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         }
     }
 
-    private func load(_ node: FolderNode) {
-        guard node.children == nil, !node.loading else { return }
+    func refresh(changedPaths: Set<String>) {
+        let changedPaths = Set(changedPaths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
+        guard let root, changedPaths.contains(where: { $0 == root.url.path || $0.hasPrefix(root.url.path + "/") || root.url.path.hasPrefix($0 + "/") }) else { return }
+        let state = session
+        var affected: [FolderNode] = []
+        func visit(_ node: FolderNode) {
+            guard node.children != nil || node.loading else { return }
+            let path = node.url.resolvingSymlinksInPath().path
+            if changedPaths.contains(where: {
+                $0 == path || URL(fileURLWithPath: $0).deletingLastPathComponent().path == path
+                    || path.hasPrefix($0 + "/")
+            }) { affected.append(node) }
+            node.children?.filter(\.isDirectory).forEach(visit)
+        }
+        visit(root)
+        if !affected.isEmpty { pendingState = state }
+        for node in affected { load(node, refresh: true) }
+        refreshGitStatus()
+    }
+
+    private func load(_ node: FolderNode, refresh: Bool = false) {
+        if node.loading {
+            if refresh { node.refreshAgain = true }
+            return
+        }
+        guard refresh || node.children == nil else { return }
         node.loading = true
         let url = node.url
         let loadingRoot = root
@@ -205,7 +231,11 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                 node.loading = false
                 switch result {
                 case .success(let children):
-                    node.children = children.map { FolderNode(url: $0.url, isDirectory: $0.isDirectory) }
+                    let previous = node.children ?? []
+                    node.children = children.map { child in
+                        previous.first { $0.url == child.url && $0.isDirectory == child.isDirectory }
+                            ?? FolderNode(url: child.url, isDirectory: child.isDirectory)
+                    }
                     if node === self.root { self.outline.reloadData() }
                     else {
                         let expand = node.wantsExpanded
@@ -217,6 +247,10 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                     // Keep nil so collapsing/re-expanding can retry after access changes.
                     self.failedRestorationPaths.insert(node.url.path)
                     self.onError?(error)
+                }
+                if node.refreshAgain {
+                    node.refreshAgain = false
+                    self.load(node, refresh: true)
                 }
                 self.restoreLoadedBranches()
             }

@@ -91,6 +91,21 @@ final class TextFileTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "original")
     }
 
+    @MainActor func testAcceptingDiskVersionAllowsSaveButPreservesUndo() async throws {
+        try Data("original".utf8).write(to: url)
+        let document = EditorDocument(file: try TextFile.read(url))
+        document.editor.insertText("local ", replacementRange: NSRange(location: 0, length: 0))
+        document.editor.breakUndoCoalescing()
+        try Data("external".utf8).write(to: url, options: .atomic)
+        document.file = try TextFile.read(url)
+        XCTAssertEqual(document.editor.string, "local original")
+        XCTAssertTrue(document.isDirty)
+        XCTAssertTrue(document.editor.undoManager!.canUndo)
+        document.file = try document.file.save(document.editor.string)
+        XCTAssertFalse(document.isDirty)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "local original")
+    }
+
     func testInvalidUTF8AndBinaryAreRejectedWithoutModification() throws {
         for bytes in [Data([0xFF, 0xFE, 0x41]), Data([0x41, 0x00, 0x42])] {
             try bytes.write(to: url)

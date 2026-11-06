@@ -51,7 +51,11 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private var previewRelease: Task<Void, Never>?
     private var previewSuspended = false
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
-    private var documents: [EditorDocument] = []
+    private let watcher = FileWatcher()
+    private var diskCheckTask: Task<Void, Never>?
+    private var diskCheckPending = false
+    private var diskErrors: [ObjectIdentifier: String] = [:]
+    private(set) var documents: [EditorDocument] = [] { didSet { updateWatching() } }
     private var selected: EditorDocument?
     private var rootURL: URL?
     private var approvedClose = false
@@ -118,6 +122,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                 let selected = self.documents.first { $0.file.requestedURL.path == state.selectedPath }
                 self.select(selected ?? self.documents.first)
                 self.restoring = false
+                self.checkDiskChanges()
                 completion(failures)
             }
         }
@@ -139,6 +144,15 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(applyTheme),
             name: AppSettings.didChange, object: nil)
         applyTheme()
+        watcher.onChange = { [weak self] paths in
+            guard let self, !self.closed else { return }
+            self.tree.refresh(changedPaths: paths)
+            if self.documents.contains(where: { document in
+                [document.file.url.path, document.file.requestedURL.path].contains { file in
+                    paths.contains { $0 == file || file.hasPrefix($0 + "/") }
+                }
+            }) { self.checkDiskChanges() }
+        }
         tree.onOpen = { [weak self] in self?.openFile($0) }
         tree.onError = { [weak self] in self?.present($0) }
     }
@@ -207,6 +221,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     func setRoot(_ url: URL) {
         rootURL = url.resolvingSymlinksInPath()
         tree.setRoot(rootURL!)
+        updateWatching()
         updateTitle()
     }
 
@@ -395,6 +410,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         tree.refreshGitStatus()
+        checkDiskChanges()
         selected?.restoreSourceScrollAfterLayout()
         onActivate?()
     }
@@ -429,6 +445,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         confirm(document) { allowed in
             self.cancelPreparedClose()
             guard allowed, let index = self.documents.firstIndex(where: { $0 === document }) else { return }
+            self.diskErrors[ObjectIdentifier(document)] = nil
             self.documents.remove(at: index)
             if self.selected === document {
                 self.select(self.documents.isEmpty ? nil : self.documents[min(index, self.documents.count - 1)])
@@ -468,6 +485,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             let result = Result { try file.save(text) }
             DispatchQueue.main.async {
                 document.busy = false
+                self.checkDiskChanges()
                 document.editor.isEditable = !self.closing
                 switch result {
                 case .success(let saved):
@@ -487,37 +505,107 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         }
     }
 
+    private func updateWatching() {
+        guard !closed else { return }
+        var urls = rootURL.map { [$0] } ?? []
+        for document in documents {
+            urls.append(document.file.url.deletingLastPathComponent())
+            urls.append(document.file.requestedURL.deletingLastPathComponent())
+        }
+        do { try watcher.watch(urls) } catch { present(error) }
+        checkDiskChanges()
+    }
+
+    /// Coalesce bursts and serialize reads/sheets. Recheck dirty state after the async read.
+    func checkDiskChanges() {
+        diskCheckPending = true
+        guard diskCheckTask == nil, !closed, !closing, !restoring,
+              window?.attachedSheet == nil, !documents.contains(where: \.busy) else { return }
+        diskCheckPending = false
+        diskCheckTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            guard let self else { return }
+            for document in self.documents {
+                guard !self.closed, !self.closing, self.window?.attachedSheet == nil,
+                      !document.busy else { self.diskCheckPending = true; break }
+                let baseline = document.file
+                let result = await Task.detached(priority: .utility) {
+                    Result { try TextFile.read(baseline.requestedURL) }
+                }.value
+                guard !self.closed, !self.closing, self.window?.attachedSheet == nil, !document.busy,
+                      self.documents.contains(where: { $0 === document }),
+                      document.file.matches(baseline) else { self.diskCheckPending = true; continue }
+                switch result {
+                case .success(let current):
+                    self.diskErrors[ObjectIdentifier(document)] = nil
+                    let wasUnavailable = document.diskUnavailable
+                    document.diskUnavailable = false
+                    guard !baseline.matches(current) || wasUnavailable else { continue }
+                    if document.isDirty {
+                        self.offerConflict(document, current: current) { _ in }
+                        self.diskCheckPending = true
+                        break
+                    } else {
+                        document.reload(current)
+                        self.updateWatching()
+                    }
+                case .failure(let error):
+                    // Missing/unreadable files retain their buffer and require a close decision.
+                    document.diskUnavailable = true
+                    let message = error.localizedDescription
+                    if self.diskErrors[ObjectIdentifier(document)] != message {
+                        self.diskErrors[ObjectIdentifier(document)] = message
+                        self.present(error)
+                    }
+                }
+                if self.window?.attachedSheet != nil { self.diskCheckPending = true; break }
+            }
+            self.diskCheckTask = nil
+            if self.diskCheckPending { self.checkDiskChanges() }
+        }
+    }
+
+    func windowDidEndSheet(_ notification: Notification) {
+        // Sheet completion handlers may still be applying the user's choice.
+        DispatchQueue.main.async { [weak self] in self?.checkDiskChanges() }
+    }
+
     private func resolveConflict(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
+        document.busy = true
+        document.editor.isEditable = false
+        let url = document.file.requestedURL
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { Result { try TextFile.read(url) } }.value
+            document.busy = false
+            document.editor.isEditable = !closing
+            switch result {
+            case .success(let current): offerConflict(document, current: current, completion: completion)
+            case .failure(let error): present(error); completion(false)
+            }
+        }
+    }
+
+    private func offerConflict(_ document: EditorDocument, current: TextFile,
+                               completion: @escaping @MainActor (Bool) -> Void) {
+        document.busy = true
+        document.editor.isEditable = false
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "“\(document.file.url.lastPathComponent)” changed on disk"
-        alert.informativeText = "Reload discards your unsaved edits and reads the current file. Keep Edits retains your buffer without overwriting the file."
-        alert.addButton(withTitle: "Keep Edits")
-        alert.addButton(withTitle: "Reload from Disk")
+        alert.informativeText = "Reload discards your edits. Keep Editing preserves your edits and allows your next Save to overwrite this disk version. Further disk changes will ask again."
+        alert.addButton(withTitle: "Keep Editing and Overwrite on Save")
+        alert.addButton(withTitle: "Discard Changes and Reload")
         alert.beginSheetModal(for: window!) { response in
-            guard response == .alertSecondButtonReturn else {
-                self.refreshTabs()
-                completion(false)
-                return
-            }
-            document.busy = true
-            document.editor.isEditable = false
-            let requestedURL = document.file.requestedURL
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { try TextFile.read(requestedURL) }
-                DispatchQueue.main.async {
-                    document.busy = false
-                    document.editor.isEditable = !self.closing
-                    switch result {
-                    case .success(let file):
-                        // Reload explicitly abandons these edits, but cancels any pending close.
-                        document.reload(file)
-                    case .failure(let error): self.present(error)
-                    }
-                    self.refreshTabs()
-                    completion(false)
-                }
-            }
+            document.diskUnavailable = false
+            if response == .alertSecondButtonReturn { document.reload(current) }
+            else { document.file = current }
+            document.busy = false
+            document.editor.isEditable = !self.closing
+            self.refreshTabs()
+            self.updateTitle()
+            self.updateWatching()
+            completion(false) // A conflict decision never implicitly closes or saves a tab.
+            self.checkDiskChanges()
         }
     }
 
@@ -534,6 +622,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     func cancelPreparedClose() {
         closing = false
+        checkDiskChanges()
         documents.forEach { $0.editor.isEditable = !$0.busy }
         refreshTabs()
     }
@@ -604,6 +693,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         closed = true
+        watcher.stop()
+        diskCheckTask?.cancel()
+        diskCheckTask = nil
         previewRelease?.cancel()
         previewRelease = nil
         releasePreview()

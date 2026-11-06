@@ -41,6 +41,22 @@ final class FolderTreeRestorationTests: XCTestCase {
             .first { $0.url.resolvingSymlinksInPath().path == untouched.path }
         XCTAssertNotNil(untouchedNode)
         XCTAssertNil(untouchedNode?.children, "Unexpanded branches must never be enumerated")
+        let added = nested.appendingPathComponent("added.txt")
+        try Data().write(to: added)
+        try FileManager.default.removeItem(at: nested.appendingPathComponent("file0.txt"))
+        tree.refresh(changedPaths: [added.path, nested.appendingPathComponent("file0.txt").path])
+        let refreshDeadline = Date().addingTimeInterval(5)
+        while !(0..<outline.numberOfRows).contains(where: {
+            (outline.item(atRow: $0) as? FolderNode)?.url.resolvingSymlinksInPath().path == added.resolvingSymlinksInPath().path
+        }), Date() < refreshDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        let visible = (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? FolderNode }
+        XCTAssertTrue(visible.contains { $0.url.resolvingSymlinksInPath().path == added.resolvingSymlinksInPath().path })
+        XCTAssertFalse(visible.contains { $0.url.lastPathComponent == "file0.txt" })
+        XCTAssertEqual((outline.item(atRow: outline.selectedRow) as? FolderNode)?.url.resolvingSymlinksInPath().path, selected.resolvingSymlinksInPath().path)
+        XCTAssertEqual(tree.session.expandedPaths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }.sorted(), state.expandedPaths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }.sorted())
+        XCTAssertNil(untouchedNode?.children)
+        XCTAssertFalse(opened)
+
     }
 
     @MainActor func testMissingBranchFinishesAndClampsScroll() async throws {
