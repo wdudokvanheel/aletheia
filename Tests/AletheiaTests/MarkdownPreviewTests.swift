@@ -111,6 +111,68 @@ final class MarkdownPreviewTests: XCTestCase {
         preview.show(nil)
     }
 
+    @MainActor func testTabSelectionBypassesEditDebounce() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("# Selected".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let first = EditorDocument(file: try TextFile.read(url))
+        let second = EditorDocument(file: try TextFile.read(url))
+        let preview = MarkdownPreview()
+        try await eventually { preview.ready }
+        preview.show(first)
+        try await eventually { preview.renderCount == 1 }
+        preview.contentChanged()
+        preview.show(second)
+        // A main-actor scheduling turn starts a selection render without sleeping
+        // for the 200 ms editing debounce (no WebKit paint timing assertion).
+        await Task.yield()
+        XCTAssertEqual(preview.renderCount, 2)
+        preview.contentChanged()
+        await Task.yield()
+        XCTAssertEqual(preview.renderCount, 2)
+        preview.show(nil)
+    }
+
+    @MainActor func testHiddenWindowReleasesAndRecreatesPreview() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("# Retained".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let controller = EditorWindow()
+        let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                  filePaths: [url.path], selectedPath: url.path)
+        let failures: [String] = await withCheckedContinuation { continuation in
+            controller.restore(state) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(failures.isEmpty)
+        let editor = try XCTUnwrap(controller.window?.firstResponder as? NSTextView)
+        editor.insertText(" edited", replacementRange: NSRange(location: 10, length: 0))
+        let selection = editor.selectedRange()
+        weak let oldPreview = controller.preview
+        weak let oldWebView = controller.preview?.webView
+        XCTAssertNotNil(oldPreview)
+        controller.updatePreviewVisibility(isVisible: false)
+        try await Task.sleep(for: .milliseconds(100))
+        controller.updatePreviewVisibility(isVisible: true)
+        try await Task.sleep(for: .milliseconds(2100))
+        XCTAssertTrue(controller.preview === oldPreview)
+        controller.updatePreviewVisibility(isVisible: false)
+        XCTAssertNotNil(controller.preview)
+        try await eventually { controller.preview == nil }
+        try await eventually { oldPreview == nil && oldWebView == nil }
+        controller.updatePreviewVisibility(isVisible: true)
+        let recreated = try XCTUnwrap(controller.preview)
+        try await eventually {
+            guard recreated.ready else { return false }
+            return try await self.script(recreated, "return document.querySelector('h1')?.textContent") as? String == "Retained edited"
+        }
+        XCTAssertEqual(editor.selectedRange(), selection)
+        editor.undoManager?.undo()
+        XCTAssertEqual(editor.string, "# Retained")
+        controller.window?.performClose(nil)
+    }
+
     @MainActor func testLocalResourceBoundaryRejectsTraversalSymlinksAndOldDocument() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

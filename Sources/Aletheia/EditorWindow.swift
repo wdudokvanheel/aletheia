@@ -47,7 +47,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private var contentConstraints: [NSLayoutConstraint] = []
     private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
         trackingMode: .selectOne, target: nil, action: nil)
-    private var preview: MarkdownPreview?
+    private(set) var preview: MarkdownPreview?
+    private var previewRelease: Task<Void, Never>?
+    private var previewSuspended = false
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
     private var documents: [EditorDocument] = []
     private var selected: EditorDocument?
@@ -279,6 +281,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         guard let document = selected else { preview?.show(nil); return }
         let mode = document.isMarkdown ? document.markdownMode : .editor
         modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
+        guard !previewSuspended else { return }
         if mode != .editor, preview == nil {
             preview = MarkdownPreview()
             preview?.onOpen = { [weak self] in self?.openFile($0) }
@@ -556,9 +559,54 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         return false
     }
 
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        updatePreviewVisibility(isVisible: window?.occlusionState.contains(.visible) == true)
+    }
+
+    // AppKit occlusion covers fully covered, minimized, hidden and off-Space windows.
+    // Losing key-window status alone must not release a still-visible preview.
+    func updatePreviewVisibility(isVisible: Bool) {
+        guard !closed else { return }
+        if isVisible {
+            previewRelease?.cancel()
+            previewRelease = nil
+            let needsLayout = previewSuspended
+            previewSuspended = false
+            if needsLayout { layoutEditor() }
+        } else if previewRelease == nil, !previewSuspended {
+            previewRelease = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self, !Task.isCancelled, !self.closed else { return }
+                self.previewRelease = nil
+                self.previewSuspended = true
+                self.releasePreview()
+            }
+        }
+    }
+
+    private func releasePreview() {
+        guard let preview else { return }
+        preview.show(nil)
+        preview.webView.stopLoading()
+        if markdownSplit.arrangedSubviews.contains(preview.webView) {
+            markdownSplit.removeFromSuperview()
+            for view in markdownSplit.arrangedSubviews {
+                markdownSplit.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+        }
+        preview.webView.removeFromSuperview()
+        self.preview = nil
+        // Constraints retain their views too, including a preview-only WKWebView.
+        NSLayoutConstraint.deactivate(contentConstraints)
+        contentConstraints.removeAll()
+    }
+
     func windowWillClose(_ notification: Notification) {
         closed = true
-        preview?.show(nil)
+        previewRelease?.cancel()
+        previewRelease = nil
+        releasePreview()
         onClose?(closingSession ?? session)
     }
 

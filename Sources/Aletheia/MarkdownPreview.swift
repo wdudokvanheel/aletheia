@@ -124,7 +124,7 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
             resources.token = UUID().uuidString
             resetScroll = true
         }
-        schedule(clear: changed)
+        schedule(clear: changed, immediately: true)
     }
 
     func applyTheme() {
@@ -151,7 +151,7 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
 
     func contentChanged() { schedule(clear: false) }
 
-    private func schedule(clear: Bool) {
+    private func schedule(clear: Bool, immediately: Bool = false) {
         generation += 1
         pending?.cancel()
         pending = nil
@@ -162,7 +162,9 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
         }
         guard document != nil, ready else { return }
         pending = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+            if !immediately {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+            }
             guard let self, !Task.isCancelled, value == self.generation,
                   let document = self.document else { return }
             do {
@@ -198,7 +200,7 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         ready = true
         applyTheme()
-        schedule(clear: true)
+        schedule(clear: true, immediately: true)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
