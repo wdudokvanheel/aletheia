@@ -58,6 +58,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private(set) var documents: [EditorDocument] = [] { didSet { updateWatching() } }
     private var selected: EditorDocument?
     private var rootURL: URL?
+    private var lastMarkdownMode: MarkdownMode = .split
     private var approvedClose = false
     private var closing = false
     private var closed = false
@@ -73,7 +74,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                       selectedPath: selected?.file.requestedURL.path,
                       markdownModes: Dictionary(uniqueKeysWithValues: documents.filter(\.isMarkdown).map {
                           ($0.file.requestedURL.path, $0.markdownMode)
-                      }), treeState: tree.session,
+                      }), lastMarkdownMode: lastMarkdownMode, treeState: tree.session,
                       scrollPositions: Dictionary(uniqueKeysWithValues: documents.map {
                           ($0.file.requestedURL.path, $0.scrollPosition)
                       }), treeWidth: split.preferredSize, editorFraction: markdownSplit.preferredSize)
@@ -112,6 +113,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                     self.setRoot(restoredRoot)
                     if let treeState = state.treeState { self.tree.restore(treeState) }
                 }
+                self.lastMarkdownMode = state.lastMarkdownMode
+                    ?? state.filePaths.reversed().compactMap { state.markdownModes?[$0] }.first
+                    ?? .split
                 for file in restoredFiles where !self.documents.contains(where: { $0.file.url == file.url }) {
                     let document = EditorDocument(file: file)
                     self.configure(document)
@@ -219,6 +223,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     func setRoot(_ url: URL) {
+        if rootURL != url.resolvingSymlinksInPath() { lastMarkdownMode = .split }
         rootURL = url.resolvingSymlinksInPath()
         tree.setRoot(rootURL!)
         updateWatching()
@@ -232,6 +237,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             select(existing)
             return
         }
+        let inheritedMarkdownMode = lastMarkdownMode
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try TextFile.read(url) }
             DispatchQueue.main.async {
@@ -244,6 +250,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                     }
                     if self.rootURL == nil { self.setRoot(file.url.deletingLastPathComponent()) }
                     let document = EditorDocument(file: file)
+                    if document.isMarkdown { document.markdownMode = inheritedMarkdownMode }
                     self.configure(document)
                     self.documents.append(document)
                     self.select(document)
@@ -268,6 +275,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         selected?.setHighlightingActive(false)
         selected?.scroll.removeFromSuperview()
         selected = document
+        if let document, document.isMarkdown { lastMarkdownMode = document.markdownMode }
         layoutEditor()
         refreshTabs()
         updateTitle()
@@ -277,6 +285,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         guard let selected, selected.isMarkdown,
               MarkdownMode.allCases.indices.contains(sender.selectedSegment) else { return }
         selected.markdownMode = MarkdownMode.allCases[sender.selectedSegment]
+        lastMarkdownMode = selected.markdownMode
         layoutEditor()
     }
 

@@ -21,6 +21,7 @@ struct WindowSession: Codable, Equatable, Sendable {
     var filePaths: [String]
     var selectedPath: String?
     var markdownModes: [String: MarkdownMode]? = nil
+    var lastMarkdownMode: MarkdownMode? = nil
 
     var treeState: FolderTreeState? = nil
     var scrollPositions: [String: FileScrollPosition]? = nil

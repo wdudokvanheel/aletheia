@@ -3,6 +3,73 @@ import XCTest
 @testable import Aletheia
 
 final class SessionStateTests: XCTestCase {
+    @MainActor func testMarkdownModesPersistAndNewFilesInheritProjectMode() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = ["editor.md", "split.md", "preview.md", "code.ts", "new.md", "next.md"]
+            .map { root.appendingPathComponent($0) }
+        for file in files { try "# Text".write(to: file, atomically: true, encoding: .utf8) }
+        let suite = "MarkdownSession.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var saved = ProjectSessions()
+        let modes: [String: MarkdownMode] = [files[0].path: .editor, files[1].path: .split, files[2].path: .preview]
+        saved.remember(WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                     rootPath: root.path, filePaths: Array(files.prefix(4)).map(\.path),
+                                     selectedPath: files[3].path, markdownModes: modes,
+                                     lastMarkdownMode: .preview), active: true)
+        saved.save(to: defaults)
+        let controller = EditorWindow()
+        defer { controller.window?.performClose(nil) }
+        let restored = try XCTUnwrap(ProjectSessions.load(from: defaults).session(for: root))
+        let failures: [String] = await withCheckedContinuation { continuation in
+            controller.restore(restored) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(failures.isEmpty)
+        XCTAssertEqual(controller.session.markdownModes, modes)
+        XCTAssertEqual(controller.session.lastMarkdownMode, .preview)
+        controller.openFile(files[4])
+        for _ in 0..<200 {
+            if controller.documents.count == 5 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(controller.session.markdownModes?[files[4].path], .preview)
+        // An existing tab keeps its own mode and becomes the inheritance source.
+        controller.openFile(files[0])
+        XCTAssertEqual(controller.session.lastMarkdownMode, .editor)
+        controller.openFile(files[3])
+        controller.openFile(files[5])
+        for _ in 0..<200 {
+            if controller.documents.count == 6 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(controller.session.markdownModes?[files[5].path], .editor)
+        XCTAssertEqual(controller.session.markdownModes?[files[2].path], .preview)
+        saved.remember(controller.session, active: true)
+        saved.save(to: defaults)
+        XCTAssertEqual(ProjectSessions.load(from: defaults).mostRecent, controller.session)
+
+        // A project without open Markdown files still remembers its last mode.
+        let empty = EditorWindow()
+        defer { empty.window?.performClose(nil) }
+        let emptyState = WindowSession(frame: restored.frame, rootPath: root.path,
+                                       filePaths: [], selectedPath: nil, lastMarkdownMode: .editor)
+        await withCheckedContinuation { continuation in
+            empty.restore(emptyState) { _ in continuation.resume() }
+        }
+        empty.openFile(files[0])
+        for _ in 0..<200 {
+            if !empty.documents.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(empty.session.markdownModes?[files[0].path], .editor)
+        let freshProject = EditorWindow()
+        defer { freshProject.window?.performClose(nil) }
+        XCTAssertEqual(freshProject.session.lastMarkdownMode, .split)
+    }
+
     func testRoundTripPreservesWindowOrderFilesAndSelection() throws {
         let name = "AletheiaSessionTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))

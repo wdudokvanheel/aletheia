@@ -239,6 +239,7 @@ final class MarkdownPreviewTests: XCTestCase {
             if mode == .editor { XCTAssertTrue(visibleContent === editor.enclosingScrollView) }
             if mode == .preview { XCTAssertTrue(visibleContent is WKWebView) }
             XCTAssertEqual(controller.session.markdownModes?[url.path], mode)
+            XCTAssertEqual(controller.session.lastMarkdownMode, mode)
             XCTAssertEqual(editor.string, "# Original edited")
             XCTAssertEqual(editor.selectedRange(), selection)
         }
