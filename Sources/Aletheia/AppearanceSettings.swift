@@ -69,6 +69,11 @@ struct AppColorScheme {
     // Resources/ThemeLicenses.md (bundled), docs/theme-provenance.md.
     static let all: [AppColorScheme] = [
         .init(id: "system", name: "System", palette: .system),
+        .init(id: "material-oceanic", name: "Material Oceanic", palette: .init(isDark: true, 0x263238, 0xeeffff, 0x263238, 0x6c8692, 0x80cbc4, 0xc3e88d, 0x82aaff, 0xf07178, 0x89ddff, 0xffcb6b)),
+        .init(id: "material-deep-ocean", name: "Material Deep Ocean", palette: .init(isDark: true, 0x0f111a, 0xbabed8, 0x292d3e, 0x525975, 0x80cbc4, 0xc3e88d, 0x82aaff, 0xf07178, 0x89ddff, 0xffcb6b)),
+        .init(id: "material-palenight", name: "Material Palenight", palette: .init(isDark: true, 0x292d3e, 0xbabed8, 0x292d3e, 0x676e95, 0x80cbc4, 0xc3e88d, 0x82aaff, 0xf07178, 0x89ddff, 0xffcb6b)),
+        .init(id: "material-lighter", name: "Material Lighter", palette: .init(isDark: false, 0xfafafa, 0x90a4ae, 0xfafafa, 0x758a95, 0x80cbc4, 0x91b859, 0x6182b8, 0xe53935, 0x39adb5, 0xe2931d)),
+        .init(id: "material-darker", name: "Material Darker", palette: .init(isDark: true, 0x212121, 0xeeffff, 0x212121, 0x676767, 0x80cbc4, 0xc3e88d, 0x82aaff, 0xf07178, 0x89ddff, 0xffcb6b)),
         .init(id: "vscode-dark-modern", name: "VS Code Dark Modern", palette: .init(isDark: true, 0x1f1f1f, 0xcccccc, 0x181818, 0x9d9d9d, 0x0078d4, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
         .init(id: "vscode-light-modern", name: "VS Code Light Modern", palette: .init(isDark: false, 0xffffff, 0x3b3b3b, 0xf8f8f8, 0x3b3b3b, 0x005fb8, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),
         .init(id: "vscode-quiet-light", name: "VS Code Quiet Light", palette: .init(isDark: false, 0xf5f5f5, 0x333333, 0xf2f2f2, 0x6d705b, 0x9769dc, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),

@@ -1409,3 +1409,374 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ```
+
+## Material — added 2026-11-06
+
+Five static UI/syntax adaptations from original Material Theme 34.3.1,
+by Mattia Astorino, under Apache-2.0. Revision
+`9c1313579cecdd377fc475ccf108da6402216745` (2023-12-10).
+[Original source](https://github.com/material-theme/vsc-material-theme/tree/9c1313579cecdd377fc475ccf108da6402216745).
+Original raw source files and license were checked against a preserved archive
+of the same commit. No executable extension or dependencies are bundled.
+Oceanic adapts upstream Default; Deep Ocean adapts upstream Ocean.
+Colors map to the existing compact app roles, with opaque Git decorations and
+shared syntax roles as documented below. These are modified palette adaptations,
+not full ports of the original UI or language-specific highlighting.
+
+## Material Oceanic
+
+Original source variant: `default`. [Source](https://raw.githubusercontent.com/material-theme/vsc-material-theme/9c1313579cecdd377fc475ccf108da6402216745/scripts/generator/settings/specific/default.ts).
+
+| Role | Hex | Mapping |
+|---|---|---|
+| background | `#263238` | scheme.background |
+| foreground | `#eeffff` | scheme.foreground |
+| surface | `#263238` | scheme.sidebarBackground |
+| muted | `#6c8692` | scheme.sidebarForeground |
+| accent | `#80cbc4` | scheme.defaultAccent |
+| added | `#c3e88d` | base.green: untrackedResourceForeground; alpha removed |
+| modified | `#82aaff` | base.blue: modifiedResourceForeground; alpha removed |
+| deleted | `#f07178` | base.red: deletedResourceForeground; alpha removed |
+| staged | `#89ddff` | base.cyan: staged adaptation |
+| conflict | `#ffcb6b` | base.yellow: conflictingResourceForeground; alpha removed |
+| comment | `#546e7a` | scheme.comments / syntax.comment |
+| string | `#c3e88d` | base.green / syntax.string |
+| keyword | `#89ddff` | base.cyan / syntax.keyword and Keyword Control |
+| number | `#f78c6c` | base.orange / syntax.number |
+| name | `#82aaff` | base.blue / syntax.function |
+| property | `#c792ea` | base.purple / JSON Key Level 0 (property adaptation) |
+| markup | `#89ddff` | base.cyan / Markdown Blockquote (single markup role adaptation) |
+| invalid | `#f07178` | base.red / debugConsole.errorForeground (invalid adaptation) |
+
+## Material Deep Ocean
+
+Original source variant: `ocean`. [Source](https://raw.githubusercontent.com/material-theme/vsc-material-theme/9c1313579cecdd377fc475ccf108da6402216745/scripts/generator/settings/specific/ocean.ts).
+
+| Role | Hex | Mapping |
+|---|---|---|
+| background | `#0f111a` | scheme.background |
+| foreground | `#babed8` | scheme.foreground |
+| surface | `#292d3e` | scheme.sidebarBackground |
+| muted | `#525975` | scheme.sidebarForeground |
+| accent | `#80cbc4` | scheme.defaultAccent |
+| added | `#c3e88d` | base.green: untrackedResourceForeground; alpha removed |
+| modified | `#82aaff` | base.blue: modifiedResourceForeground; alpha removed |
+| deleted | `#f07178` | base.red: deletedResourceForeground; alpha removed |
+| staged | `#89ddff` | base.cyan: staged adaptation |
+| conflict | `#ffcb6b` | base.yellow: conflictingResourceForeground; alpha removed |
+| comment | `#464b5d` | scheme.comments / syntax.comment |
+| string | `#c3e88d` | base.green / syntax.string |
+| keyword | `#89ddff` | base.cyan / syntax.keyword and Keyword Control |
+| number | `#f78c6c` | base.orange / syntax.number |
+| name | `#82aaff` | base.blue / syntax.function |
+| property | `#c792ea` | base.purple / JSON Key Level 0 (property adaptation) |
+| markup | `#89ddff` | base.cyan / Markdown Blockquote (single markup role adaptation) |
+| invalid | `#f07178` | base.red / debugConsole.errorForeground (invalid adaptation) |
+
+## Material Palenight
+
+Original source variant: `palenight`. [Source](https://raw.githubusercontent.com/material-theme/vsc-material-theme/9c1313579cecdd377fc475ccf108da6402216745/scripts/generator/settings/specific/palenight.ts).
+
+| Role | Hex | Mapping |
+|---|---|---|
+| background | `#292d3e` | scheme.background |
+| foreground | `#babed8` | scheme.foreground |
+| surface | `#292d3e` | scheme.sidebarBackground |
+| muted | `#676e95` | scheme.sidebarForeground |
+| accent | `#80cbc4` | scheme.defaultAccent |
+| added | `#c3e88d` | base.green: untrackedResourceForeground; alpha removed |
+| modified | `#82aaff` | base.blue: modifiedResourceForeground; alpha removed |
+| deleted | `#f07178` | base.red: deletedResourceForeground; alpha removed |
+| staged | `#89ddff` | base.cyan: staged adaptation |
+| conflict | `#ffcb6b` | base.yellow: conflictingResourceForeground; alpha removed |
+| comment | `#676e95` | scheme.comments / syntax.comment |
+| string | `#c3e88d` | base.green / syntax.string |
+| keyword | `#89ddff` | base.cyan / syntax.keyword and Keyword Control |
+| number | `#f78c6c` | base.orange / syntax.number |
+| name | `#82aaff` | base.blue / syntax.function |
+| property | `#c792ea` | base.purple / JSON Key Level 0 (property adaptation) |
+| markup | `#89ddff` | base.cyan / Markdown Blockquote (single markup role adaptation) |
+| invalid | `#f07178` | base.red / debugConsole.errorForeground (invalid adaptation) |
+
+## Material Lighter
+
+Original source variant: `lighter`. [Source](https://raw.githubusercontent.com/material-theme/vsc-material-theme/9c1313579cecdd377fc475ccf108da6402216745/scripts/generator/settings/specific/lighter.ts).
+
+| Role | Hex | Mapping |
+|---|---|---|
+| background | `#fafafa` | scheme.background |
+| foreground | `#90a4ae` | scheme.foreground |
+| surface | `#fafafa` | scheme.sidebarBackground |
+| muted | `#758a95` | scheme.sidebarForeground |
+| accent | `#80cbc4` | scheme.defaultAccent |
+| added | `#91b859` | base.green: untrackedResourceForeground; alpha removed |
+| modified | `#6182b8` | base.blue: modifiedResourceForeground; alpha removed |
+| deleted | `#e53935` | base.red: deletedResourceForeground; alpha removed |
+| staged | `#39adb5` | base.cyan: staged adaptation |
+| conflict | `#e2931d` | base.yellow: conflictingResourceForeground; alpha removed |
+| comment | `#90a4ae` | scheme.comments / syntax.comment |
+| string | `#91b859` | base.green / syntax.string |
+| keyword | `#39adb5` | base.cyan / syntax.keyword and Keyword Control |
+| number | `#f76d47` | base.orange / syntax.number |
+| name | `#6182b8` | base.blue / syntax.function |
+| property | `#9c3eda` | base.purple / JSON Key Level 0 (property adaptation) |
+| markup | `#39adb5` | base.cyan / Markdown Blockquote (single markup role adaptation) |
+| invalid | `#e53935` | base.red / debugConsole.errorForeground (invalid adaptation) |
+
+## Material Darker
+
+Original source variant: `darker`. [Source](https://raw.githubusercontent.com/material-theme/vsc-material-theme/9c1313579cecdd377fc475ccf108da6402216745/scripts/generator/settings/specific/darker.ts).
+
+| Role | Hex | Mapping |
+|---|---|---|
+| background | `#212121` | scheme.background |
+| foreground | `#eeffff` | scheme.foreground |
+| surface | `#212121` | scheme.sidebarBackground |
+| muted | `#676767` | scheme.sidebarForeground |
+| accent | `#80cbc4` | scheme.defaultAccent |
+| added | `#c3e88d` | base.green: untrackedResourceForeground; alpha removed |
+| modified | `#82aaff` | base.blue: modifiedResourceForeground; alpha removed |
+| deleted | `#f07178` | base.red: deletedResourceForeground; alpha removed |
+| staged | `#89ddff` | base.cyan: staged adaptation |
+| conflict | `#ffcb6b` | base.yellow: conflictingResourceForeground; alpha removed |
+| comment | `#545454` | scheme.comments / syntax.comment |
+| string | `#c3e88d` | base.green / syntax.string |
+| keyword | `#89ddff` | base.cyan / syntax.keyword and Keyword Control |
+| number | `#f78c6c` | base.orange / syntax.number |
+| name | `#82aaff` | base.blue / syntax.function |
+| property | `#c792ea` | base.purple / JSON Key Level 0 (property adaptation) |
+| markup | `#89ddff` | base.cyan / Markdown Blockquote (single markup role adaptation) |
+| invalid | `#f07178` | base.red / debugConsole.errorForeground (invalid adaptation) |
+
+## Source SHA-256 inventory
+
+Relative to `/tmp/aletheia-material-permissive-sources/`. Each generator file is retained as text only.
+
+```text
+4a24ee3251483b900d604b80d01d8201fb27922804de9fa1c2719ca27df43c83  LICENSE
+d11b073675ae3f048f77a531c961e22226ec3a0d71b70060cdc77890dca03384  README.md
+ca7e23f0998d58176d0e3e4b21955d6c9822e99e1f0b6f4b6e5adf14b9be82a4  archive.zip
+c21a65953bfe0c59fa1b9b1734923ffb7f6954ec9ae279f76516fea13be56b0a  package.json
+8308838fc50e2a0bfad114261679680bcbb60d8a0412c846c80cdc369b2d5a87  revision.json
+83b91d4df5827029aa677534380eebbe25b27f1dcff94aa1030193e253e608ba  scripts/generator/color-set.ts
+ab10a4fea48690c95c1cc4d9eb274ecfbdaddcb8117ecb73ef612c7e9e0a8444  scripts/generator/index.ts
+0880d49ef0dbde6bd9f667b50724c82de52ba6d29ad85a1761af3df967417533  scripts/generator/settings/specific/darker-hc.ts
+08ae2aebb4b1a71794d0384d8012572c3741036ae6a5ff93831642f393fede02  scripts/generator/settings/specific/darker.ts
+33fad44b7212a81f2818542d30792349eb65bacf56d498f13e6a6c039ad532c9  scripts/generator/settings/specific/deepforest-hc.ts
+868bb233fba683473b38e41cec378aebb55d3f56b77f207debc69d4a2478cbc5  scripts/generator/settings/specific/deepforest.ts
+3d5a0c6db2f78838865fa409c3b069f6b8096ba8badcf69123646fd26a3385ac  scripts/generator/settings/specific/default-hc.ts
+e84412def40a1fc55ec4fe443d3ba0bbfb28cf47e613223a8c4235d98418c00e  scripts/generator/settings/specific/default.ts
+bafff236bd8de862034278b023e21707956ef440b90b71fed83342575d47c8dd  scripts/generator/settings/specific/lighter-hc.ts
+df11190add6e395652c36c718254837e475de51a371c1f38673f95533863cfd3  scripts/generator/settings/specific/lighter.ts
+0c25eb052f78132e7d0f2959fc5f287fd79971b2dcf22eddc4e82454c25bf226  scripts/generator/settings/specific/ocean-hc.ts
+84540a93cc3212ff664938431e5ee3821cf825bc59e03fd74c50940f9bbe0a0c  scripts/generator/settings/specific/ocean.ts
+14ac478c9c19778a3817d535a00e1f4bdad474dcfc601e977cdb9d8a66f9247d  scripts/generator/settings/specific/palenight-hc.ts
+43eacaf5a970cca2dd1459366835c131ee07dc80ba07aff69c659e661ba79641  scripts/generator/settings/specific/palenight.ts
+027326031f6ea8ece22cbe0a55a1d1055843d843b5cdb998fe0bfddf6fb7a691  scripts/generator/types.ts
+```
+
+## Full original license and copyright notice
+
+```text
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "{}"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright 2017 Mattia Astorino
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+```
