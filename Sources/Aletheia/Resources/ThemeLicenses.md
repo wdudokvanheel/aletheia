@@ -534,3 +534,129 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Everforest, Sonokai and Nightfox — added 2026-11-06
+
+19 static UI and syntax variants from official pinned source files; no theme
+engine, executable upstream code, runtime lookup or dependency is bundled.
+Everforest includes Dark/Light Hard, Medium and Soft. Sonokai includes Default,
+Shusia, Andromeda, Atlantis, Maia and Espresso. Nightfox includes Nightfox,
+Dayfox, Dawnfox, Duskfox, Nordfox, Terafox and Carbonfox.
+
+UI columns: background, foreground, surface, muted, accent, added, modified,
+deleted, staged, conflict. Syntax columns: comment, string, keyword, number,
+name, property, markup, invalid. These compact lexical and Git-status roles
+are Aletheia adaptations, not full upstream scope or UI ports.
+
+| Family | UI source roles | Syntax source roles |
+| --- | --- | --- |
+| Everforest | bg0, fg, bg_dim, grey1, blue, green, yellow, red, aqua, purple | grey1, green, red, purple, green, blue, yellow, red |
+| Sonokai | bg0, fg, bg_dim, grey, blue, green, yellow, red, blue, purple | grey, yellow, red, purple, green, blue, orange, red |
+| Nightfox | bg1, fg1, bg0, fg3, blue.base, green.base, yellow.base, red.base, cyan.base, orange.base | comment, green.base, magenta.base, orange.base, syntax.func, blue.base, syntax.func, red.base |
+
+Nightfox syntax.func uses blue.bright in dark variants and blue.dim in Dayfox
+and Dawnfox. Numeric shades are resolved once using upstream shade arithmetic
+(linear sRGB interpolation toward white/black, nearest-byte rounding). Carbonfox
+bg0/fg3 use upstream HSV value offsets -4/-48; comment blends bg/fg at 0.4.
+Only the resulting sRGB literals ship. No overrides or transparency are applied.
+
+### sainnhe/everforest
+
+Revision `85a86eb62409e3ec88713bff3d1b9d7374e112e4`. Fetched 2026-11-06.
+
+- [autoload/everforest.vim](https://raw.githubusercontent.com/sainnhe/everforest/85a86eb62409e3ec88713bff3d1b9d7374e112e4/autoload/everforest.vim): SHA-256 `4ddab3c8d96e29310a21441a797e69a2c520ec074db9c20a7eaea866d8b5a8c4`
+- [LICENSE](https://raw.githubusercontent.com/sainnhe/everforest/85a86eb62409e3ec88713bff3d1b9d7374e112e4/LICENSE): SHA-256 `6504b9e62794cb58b61c90ea5fe598274086119f2126b8d8245708b2bfcc0e36`
+
+```text
+MIT License
+
+Copyright (c) 2019 sainnhe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### sainnhe/sonokai
+
+Revision `b023c5280b16fe2366f5e779d8d2756b3e5ee9c3`. Fetched 2026-11-06.
+
+- [autoload/sonokai.vim](https://raw.githubusercontent.com/sainnhe/sonokai/b023c5280b16fe2366f5e779d8d2756b3e5ee9c3/autoload/sonokai.vim): SHA-256 `a494d2fa6bc51cbc8dc416b5083535c378f20d786e121a35cf53c6890440005a`
+- [LICENSE](https://raw.githubusercontent.com/sainnhe/sonokai/b023c5280b16fe2366f5e779d8d2756b3e5ee9c3/LICENSE): SHA-256 `1578c1d9fe713f0ee479ff822b82baddbd2dfecf1f247a3f72bbdae5e0162e7e`
+
+```text
+MIT License
+
+Copyright (c) 2020 sainnhe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### EdenEast/nightfox.nvim
+
+Revision `4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a`. Fetched 2026-11-06.
+
+- [lua/nightfox/palette/nightfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/nightfox.lua): SHA-256 `78b787bb79226de1b92b550dcb2942c9f56e3994363b591448bdbf1bc6bcaaf5`
+- [lua/nightfox/palette/dayfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/dayfox.lua): SHA-256 `9fbf77ca954bcb13b3415f51743954854184fecf9f695486fd3c353d8d3c34e0`
+- [lua/nightfox/palette/dawnfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/dawnfox.lua): SHA-256 `0d1cde912fb0efd83d7c721858261fa420571e7534e1a636e9097229af29e30a`
+- [lua/nightfox/palette/duskfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/duskfox.lua): SHA-256 `e02b41c64b297ab1020ac98f2fba171e803b0784210de94ddf9188a70206967c`
+- [lua/nightfox/palette/nordfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/nordfox.lua): SHA-256 `3aef3d3b078c76946e269913204702139e7de4a2c3a107d028f24c47e61734a4`
+- [lua/nightfox/palette/terafox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/terafox.lua): SHA-256 `344b68368bc0d39e22735c3e4692cbee1430052c4fe1e428a077847dd190fa52`
+- [lua/nightfox/palette/carbonfox.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/palette/carbonfox.lua): SHA-256 `79092f52e2dd5dd886c1fa82aa2a85a780b291133b2a633a7c1dbe8e4acf8416`
+- [LICENSE](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/LICENSE): SHA-256 `280a27a527db4e93e03d525a1226ee66ca96a2cbaedb3517eccfba40ac0d7a9f`
+- [lua/nightfox/lib/color.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/lib/color.lua): SHA-256 `62b6949d92f537125f28fa97eded708cc02ab5501010570b5d6ce6b4de4459b9`
+- [lua/nightfox/lib/shade.lua](https://raw.githubusercontent.com/EdenEast/nightfox.nvim/4dacd3f0185a2227bdf3b6c0975a8f0bf87cac9a/lua/nightfox/lib/shade.lua): SHA-256 `bfaf88021f73972d31bd2f5f506dec2e82f4e3b568e658100f0ec94021d82624`
+
+```text
+MIT License
+
+Copyright (c) 2021 James Simpson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

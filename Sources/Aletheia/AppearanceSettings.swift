@@ -66,9 +66,28 @@ struct AppColorScheme {
     let palette: EditorPalette
 
     // Static sRGB adaptations; exact upstream revisions, mapping and licenses:
-    // docs/theme-provenance.md and docs/theme-licenses.md.
+    // Resources/ThemeLicenses.md (bundled), docs/theme-provenance.md.
     static let all: [AppColorScheme] = [
         .init(id: "system", name: "System", palette: .system),
+        .init(id: "everforest-dark-hard", name: "Everforest Dark Hard", palette: .init(isDark: true, 0x272e33, 0xd3c6aa, 0x1e2326, 0x859289, 0x7fbbb3, 0xa7c080, 0xdbbc7f, 0xe67e80, 0x83c092, 0xd699b6)),
+        .init(id: "everforest-light-hard", name: "Everforest Light Hard", palette: .init(isDark: false, 0xfffbef, 0x5c6a72, 0xf2efdf, 0x939f91, 0x3a94c5, 0x8da101, 0xdfa000, 0xf85552, 0x35a77c, 0xdf69ba)),
+        .init(id: "everforest-dark-medium", name: "Everforest Dark Medium", palette: .init(isDark: true, 0x2d353b, 0xd3c6aa, 0x232a2e, 0x859289, 0x7fbbb3, 0xa7c080, 0xdbbc7f, 0xe67e80, 0x83c092, 0xd699b6)),
+        .init(id: "everforest-light-medium", name: "Everforest Light Medium", palette: .init(isDark: false, 0xfdf6e3, 0x5c6a72, 0xefebd4, 0x939f91, 0x3a94c5, 0x8da101, 0xdfa000, 0xf85552, 0x35a77c, 0xdf69ba)),
+        .init(id: "everforest-dark-soft", name: "Everforest Dark Soft", palette: .init(isDark: true, 0x333c43, 0xd3c6aa, 0x293136, 0x859289, 0x7fbbb3, 0xa7c080, 0xdbbc7f, 0xe67e80, 0x83c092, 0xd699b6)),
+        .init(id: "everforest-light-soft", name: "Everforest Light Soft", palette: .init(isDark: false, 0xf3ead3, 0x5c6a72, 0xe5dfc5, 0x939f91, 0x3a94c5, 0x8da101, 0xdfa000, 0xf85552, 0x35a77c, 0xdf69ba)),
+        .init(id: "sonokai-default", name: "Sonokai Default", palette: .init(isDark: true, 0x2c2e34, 0xe2e2e3, 0x222327, 0x7f8490, 0x76cce0, 0x9ed072, 0xe7c664, 0xfc5d7c, 0x76cce0, 0xb39df3)),
+        .init(id: "sonokai-shusia", name: "Sonokai Shusia", palette: .init(isDark: true, 0x2d2a2e, 0xe3e1e4, 0x211f21, 0x848089, 0x7accd7, 0x9ecd6f, 0xe5c463, 0xf85e84, 0x7accd7, 0xab9df2)),
+        .init(id: "sonokai-andromeda", name: "Sonokai Andromeda", palette: .init(isDark: true, 0x2b2d3a, 0xe1e3e4, 0x252630, 0x7e8294, 0x6dcae8, 0x9ed06c, 0xedc763, 0xfb617e, 0x6dcae8, 0xbb97ee)),
+        .init(id: "sonokai-atlantis", name: "Sonokai Atlantis", palette: .init(isDark: true, 0x2a2f38, 0xe1e3e4, 0x24272e, 0x828a9a, 0x72cce8, 0x9dd274, 0xeacb64, 0xff6578, 0x72cce8, 0xba9cf3)),
+        .init(id: "sonokai-maia", name: "Sonokai Maia", palette: .init(isDark: true, 0x273136, 0xe1e2e3, 0x21282c, 0x82878b, 0x78cee9, 0x9cd57b, 0xe3d367, 0xf76c7c, 0x78cee9, 0xbaa0f8)),
+        .init(id: "sonokai-espresso", name: "Sonokai Espresso", palette: .init(isDark: true, 0x312c2b, 0xe4e3e1, 0x242120, 0x90817b, 0x81d0c9, 0xa6cd77, 0xf0c66f, 0xf86882, 0x81d0c9, 0x9fa0e1)),
+        .init(id: "nightfox", name: "Nightfox", palette: .init(isDark: true, 0x192330, 0xcdcecf, 0x131a24, 0x71839b, 0x719cd6, 0x81b29a, 0xdbc074, 0xc94f6d, 0x63cdcf, 0xf4a261)),
+        .init(id: "dayfox", name: "Dayfox", palette: .init(isDark: false, 0xf6f2ee, 0x3d2b5a, 0xe4dcd4, 0x824d5b, 0x2848a9, 0x396847, 0xac5402, 0xa5222f, 0x287980, 0x955f61)),
+        .init(id: "dawnfox", name: "Dawnfox", palette: .init(isDark: false, 0xfaf4ed, 0x575279, 0xebe5df, 0xa8a3b3, 0x286983, 0x618774, 0xea9d34, 0xb4637a, 0x56949f, 0xd7827e)),
+        .init(id: "duskfox", name: "Duskfox", palette: .init(isDark: true, 0x232136, 0xe0def4, 0x191726, 0x6e6a86, 0x569fba, 0xa3be8c, 0xf6c177, 0xeb6f92, 0x9ccfd8, 0xea9a97)),
+        .init(id: "nordfox", name: "Nordfox", palette: .init(isDark: true, 0x2e3440, 0xcdcecf, 0x232831, 0x7e8188, 0x81a1c1, 0xa3be8c, 0xebcb8b, 0xbf616a, 0x88c0d0, 0xc9826b)),
+        .init(id: "terafox", name: "Terafox", palette: .init(isDark: true, 0x152528, 0xe6eaea, 0x0f1c1e, 0x587b7b, 0x5a93aa, 0x7aa4a1, 0xfda47f, 0xe85c51, 0xa1cdd8, 0xff8349)),
+        .init(id: "carbonfox", name: "Carbonfox", palette: .init(isDark: true, 0x161616, 0xf2f4f8, 0x0c0c0c, 0x7b7c7e, 0x78a9ff, 0x25be6a, 0x08bdba, 0xee5396, 0x33b1ff, 0x3ddbd9)),
         .init(id: "ayu-light", name: "Ayu Light", palette: .init(isDark: false, 0xfcfcfc, 0x5c6166, 0xf8f9fa, 0x828e9f, 0xf29718, 0x6cbf43, 0x478acc, 0xff7383, 0x4cbf99, 0xa37acc)),
         .init(id: "ayu-mirage", name: "Ayu Mirage", palette: .init(isDark: true, 0x242936, 0xcccac2, 0x1f2430, 0x707a8c, 0xffcc66, 0x87d96c, 0x80bfff, 0xf27983, 0x95e6cb, 0xdfbfff)),
         .init(id: "ayu-dark", name: "Ayu Dark", palette: .init(isDark: true, 0x10141c, 0xbfbdb6, 0x0d1017, 0x5a6378, 0xe6b450, 0x70bf56, 0x73b8ff, 0xf26d78, 0x95e6cb, 0xd2a6ff)),
