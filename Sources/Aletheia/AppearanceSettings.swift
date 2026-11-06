@@ -69,6 +69,17 @@ struct AppColorScheme {
     // Resources/ThemeLicenses.md (bundled), docs/theme-provenance.md.
     static let all: [AppColorScheme] = [
         .init(id: "system", name: "System", palette: .system),
+        .init(id: "vscode-dark-modern", name: "VS Code Dark Modern", palette: .init(isDark: true, 0x1f1f1f, 0xcccccc, 0x181818, 0x9d9d9d, 0x0078d4, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
+        .init(id: "vscode-light-modern", name: "VS Code Light Modern", palette: .init(isDark: false, 0xffffff, 0x3b3b3b, 0xf8f8f8, 0x3b3b3b, 0x005fb8, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),
+        .init(id: "vscode-quiet-light", name: "VS Code Quiet Light", palette: .init(isDark: false, 0xf5f5f5, 0x333333, 0xf2f2f2, 0x6d705b, 0x9769dc, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),
+        .init(id: "vscode-kimbie-dark", name: "VS Code Kimbie Dark", palette: .init(isDark: true, 0x221a0f, 0xd3af86, 0x362712, 0xa57a4c, 0xa57a4c, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
+        .init(id: "vscode-monokai", name: "VS Code Monokai", palette: .init(isDark: true, 0x272822, 0xf8f8f2, 0x1e1f1c, 0x90908a, 0x99947c, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
+        .init(id: "vscode-monokai-dimmed", name: "VS Code Monokai Dimmed", palette: .init(isDark: true, 0x1e1e1e, 0xc5c8c6, 0x272727, 0x9a9b99, 0x3655b5, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
+        .init(id: "jetbrains-darcula", name: "JetBrains Darcula", palette: .init(isDark: true, 0x2b2b2b, 0xa9b7c6, 0x3c3f41, 0x777777, 0x6897bb, 0x629755, 0x6897bb, 0x6c6c6c, 0x3a8484, 0xd5756c)),
+        .init(id: "intellij-light", name: "IntelliJ Light", palette: .init(isDark: false, 0xffffff, 0x000000, 0xf2f2f2, 0x8c8c8c, 0x2470b3, 0x0a7700, 0x0032a0, 0x616161, 0x007c7c, 0xff0000)),
+        .init(id: "nordic", name: "Nordic", palette: .init(isDark: true, 0x242933, 0xc0c8d8, 0x191d24, 0x81a1c1, 0x88c0d0, 0xa3be8c, 0x81a1c1, 0xbf616a, 0x8fbcbb, 0xb48ead)),
+        .init(id: "melange-dark", name: "Mélange Dark", palette: .init(isDark: true, 0x292522, 0xece1d7, 0x34302c, 0x867462, 0xa3a9ce, 0x85b695, 0xebc06d, 0xd47766, 0x89b3b6, 0xcf9bc2)),
+        .init(id: "melange-light", name: "Mélange Light", palette: .init(isDark: false, 0xf1f1f1, 0x54433a, 0xe9e1db, 0xa98a78, 0x465aa4, 0x3a684a, 0xa06d00, 0xbf0021, 0x3d6568, 0x904180)),
         .init(id: "everforest-dark-hard", name: "Everforest Dark Hard", palette: .init(isDark: true, 0x272e33, 0xd3c6aa, 0x1e2326, 0x859289, 0x7fbbb3, 0xa7c080, 0xdbbc7f, 0xe67e80, 0x83c092, 0xd699b6)),
         .init(id: "everforest-light-hard", name: "Everforest Light Hard", palette: .init(isDark: false, 0xfffbef, 0x5c6a72, 0xf2efdf, 0x939f91, 0x3a94c5, 0x8da101, 0xdfa000, 0xf85552, 0x35a77c, 0xdf69ba)),
         .init(id: "everforest-dark-medium", name: "Everforest Dark Medium", palette: .init(isDark: true, 0x2d353b, 0xd3c6aa, 0x232a2e, 0x859289, 0x7fbbb3, 0xa7c080, 0xdbbc7f, 0xe67e80, 0x83c092, 0xd699b6)),
