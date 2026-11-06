@@ -23,7 +23,7 @@ final class AppearanceSettingsTests: XCTestCase {
     }
 
     @MainActor func testCatalogUsesUniqueIDsAndCorrectLightDarkForegrounds() throws {
-        XCTAssertEqual(AppSettings.schemes.count, 31)
+        XCTAssertEqual(AppSettings.schemes.count, 39)
         XCTAssertEqual(Set(AppSettings.schemes.map(\.id)).count, AppSettings.schemes.count)
         for scheme in AppSettings.schemes where scheme.id != "system" {
             let palette = scheme.palette
