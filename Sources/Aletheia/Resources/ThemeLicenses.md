@@ -1780,3 +1780,27 @@ df11190add6e395652c36c718254837e475de51a371c1f38673f95533863cfd3  scripts/genera
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+
+## VS Code Abyss — added 2026-11-07
+
+Static UI and syntax palette adapted from microsoft/vscode revision
+`03d396a6e01bf958211fde9f2b279619881d68b2`, using the previously fetched
+source files. UI uses editor background/foreground, sidebar background,
+line-number foreground and focus border. Syntax uses comment, string,
+keyword, number, function name, attribute name, heading and invalid roles.
+Git colors use the same Git extension dark defaults as the other VS Code
+palettes (added, modified, deleted, stageModified, conflicting foregrounds).
+No executable theme code or dependency is included.
+
+The Microsoft MIT and Colorsublime notices above apply to the fetched sources.
+The upstream Abyss cgmanifest retains its original-license verification TODO;
+that provenance uncertainty is unchanged. The owner explicitly requested this
+static palette for their private-use build on 2026-11-07.
+
+This product includes software developed by the Colorsublime.com.
+
+Pinned files and SHA-256:
+
+- [extensions/theme-abyss/themes/abyss-color-theme.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/theme-abyss/themes/abyss-color-theme.json): `5ccb5fa5c6f66b43295f68852b7cc88b1ba35eb44a3a17c813e9094aaca755c4`
+- [extensions/theme-abyss/cgmanifest.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/theme-abyss/cgmanifest.json): `bdd5d6c06d1205a0221732d5a5b4b1684c4bc15080090c9a71b3bbec591b811d`
+- [extensions/git/package.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/git/package.json): `213a8586480b96f1ecb8f39c6b10939c9772f6caf06668332e608ff8e791f305`

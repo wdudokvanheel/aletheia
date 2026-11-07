@@ -77,6 +77,7 @@ struct AppColorScheme {
         .init(id: "vscode-dark-modern", name: "VS Code Dark Modern", palette: .init(isDark: true, 0x1f1f1f, 0xcccccc, 0x181818, 0x9d9d9d, 0x0078d4, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
         .init(id: "vscode-light-modern", name: "VS Code Light Modern", palette: .init(isDark: false, 0xffffff, 0x3b3b3b, 0xf8f8f8, 0x3b3b3b, 0x005fb8, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),
         .init(id: "vscode-quiet-light", name: "VS Code Quiet Light", palette: .init(isDark: false, 0xf5f5f5, 0x333333, 0xf2f2f2, 0x6d705b, 0x9769dc, 0x587c0c, 0x895503, 0xad0707, 0x895503, 0xad0707)),
+        .init(id: "vscode-abyss", name: "VS Code Abyss", palette: .init(isDark: true, 0x000c18, 0x6688cc, 0x060621, 0x406385, 0x596f99, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
         .init(id: "vscode-kimbie-dark", name: "VS Code Kimbie Dark", palette: .init(isDark: true, 0x221a0f, 0xd3af86, 0x362712, 0xa57a4c, 0xa57a4c, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
         .init(id: "vscode-monokai", name: "VS Code Monokai", palette: .init(isDark: true, 0x272822, 0xf8f8f2, 0x1e1f1c, 0x90908a, 0x99947c, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
         .init(id: "vscode-monokai-dimmed", name: "VS Code Monokai Dimmed", palette: .init(isDark: true, 0x1e1e1e, 0xc5c8c6, 0x272727, 0x9a9b99, 0x3655b5, 0x81b88b, 0xe2c08d, 0xc74e39, 0xe2c08d, 0xe4676b)),
