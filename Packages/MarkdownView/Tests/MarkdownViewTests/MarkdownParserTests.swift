@@ -96,7 +96,8 @@ final class MarkdownParserTests: XCTestCase {
         let blocks = try MarkdownDocument.parse(markdown).blocks
         XCTAssertEqual(blocks.map(\.kind), [.blockQuote, .list])
         XCTAssertEqual(blocks[0].text, "Quoted text\nlet x = 1")
-        XCTAssertEqual(blocks[0].styleRuns, [StyleRun(range: 0..<12, role: .quote), StyleRun(range: 12..<21, role: .code)])
+        XCTAssertEqual(blocks[0].styleRuns, [StyleRun(range: 0..<12, role: .quote),
+                                             StyleRun(range: 12..<21, role: .code, styles: .quoted)])
         XCTAssertEqual(blocks[1].text, "one\ntwo\nnested\ntask")
     }
 

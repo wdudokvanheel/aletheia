@@ -30,9 +30,12 @@ public struct InlineStyle: OptionSet, Sendable, Hashable {
     public static let strikethrough = InlineStyle(rawValue: 1 << 2)
     public static let code = InlineStyle(rawValue: 1 << 3)
     public static let link = InlineStyle(rawValue: 1 << 4)
+    /// Heading or code text inside a block quote, which takes the quote's
+    /// color as in the WebKit stylesheet. Body text there has the `quote` role.
+    public static let quoted = InlineStyle(rawValue: 1 << 5)
 
     /// One past the largest raw value, for tables indexed by style.
-    static let combinations = 32
+    static let combinations = 64
 }
 
 /// A role and inline styles applied to a UTF-16 range of a block's display text.
@@ -124,6 +127,58 @@ public struct SourceMap: Sendable, Equatable {
     }
 }
 
+/// A leaf block inside a top-level list or block quote, in display order: a
+/// paragraph, heading, code block, table, or rule, or the line an empty list
+/// item takes. Its text is a range of the block's display text, without the
+/// newline that separates it from the next text.
+struct BlockSegment: Sendable, Equatable {
+    enum Kind: UInt8, Sendable {
+        case paragraph, heading, code, table, rule, emptyItem
+    }
+
+    var kind: Kind
+    /// For headings, the level from 1 to 6.
+    var level: UInt8 = 0
+    /// A paragraph directly inside an item of a tight list, which has no margins.
+    var isTight = false
+    var start: Int32
+    var end: Int32
+
+    var range: Range<Int> { Int(start)..<Int(end) }
+}
+
+/// A block quote, list, or list item around a run of segments. Containers are
+/// listed parents first, in document order.
+struct BlockContainer: Sendable, Equatable {
+    enum Kind: UInt8, Sendable {
+        case quote
+        case list
+        /// A list inside another list, which has no margins of its own.
+        case nestedList
+        case item
+    }
+
+    var kind: Kind
+    /// For list items.
+    var marker: ListMarker = .none
+    var firstSegment: Int32
+    var endSegment: Int32
+
+    var segments: Range<Int> { Int(firstSegment)..<Int(endSegment) }
+}
+
+/// What a list item draws beside its first line. Markers are decorations,
+/// never part of the display text.
+enum ListMarker: Sendable, Equatable {
+    case none
+    /// A disc at level 0, a circle at level 1, and a square deeper, counting
+    /// the lists around the item's list.
+    case bullet(level: UInt8)
+    case number(Int)
+    /// A task box, display-only.
+    case task(checked: Bool)
+}
+
 /// One top-level Markdown block: its kind, where it came from in the source,
 /// and the text it displays.
 public struct MarkdownBlock: Sendable, Equatable {
@@ -158,6 +213,10 @@ public struct MarkdownBlock: Sendable, Equatable {
     /// changes how the rest of the block parses, so blocks with the same
     /// source text are only interchangeable with equal indentation.
     var indentation = ""
+    /// The leaf blocks and containers of a list or block quote. Empty for
+    /// other blocks, which are one segment of their kind.
+    var segments: [BlockSegment] = []
+    var containers: [BlockContainer] = []
 
     /// Without a source map, display offsets map to the same source offsets.
     public init(kind: Kind, sourceRange: Range<Int>, sourceText: String, text: String, styleRuns: [StyleRun],

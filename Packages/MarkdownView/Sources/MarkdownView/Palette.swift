@@ -51,9 +51,10 @@ public struct Palette: Sendable, Equatable {
     }
 
     /// The color of text in `role` with `styles`. Inline code keeps the color
-    /// around it, as in the WebKit stylesheet.
+    /// around it, and headings and code in a block quote take its color, as
+    /// in the WebKit stylesheet.
     func color(for role: TextRole, styles: InlineStyle) -> NSColor {
-        styles.contains(.link) ? link : color(for: role)
+        styles.contains(.link) ? link : color(for: styles.contains(.quoted) ? .quote : role)
     }
 
     /// Draw-time colors indexed by `ColorIndex`: one per role, then links.
@@ -67,6 +68,6 @@ enum ColorIndex {
     static let link = UInt8(TextRole.allCases.count)
 
     static func of(_ role: TextRole, _ styles: InlineStyle) -> UInt8 {
-        styles.contains(.link) ? link : role.rawValue
+        styles.contains(.link) ? link : styles.contains(.quoted) ? TextRole.quote.rawValue : role.rawValue
     }
 }

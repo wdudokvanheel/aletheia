@@ -125,7 +125,8 @@ enum MarkdownParser {
     /// cmark subtree.
     private static func block(for span: Span, _ bytes: UnsafeBufferPointer<UInt8>, _ lines: LineIndex) -> MarkdownBlock {
         let sourceRange = span.start.utf16..<span.end.utf16
-        var display = DisplayText(source: bytes, lines: lines, start: span.start, end: span.end.utf8)
+        var display = DisplayText(source: bytes, lines: lines, start: span.start, end: span.end.utf8,
+                                  tracksStructure: span.kind == .list || span.kind == .blockQuote)
         if span.kind != .htmlBlock { display.append(span.node) }
         var block = MarkdownBlock(
             kind: span.kind,
@@ -140,6 +141,8 @@ enum MarkdownParser {
         if !span.indentation.isEmpty {
             block.indentation = String(decoding: UnsafeBufferPointer(rebasing: bytes[span.indentation]), as: UTF8.self)
         }
+        block.segments = display.segments
+        block.containers = display.containers
         return block
     }
 
@@ -250,6 +253,13 @@ private enum ExtensionNode {
         else if strcmp(name, "table") == 0 { self = .table }
         else { return nil }
     }
+
+    /// Whether a list item is a task item. The tasklist extension keeps the
+    /// item's node type and only names itself.
+    static func isTaskItem(_ node: UnsafeMutablePointer<cmark_node>) -> Bool {
+        guard let name = cmark_node_get_type_string(node) else { return false }
+        return strcmp(name, "tasklist") == 0
+    }
 }
 
 /// Line starts in UTF-8 and UTF-16 units, for converting cmark's 1-based line
@@ -330,12 +340,15 @@ private func utf16Width(_ byte: UInt8) -> Int {
 }
 
 /// Builds a block's plain display text, style runs, links, and source map
-/// from its cmark subtree.
+/// from its cmark subtree, and for lists and block quotes the segments and
+/// containers that lay it out.
 private struct DisplayText {
     var bytes: [UInt8] = []
     var runs: [StyleRun] = []
     var links: [MarkdownLink] = []
     var anchors: [SourceMap.Anchor] = []
+    private(set) var segments: [BlockSegment] = []
+    private(set) var containers: [BlockContainer] = []
     private(set) var utf16Count = 0
     private var role = TextRole.body
     private var styles: InlineStyle = []
@@ -348,6 +361,22 @@ private struct DisplayText {
     private var linkStart = 0
     private var linkDestination = ""
 
+    private let tracksStructure: Bool
+    /// Indices in `containers` of the containers around the current node.
+    private var openContainers: [Int] = []
+    private struct ListState {
+        var isOrdered: Bool
+        var start: Int
+        var isTight: Bool
+        var items = 0
+    }
+    /// The lists around the current node, innermost last.
+    private var lists: [ListState] = []
+    /// Where the current segment's text starts, once it has text.
+    private var segmentStart: Int?
+    /// The newline owed before the next text, in the role of the text before it.
+    private var pendingSeparator: (role: TextRole, styles: InlineStyle)?
+
     /// The whole document and the block's UTF-8 range in it.
     private let source: UnsafeBufferPointer<UInt8>
     private let lines: LineIndex
@@ -358,13 +387,15 @@ private struct DisplayText {
     /// A UTF-8 offset and its UTF-16 offset, for converting forward.
     private var converted: (utf8: Int, utf16: Int)
 
-    init(source: UnsafeBufferPointer<UInt8>, lines: LineIndex, start: (utf8: Int, utf16: Int), end: Int) {
+    init(source: UnsafeBufferPointer<UInt8>, lines: LineIndex, start: (utf8: Int, utf16: Int), end: Int,
+         tracksStructure: Bool) {
         self.source = source
         self.lines = lines
         blockStart = start
         blockEnd = max(end, start.utf8)
         cursor = start.utf8
         converted = start
+        self.tracksStructure = tracksStructure
     }
 
     mutating func append(_ root: UnsafeMutablePointer<cmark_node>) {
@@ -380,6 +411,19 @@ private struct DisplayText {
             switch cmark_node_get_type(node) {
             case CMARK_NODE_BLOCK_QUOTE:
                 quoteDepth += step
+                if entering { openContainer(.quote) } else { closeContainer() }
+            case CMARK_NODE_LIST:
+                if entering {
+                    lists.append(ListState(isOrdered: cmark_node_get_list_type(node) == CMARK_ORDERED_LIST,
+                                           start: Int(cmark_node_get_list_start(node)),
+                                           isTight: cmark_node_get_list_tight(node) != 0))
+                    openContainer(lists.count > 1 ? .nestedList : .list)
+                } else {
+                    closeContainer()
+                    lists.removeLast()
+                }
+            case CMARK_NODE_ITEM:
+                if entering { openContainer(.item, marker: marker(for: node)) } else { closeItem() }
             case CMARK_NODE_EMPH:
                 emphasisDepth += step
                 updateStyles()
@@ -396,17 +440,33 @@ private struct DisplayText {
                 }
                 updateStyles()
             case CMARK_NODE_PARAGRAPH:
-                guard entering else { break }
-                separate()
-                role = quoteDepth > 0 ? .quote : .body
+                if entering {
+                    beginSegment()
+                    role = quoteDepth > 0 ? .quote : .body
+                } else {
+                    // cmark's rule: only paragraphs directly in an item of a tight list lose their margins.
+                    let inItem = openContainers.last.map { containers[$0].kind == .item } == true
+                    endSegment(.paragraph, isTight: inItem && lists.last?.isTight == true)
+                }
             case CMARK_NODE_HEADING:
-                guard entering else { break }
-                separate()
-                role = .heading(Int(cmark_node_get_heading_level(node)))
+                let level = Int(cmark_node_get_heading_level(node))
+                if entering {
+                    beginSegment()
+                    role = .heading(level)
+                } else {
+                    endSegment(.heading, level: UInt8(min(max(level, 1), 6)))
+                }
             case CMARK_NODE_CODE_BLOCK:
-                separate()
+                beginSegment()
                 role = .code
                 appendCodeBlock(node)
+                endSegment(.code)
+            case CMARK_NODE_THEMATIC_BREAK:
+                // A rule has no text, so it owes no separator.
+                if tracksStructure {
+                    let at = Int32(clamping: utf16Count)
+                    segments.append(BlockSegment(kind: .rule, start: at, end: at))
+                }
             case CMARK_NODE_TEXT:
                 appendLiteral(node, isCode: false)
             case CMARK_NODE_CODE:
@@ -415,23 +475,102 @@ private struct DisplayText {
                 appendByte(0x20)
             case CMARK_NODE_LINEBREAK:
                 appendByte(0x0A)
-            case CMARK_NODE_DOCUMENT, CMARK_NODE_LIST, CMARK_NODE_ITEM, CMARK_NODE_THEMATIC_BREAK,
-                 CMARK_NODE_HTML_BLOCK, CMARK_NODE_HTML_INLINE, CMARK_NODE_IMAGE:
-                // Raw HTML is dropped and the text between tags kept; images
-                // contribute their alt text, which is their children.
+            case CMARK_NODE_DOCUMENT, CMARK_NODE_HTML_BLOCK, CMARK_NODE_HTML_INLINE, CMARK_NODE_IMAGE:
+                // Raw HTML is dropped, blocks entirely and inline tags with
+                // the text between them kept; images contribute their alt
+                // text, which is their children.
                 break
             default:
                 switch ExtensionNode(node) {
                 case .strikethrough:
                     strikethroughDepth += step
                     updateStyles()
-                case .table where entering: role = quoteDepth > 0 ? .quote : .body
-                case .row where entering: separate()
+                case .table:
+                    if entering {
+                        beginSegment()
+                        role = quoteDepth > 0 ? .quote : .body
+                    } else {
+                        endSegment(.table)
+                    }
+                case .row where entering: if cmark_node_previous(node) != nil { appendByte(0x0A) }
                 case .cell where entering: if cmark_node_previous(node) != nil { appendByte(0x09) }
                 default: break
                 }
             }
         }
+    }
+
+    // MARK: Structure
+
+    private mutating func openContainer(_ kind: BlockContainer.Kind, marker: ListMarker = .none) {
+        guard tracksStructure else { return }
+        let at = Int32(clamping: segments.count)
+        containers.append(BlockContainer(kind: kind, marker: marker, firstSegment: at, endSegment: at))
+        openContainers.append(containers.count - 1)
+    }
+
+    private mutating func closeContainer() {
+        guard tracksStructure, let index = openContainers.popLast() else { return }
+        containers[index].endSegment = Int32(clamping: segments.count)
+    }
+
+    /// Closes a list item. An item without anything that takes space, as
+    /// when it is empty or holds only raw HTML, keeps one line for its marker.
+    private mutating func closeItem() {
+        guard tracksStructure, let index = openContainers.last else { return }
+        let first = Int(containers[index].firstSegment)
+        let takesSpace = segments[first...].contains {
+            !$0.range.isEmpty || ($0.kind != .paragraph && $0.kind != .heading)
+        }
+        if !takesSpace {
+            let at = Int32(clamping: utf16Count)
+            segments.append(BlockSegment(kind: .emptyItem, start: at, end: at))
+        }
+        closeContainer()
+    }
+
+    /// The marker of a list item: a task box, the next number of an ordered
+    /// list, or a bullet by how many lists are around the item's list.
+    ///
+    /// cmark-gfm 0.9.0 checks a task box when `[x]` appears anywhere on the
+    /// item's first line, so `- [ ] buy [x] item` comes out checked; that is
+    /// left to the parser.
+    private mutating func marker(for item: UnsafeMutablePointer<cmark_node>) -> ListMarker {
+        guard !lists.isEmpty else { return .none }
+        let list = lists[lists.count - 1]
+        lists[lists.count - 1].items += 1
+        if ExtensionNode.isTaskItem(item) { return .task(checked: cmark_gfm_extensions_get_tasklist_item_checked(item)) }
+        if list.isOrdered { return .number(list.start + list.items) }
+        return .bullet(level: UInt8(min(lists.count - 1, 2)))
+    }
+
+    /// Starts a leaf block. Its newline separator is added with its first
+    /// text, so a leaf without text (an empty paragraph, or a heading with
+    /// only raw HTML) adds none.
+    private mutating func beginSegment() {
+        if pendingSeparator == nil, let last = runs.last {
+            // The newline ends the previous line, so it keeps that line's role.
+            pendingSeparator = (last.role, last.styles.intersection(.quoted))
+        }
+        segmentStart = nil
+    }
+
+    /// Adds the separator owed before new text, and starts the segment's text.
+    private mutating func flushSeparator() {
+        if let separator = pendingSeparator {
+            pendingSeparator = nil
+            bytes.append(0x0A)
+            extendRun(by: 1, role: separator.role, styles: separator.styles)
+        }
+        if segmentStart == nil { segmentStart = utf16Count }
+    }
+
+    private mutating func endSegment(_ kind: BlockSegment.Kind, level: UInt8 = 0, isTight: Bool = false) {
+        defer { segmentStart = nil }
+        guard tracksStructure else { return }
+        let start = Int32(clamping: segmentStart ?? utf16Count)
+        segments.append(BlockSegment(kind: kind, level: level, isTight: isTight, start: start,
+                                     end: Int32(clamping: utf16Count)))
     }
 
     private mutating func updateStyles() {
@@ -443,13 +582,8 @@ private struct DisplayText {
         self.styles = styles
     }
 
-    /// Starts a new line before a block after the first, keeping the newline
-    /// in the previous role so it does not change that line's metrics.
-    private mutating func separate() {
-        if !bytes.isEmpty { appendByte(0x0A) }
-    }
-
     private mutating func appendByte(_ byte: UInt8) {
+        flushSeparator()
         bytes.append(byte)
         extendRun(by: 1, styles: styles)
     }
@@ -458,6 +592,7 @@ private struct DisplayText {
         guard let literal = cmark_node_get_literal(node) else { return }
         let length = strlen(literal)
         guard length > 0 else { return }
+        flushSeparator()
         literal.withMemoryRebound(to: UInt8.self, capacity: length) { pointer in
             let text = UnsafeBufferPointer(start: pointer, count: length)
             let span = span(of: node)
@@ -479,6 +614,7 @@ private struct DisplayText {
         var length = strlen(literal)
         if length > 0, literal[length - 1] == 0x0A { length -= 1 }
         guard length > 0 else { return }
+        flushSeparator()
         literal.withMemoryRebound(to: UInt8.self, capacity: length) { pointer in
             let text = UnsafeBufferPointer(start: pointer, count: length)
             var lineStart = 0
@@ -499,7 +635,14 @@ private struct DisplayText {
         extendRun(by: units, styles: styles)
     }
 
+    /// Extends the text in the current role. Headings and code in a block
+    /// quote are marked quoted, so they take its color.
     private mutating func extendRun(by units: Int, styles: InlineStyle) {
+        let quoted = quoteDepth > 0 && role != .body && role != .quote
+        extendRun(by: units, role: role, styles: quoted ? styles.union(.quoted) : styles)
+    }
+
+    private mutating func extendRun(by units: Int, role: TextRole, styles: InlineStyle) {
         let start = utf16Count
         utf16Count += units
         if let last = runs.last, last.role == role, last.styles == styles, last.range.upperBound == start {
