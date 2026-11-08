@@ -249,6 +249,11 @@ extension MarkdownSnapshot {
     /// stays in place instead. At the very top the view stays at the top, as
     /// CSS scroll anchoring does. Constant work apart from binary searches.
     func anchoredY(_ y: CGFloat, from old: MarkdownSnapshot, through update: BlockUpdate) -> CGFloat {
+        // In the top inset, the first block's margin may have shrunk.
+        max(unclampedAnchoredY(y, from: old, through: update), 0)
+    }
+
+    private func unclampedAnchoredY(_ y: CGFloat, from old: MarkdownSnapshot, through update: BlockUpdate) -> CGFloat {
         guard y > 0 else { return y }
         let index = old.firstBlock(endingBelow: y)
         guard index < old.layouts.count else { return y }

@@ -143,4 +143,15 @@ final class HardeningTests: XCTestCase {
         let mapped = try XCTUnwrap(new.mapRange(selection, from: old))
         XCTAssertEqual(new.text(in: mapped), old.text(in: selection))
     }
+
+    // MARK: Anchoring near the top (F11)
+
+    func testAnchoringInTheTopInsetNeverGoesAboveTheTop() throws {
+        let old = MarkdownSnapshot.layOut(try MarkdownDocument.parse("# Title\n\ntext"), width: 700)
+        let new = try MarkdownSnapshot.updating(old, to: "Title\n\ntext", width: 700).snapshot
+        let update = try XCTUnwrap(new.update(from: old))
+        for y: CGFloat in [1, 5, 10, old.blockTops[0] - 1] {
+            XCTAssertGreaterThanOrEqual(new.anchoredY(y, from: old, through: update), 0)
+        }
+    }
 }
