@@ -72,69 +72,70 @@ final class LineSet: @unchecked Sendable {
     /// being built, and returns its index. `line` may be nil when the set
     /// is not kept.
     func append(_ line: CTLine?, range: CFRange) -> Int32 {
-        let (index, added, isNew, removed) = withLock { state -> (Int32, Int, Bool, Int) in
+        withLock { state in
             state.ranges.append(range)
             let index = Int32(state.ranges.count - 1)
-            guard state.lines != nil else { return (index, 0, false, 0) }
+            guard state.lines != nil else { return index }
             guard let line else {
                 // Without its line the set cannot be kept as it is.
-                let removed = state.cost
+                if state.cost > 0 { LineCache.remove(ObjectIdentifier(self), cost: state.cost) }
                 state.lines = nil
                 state.cost = 0
-                return (index, 0, false, removed)
+                return index
             }
             state.lines?.append(line)
             let isNew = state.cost == 0
             let added = (isNew ? Self.stringCost(length) : 0) + Self.lineCost
             state.cost += added
-            return (index, added, isNew, 0)
+            LineCache.add(self, cost: added, isNew: isNew)
+            return index
         }
-        if added > 0 { LineCache.add(self, cost: added, isNew: isNew) }
-        if removed > 0 { LineCache.remove(ObjectIdentifier(self), cost: removed) }
-        return index
     }
 
     /// Line `index`, typeset again first if it was dropped.
     func line(at index: Int32) -> CTLine {
         lastUse.store(LineCache.now(), ordering: .relaxed)
-        let (line, cost) = withLock { state -> (CTLine, Int) in
-            if let lines = state.lines, Int(index) < lines.count { return (lines[Int(index)], 0) }
-            let lines = makeLines(state.ranges)
-            state.lines = lines
-            let cost = Self.stringCost(length) + Self.lineCost * lines.count - state.cost
-            state.cost += cost
-            return (lines[Int(index)], cost)
+        return withLock { state in
+            if let lines = state.lines { return lines[Int(index)] }
+            let lines = keep(makeLines(state.ranges), &state)
+            return lines[Int(index)]
         }
-        if cost > 0 { LineCache.add(self, cost: cost, isNew: true) }
-        return line
     }
 
     /// Typesets the lines again if they were dropped, and marks them used.
     func prefetch() {
         lastUse.store(LineCache.now(), ordering: .relaxed)
-        let cost = withLock { state -> Int in
-            guard state.lines?.count != state.ranges.count else { return 0 }
-            state.lines = makeLines(state.ranges)
-            let cost = Self.stringCost(length) + Self.lineCost * state.ranges.count - state.cost
-            state.cost += cost
-            return cost
+        withLock { state in
+            if state.lines == nil { _ = keep(makeLines(state.ranges), &state) }
         }
-        if cost > 0 { LineCache.add(self, cost: cost, isNew: true) }
+    }
+
+    /// Keeps `lines`, typeset again, and counts them. The cache's books
+    /// change with the lines, under the lock, so a drop and a typesetting
+    /// on two threads cannot leave a cost the cache no longer knows of.
+    private func keep(_ lines: [CTLine], _ state: inout State) -> [CTLine] {
+        state.lines = lines
+        let cost = Self.stringCost(length) + Self.lineCost * lines.count
+        if cost != state.cost {
+            if state.cost > 0 { LineCache.remove(ObjectIdentifier(self), cost: state.cost) }
+            state.cost = cost
+            LineCache.add(self, cost: cost, isNew: true)
+        }
+        return lines
     }
 
     /// Drops the lines unless they were used since `cutoff`.
     fileprivate func drop(unlessUsedSince cutoff: UInt64) {
-        let (lines, cost) = withLock { state -> ([CTLine]?, Int) in
-            guard state.lines != nil, lastUse.load(ordering: .relaxed) < cutoff else { return (nil, 0) }
+        let lines = withLock { state -> [CTLine]? in
+            guard state.lines != nil, lastUse.load(ordering: .relaxed) < cutoff else { return nil }
             let lines = state.lines
-            let cost = state.cost
+            if state.cost > 0 { LineCache.remove(ObjectIdentifier(self), cost: state.cost) }
             state.lines = nil
             state.cost = 0
-            return (lines, cost)
+            return lines
         }
         // Freed outside the lock.
         withExtendedLifetime(lines) {}
-        if cost > 0 { LineCache.remove(ObjectIdentifier(self), cost: cost) }
     }
 
     private func makeLines(_ ranges: [CFRange]) -> [CTLine] {
@@ -201,12 +202,16 @@ enum LineCache {
             registry.values.compactMap { entry in entry.set.map { ($0, $0.lastUse.load(ordering: .relaxed)) } }
         }
         let cutoff = now() &- recent &+ (recent == 0 ? 1 : 0)
+        var isSparing = false
         for (set, used) in sets.sorted(by: { $0.1 < $1.1 }) {
             guard total.load(ordering: .relaxed) > target else { return }
-            guard used < cutoff else { break }
+            guard used < cutoff else {
+                isSparing = true
+                break
+            }
             set.drop(unlessUsedSince: cutoff)
         }
-        if total.load(ordering: .relaxed) > budget, !isRetryScheduled.exchange(true, ordering: .relaxed) {
+        if isSparing, total.load(ordering: .relaxed) > budget, !isRetryScheduled.exchange(true, ordering: .relaxed) {
             queue.asyncAfter(deadline: .now() + 1.1) {
                 isRetryScheduled.store(false, ordering: .relaxed)
                 trim()
