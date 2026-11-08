@@ -73,6 +73,9 @@ public final class MarkdownPreviewView: NSScrollView {
     /// The snapshot `setSource(_:reusing:)` diffs its source against, until
     /// that source installs.
     private var reusedBase: (sourceGeneration: UInt64, snapshot: MarkdownSnapshot)?
+    /// A search match to reveal in the snapshot of the current source, until
+    /// that source's complete snapshot has shown it.
+    private var pendingReveal: Range<Int>?
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -125,6 +128,8 @@ public final class MarkdownPreviewView: NSScrollView {
     private func replaceSource(_ text: String, reusing snapshot: MarkdownSnapshot?) {
         source = text
         sourceGeneration += 1
+        // Its range belongs to the previous source.
+        pendingReveal = nil
         reusedBase = snapshot.map { (sourceGeneration, $0) }
         if let snapshot { canvas.images.reset(sizes: snapshot.images, source: sourceGeneration) }
         scheduleUpdate(waiting: snapshot == nil)
@@ -194,6 +199,51 @@ public final class MarkdownPreviewView: NSScrollView {
     public func clearSelection() {
         canvas.selectionAnchor = nil
         canvas.setSelection(nil)
+    }
+
+    /// Shows a search match: `sourceRange` holds UTF-16 offsets into the
+    /// source last passed to `setSource(_:)`. A match shown as is in a
+    /// block's text is selected; otherwise nothing is selected, as for a link
+    /// destination, markup, or a list marker, and the line nearest to it in
+    /// its block is used instead, or the next block shown when the match is
+    /// in none (a link reference definition, raw HTML, blank lines). That is
+    /// scrolled to the vertical center; code blocks and tables keep their
+    /// horizontal scroll. It cancels a pending scroll position.
+    ///
+    /// Before that source's snapshot has installed, the request waits for
+    /// it, and it is applied again on the complete snapshot when the first
+    /// one shows only part. A newer source drops a request not yet applied.
+    public func reveal(sourceRange: NSRange) {
+        guard sourceRange.location != NSNotFound, sourceRange.length >= 0 else { return clearSearch() }
+        pendingReveal = sourceRange.location..<(sourceRange.location + sourceRange.length)
+        guard sourceGeneration > 0, installedSourceGeneration == sourceGeneration else { return }
+        applyReveal()
+    }
+
+    /// Drops a search match not yet revealed and deselects all text.
+    public func clearSearch() {
+        pendingReveal = nil
+        clearSelection()
+    }
+
+    /// Reveals the pending search match in the installed snapshot, which
+    /// must be of the current source. Returns whether it scrolled.
+    @discardableResult
+    private func applyReveal() -> Bool {
+        guard let range = pendingReveal else { return false }
+        let snapshot = canvas.snapshot
+        if snapshot.isComplete { pendingReveal = nil }
+        pendingScroll = nil
+        guard let target = snapshot.revealTarget(forSourceRange: range) else {
+            clearSelection()
+            return false
+        }
+        canvas.selectionAnchor = nil
+        canvas.setSelection(target.selection)
+        let rect = snapshot.revealRect(for: target)
+        let before = contentView.bounds.minY
+        scroll(toY: rect.midY - contentView.bounds.height / 2)
+        return contentView.bounds.minY != before
     }
 
     private func requestScroll(_ target: ScrollTarget) {
@@ -360,8 +410,16 @@ public final class MarkdownPreviewView: NSScrollView {
             redrawsAll = false
         }
         if isCurrent, snapshot.isComplete { completedSourceGeneration = sourceGeneration }
-        let invalidated = redrawsAll ? nil : invalidate(from: old, oldSelection: oldSelection, update: update,
+        var invalidated = redrawsAll ? nil : invalidate(from: old, oldSelection: oldSelection, update: update,
                                                         sameBlocks: sameBlocks)
+        // A search match waiting for this source. The selection redraws
+        // itself, but parts of a new position may still show old content.
+        var revealed = false
+        if isCurrent, pendingReveal != nil {
+            let selection = canvas.selection
+            if applyReveal() { invalidated = nil }
+            revealed = canvas.selection != selection
+        }
         canvas.lastInvalidation = invalidated
         if invalidated == nil { canvas.needsDisplay = true }
         messageLabel.isHidden = true
@@ -377,7 +435,7 @@ public final class MarkdownPreviewView: NSScrollView {
         signposter.endInterval("install", interval)
         timingsAwaitingDraw = timings
         // Nothing visible changed: there is no draw to wait for.
-        if invalidated?.isEmpty == true { didDraw(.zero) }
+        if invalidated?.isEmpty == true, !revealed { didDraw(.zero) }
         canvas.images.didInstall(source: sourceGeneration)
         onInstall?(snapshot)
     }
