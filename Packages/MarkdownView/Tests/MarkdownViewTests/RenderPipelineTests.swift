@@ -175,6 +175,43 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertEqual(view.scrollFraction, 0.5, accuracy: 0.001)
     }
 
+    func testPositionSetRightAfterTheSourceDecidesWhatIsLaidOutFirst() throws {
+        // Showing another document: `setSource`, then its position, as the app does.
+        let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        view.setSource("# Small\n\nDocument.")
+        waitForInstall(view) { $0.isComplete && $0.layouts.count == 2 }
+        var installs: [(snapshot: MarkdownSnapshot, offset: CGFloat)] = []
+        view.onInstall = { installs.append(($0, view.contentView.bounds.minY)) }
+        var runs = view.pipeline.runs
+        view.setSource(longSource)
+        view.scrollFraction = 0
+        waitForInstall(view) { $0.isComplete && $0.layouts.count == 300 }
+        XCTAssertEqual(view.pipeline.runs - runs, 1, "parsed once")
+        XCTAssertEqual(installs.count, 2)
+        XCTAssertFalse(installs[0].snapshot.isComplete, "the top first")
+        XCTAssertTrue(installs[0].snapshot.layouts[0].isFinal(for: installs[0].snapshot.columnWidth))
+        XCTAssertTrue(installs[0].snapshot.layouts[299].isEstimate)
+
+        // A position in points: everything above it first, so it is exact on the first install.
+        let other = longSource.replacingOccurrences(of: "Paragraph", with: "Section")
+        let full = MarkdownSnapshot.layOut(try MarkdownDocument.parse(other), width: view.contentView.bounds.width)
+        let y = full.blockTops[150]
+        installs = []
+        runs = view.pipeline.runs
+        view.setSource(other)
+        view.setScrollOffset(y)
+        waitForInstall(view) { $0.isComplete && $0.document.blocks.first?.text.hasPrefix("Section") == true }
+        XCTAssertEqual(view.pipeline.runs - runs, 1, "parsed once")
+        XCTAssertEqual(installs.count, 2)
+        let first = installs[0].snapshot
+        XCTAssertFalse(first.isComplete)
+        XCTAssertEqual(first.blockTops[150], y)
+        XCTAssertEqual(installs[0].offset, y)
+        XCTAssertTrue(first.layouts[..<150].allSatisfy { $0.isFinal(for: first.columnWidth) })
+        XCTAssertTrue(first.layouts[299].isEstimate)
+        XCTAssertEqual(view.contentView.bounds.minY, y)
+    }
+
     func testSourceSetWhileHiddenDropsOlderWork() {
         let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         view.setSource("# Old")

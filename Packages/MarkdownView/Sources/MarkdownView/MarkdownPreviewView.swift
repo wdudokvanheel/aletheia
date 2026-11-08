@@ -3,9 +3,12 @@ import AppKit
 /// A read-only Markdown preview: an `NSScrollView` to place in a layout, whose
 /// `documentView` is the view to focus for keyboard scrolling.
 ///
-/// Call `setSource(_:)` with the full text on every change. Parsing and layout
-/// run on a background queue per view; the newest source always wins, and the
-/// main thread only installs finished snapshots and draws visible blocks.
+/// Call `setSource(_:)` with the full text on every change, without a
+/// debounce. Parsing and layout run on a background queue per view, one
+/// update at a time: sources set while an update runs coalesce into one more
+/// update with the newest, paced by `updatePolicy`. Each update re-parses the
+/// whole source but rebuilds and lays out only the blocks that changed, and
+/// the main thread only installs finished snapshots and draws what changed.
 @MainActor
 public final class MarkdownPreviewView: NSScrollView {
     /// Colors by role. Changing it only redraws.
@@ -25,6 +28,8 @@ public final class MarkdownPreviewView: NSScrollView {
         set { canvas.onOpenLink = newValue }
     }
     public private(set) var lastTimings: Timings?
+    /// When the next update may start after a slow one; see `UpdatePolicy`.
+    public var updatePolicy = UpdatePolicy.standard
     /// Whether updates run. Hidden previews keep their content.
     public private(set) var isShown = true
     /// The installed snapshot.
@@ -40,7 +45,13 @@ public final class MarkdownPreviewView: NSScrollView {
     private var source = ""
     private var sourceGeneration: UInt64 = 0
     private var installedSourceGeneration: UInt64 = 0
-    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, visibleFirst: Bool)?
+    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, plan: RenderPlan)?
+    /// The generation of the update in flight and when it was submitted,
+    /// until its last snapshot installs.
+    private var inFlight: (generation: UInt64, start: ContinuousClock.Instant)?
+    /// After a slow update, newer sources wait until then.
+    private var resumeAt: ContinuousClock.Instant?
+    private var resumeTask: Task<Void, Never>?
     /// The source generation of the last complete snapshot installed.
     private var completedSourceGeneration: UInt64 = 0
     private var pendingScroll: ScrollTarget?
@@ -51,6 +62,10 @@ public final class MarkdownPreviewView: NSScrollView {
         hasVerticalScroller = true
         hasHorizontalScroller = false
         drawsBackground = true
+        // Height changes on every edit that adds or removes a line; only what
+        // changed redraws, and the rest of the layer stays pinned in place.
+        canvas.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        canvas.layerContentsPlacement = .topLeft
         documentView = canvas
         messageLabel.isHidden = true
         messageLabel.lineBreakMode = .byTruncatingTail
@@ -69,12 +84,20 @@ public final class MarkdownPreviewView: NSScrollView {
 
     /// Replaces the Markdown source. Cheap on the main thread: the text is
     /// handed to the background queue, and while hidden it is only stored.
+    /// While an update runs, the newest source waits for it to finish.
     public func setSource(_ text: String) {
         source = text
         sourceGeneration += 1
         scheduleUpdate()
         // Hidden or without a width: nothing older may install meanwhile.
-        if submitted?.sourceGeneration != sourceGeneration { pipeline.cancel() }
+        if !isShown || canvas.frame.width < 1 { cancelUpdates() }
+    }
+
+    private func cancelUpdates() {
+        pipeline.cancel()
+        inFlight = nil
+        resumeTask?.cancel()
+        resumeTask = nil
     }
 
     /// Hidden previews keep their snapshot and start no work. Sources set
@@ -82,13 +105,17 @@ public final class MarkdownPreviewView: NSScrollView {
     public func setVisible(_ visible: Bool) {
         guard visible != isShown else { return }
         isShown = visible
-        if visible { scheduleUpdate() }
+        if visible { scheduleUpdate() } else { resumeTask?.cancel(); resumeTask = nil }
     }
 
     /// The top of the visible area as a fraction of the document height, for
     /// carrying the position across renderers. Setting it after `setSource(_:)`
     /// and before that source's complete snapshot has installed applies it to
     /// the new content when it installs; until then, reading it returns it.
+    /// Set right after `setSource(_:)`, as when showing another document, it
+    /// also makes the update lay out and show the area there before the rest
+    /// (approximately for a fraction, until the rest is laid out), and the
+    /// update neither waits for typing updates nor pauses.
     public var scrollFraction: Double {
         get {
             let height = canvas.frame.height
@@ -115,7 +142,9 @@ public final class MarkdownPreviewView: NSScrollView {
 
     /// Scrolls so `y` is at the top, clamped to the content. Like
     /// `scrollFraction`, a position set before the current source's complete
-    /// snapshot has installed applies to that snapshot.
+    /// snapshot has installed applies to that snapshot, and right after
+    /// `setSource(_:)` the blocks down to it are laid out first, so the first
+    /// snapshot shown is already at the exact position.
     public func setScrollOffset(_ y: CGFloat) {
         requestScroll(.offset(y.isFinite ? max(y, 0) : 0))
     }
@@ -137,11 +166,14 @@ public final class MarkdownPreviewView: NSScrollView {
             // Only the visible part is laid out: show about the right place now
             // and settle on the complete snapshot.
             scroll(to: target)
-        } else if let submitted, submitted.sourceGeneration == sourceGeneration,
-                  submitted.visibleFirst != wantsVisibleFirst {
-            // The position decides whether laying out the visible part first pays off.
-            self.submitted = nil
-            scheduleUpdate()
+        } else if let submitted, submitted.sourceGeneration == sourceGeneration {
+            // Set right after `setSource`, before the source is parsed: lay out
+            // the area at the position first. Later, it applies on install.
+            submitted.plan.set(firstStep)
+        } else {
+            // A position for a source still waiting: another document is
+            // being shown, which neither waits for typing updates nor pauses.
+            scheduleUpdate(waiting: false)
         }
     }
 
@@ -157,6 +189,8 @@ public final class MarkdownPreviewView: NSScrollView {
         let width = contentView.bounds.width
         if canvas.frame.width != width {
             canvas.setFrameSize(NSSize(width: width, height: canvas.frame.height))
+            // The old layout at the new width until the relayout installs.
+            canvas.needsDisplay = true
             scheduleUpdate()
         }
         if !messageLabel.isHidden {
@@ -173,7 +207,11 @@ public final class MarkdownPreviewView: NSScrollView {
 
     // MARK: Updates
 
-    private func scheduleUpdate() {
+    /// Submits an update unless one for the same source and width is out.
+    /// A newer source alone (`waiting`) waits for the update in flight and
+    /// for the pause after a slow one; a new width or a finished live resize
+    /// supersedes it at once.
+    private func scheduleUpdate(waiting: Bool = true) {
         let width = canvas.frame.width
         guard isShown, sourceGeneration > 0, width >= 1 else { return }
         let complete = !inLiveResize
@@ -181,59 +219,136 @@ public final class MarkdownPreviewView: NSScrollView {
            submitted.complete || !complete {
             return
         }
-        let visibleFirst = wantsVisibleFirst
-        submitted = (sourceGeneration, width, complete, visibleFirst)
-        let fraction = visibleFirst ? 0 : CGFloat(scrollFraction)
-        pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width, scrollFraction: fraction,
-                        viewportHeight: contentView.bounds.height, visibleFirst: visibleFirst, complete: complete)
+        if waiting, let submitted, submitted.width == width, submitted.complete == complete {
+            if inFlight != nil { return }
+            if let resumeAt, resumeAt > .now {
+                waitForResume(until: resumeAt)
+                return
+            }
+        }
+        resumeTask?.cancel()
+        resumeTask = nil
+        let plan = RenderPlan(firstStep)
+        submitted = (sourceGeneration, width, complete, plan)
+        let generation = pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width,
+                                         scrollFraction: CGFloat(scrollFraction),
+                                         viewportHeight: contentView.bounds.height, visibleFirst: false,
+                                         complete: complete, base: canvas.snapshot, plan: plan)
+        inFlight = (generation, .now)
     }
 
-    /// Visible-first only pays off when the position in the new document is
-    /// known without laying out what is above it: the top.
-    private var wantsVisibleFirst: Bool {
-        guard installedSourceGeneration != sourceGeneration else { return false }
+    private func waitForResume(until instant: ContinuousClock.Instant) {
+        guard resumeTask == nil else { return }
+        resumeTask = Task { [weak self] in
+            do { try await Task.sleep(until: instant, clock: .continuous) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.resumeTask = nil
+            self.scheduleUpdate()
+        }
+    }
+
+    /// What a new source lays out first: the area at a pending scroll
+    /// position, with everything above it so the position is exact; the top
+    /// of the first source; and while typing, everything that changed at once.
+    private var firstStep: RenderPlan.FirstStep {
         switch pendingScroll {
-        case .fraction(let value), .offset(let value): return value == 0
-        case nil: return installedSourceGeneration == 0
+        case .fraction(let value): value == 0 ? .offset(0) : .fraction(value)
+        case .offset(let value): .offset(value)
+        case nil: installedSourceGeneration == 0 ? .offset(0) : .everything
         }
     }
 
     private func handle(_ outcome: RenderOutcome) {
+        // An update ends with its complete snapshot, or its only one during
+        // live resize.
+        let isLast: Bool
         switch outcome {
         case .snapshot(let snapshot, let sourceGeneration, let timings):
-            install(snapshot, sourceGeneration: sourceGeneration, timings: timings)
+            isLast = snapshot.isComplete || submitted?.complete == false
+            install(snapshot, sourceGeneration: sourceGeneration, timings: timings, isLast: isLast)
         case .failure(_, let message):
+            isLast = true
             messageLabel.stringValue = "Preview failed: \(message)"
             messageLabel.isHidden = false
             tile()
         }
+        guard isLast, inFlight?.generation == outcome.generation else { return }
+        inFlight = nil
+        scheduleUpdate()
     }
 
-    private func install(_ snapshot: MarkdownSnapshot, sourceGeneration: UInt64, timings: Timings) {
+    private func install(_ snapshot: MarkdownSnapshot, sourceGeneration: UInt64, timings: Timings, isLast: Bool) {
         let start = ContinuousClock.now
         let interval = signposter.beginInterval("install")
         let old = canvas.snapshot
-        let anchor = sourceGeneration == installedSourceGeneration && old.layouts.count == snapshot.layouts.count
-            ? old.anchor(atY: contentView.bounds.minY) : nil
-        canvas.install(snapshot, sourceChanged: sourceGeneration != installedSourceGeneration)
+        let oldY = contentView.bounds.minY
+        let sourceChanged = sourceGeneration != installedSourceGeneration
+        let anchor = !sourceChanged && old.layouts.count == snapshot.layouts.count ? old.anchor(atY: oldY) : nil
+        let update = sourceChanged ? snapshot.update(from: old) : nil
+        let oldSelection = canvas.selection
+        canvas.install(snapshot, sourceChanged: sourceChanged)
         installedSourceGeneration = sourceGeneration
         canvas.setFrameSize(NSSize(width: canvas.frame.width, height: snapshot.totalHeight))
         let isCurrent = sourceGeneration == self.sourceGeneration
+        var redrawsAll = true
         if isCurrent, let target = pendingScroll {
             scroll(to: target)
             if snapshot.isComplete { pendingScroll = nil }
         } else if let anchor {
             scroll(toY: snapshot.y(for: anchor))
+        } else if let update {
+            scroll(toY: snapshot.anchoredY(oldY, from: old, through: update))
+            redrawsAll = false
         }
         if isCurrent, snapshot.isComplete { completedSourceGeneration = sourceGeneration }
-        canvas.needsDisplay = true
+        let invalidated = redrawsAll ? nil : invalidate(from: old, oldSelection: oldSelection, update: update)
+        canvas.lastInvalidation = invalidated
+        if invalidated == nil { canvas.needsDisplay = true }
         messageLabel.isHidden = true
         pipeline.release(old)
         var timings = timings
-        timings.install = ContinuousClock.now - start
+        let end = ContinuousClock.now
+        timings.install = end - start
+        if isLast, let inFlight, inFlight.generation == snapshot.generation {
+            timings.wall = end - inFlight.start
+            timings.pause = updatePolicy.pause(after: timings.wall)
+            resumeAt = timings.pause > .zero ? end + timings.pause : nil
+        }
         signposter.endInterval("install", interval)
         timingsAwaitingDraw = timings
+        // Nothing visible changed: there is no draw to wait for.
+        if invalidated?.isEmpty == true { didDraw(.zero) }
         onInstall?(snapshot)
+    }
+
+    /// Marks what changed within the visible area for redrawing, after an
+    /// edit diffed against `old`: changed blocks, everything below the first
+    /// height change, and the selection where it moved. Nil when it all
+    /// redraws.
+    private func invalidate(from old: MarkdownSnapshot, oldSelection: Range<TextPosition>?,
+                            update: BlockUpdate?) -> [CGRect]? {
+        let new = canvas.snapshot
+        let visible = canvas.visibleRect
+        guard var rects = new.changedRects(from: old, in: visible) else { return nil }
+        let selection = canvas.selection
+        let kept = { (old: TextPosition, new: TextPosition) in
+            update?.match?.newIndex(ofOld: old.block) == new.block && old.offset == new.offset
+        }
+        if oldSelection != nil || selection != nil {
+            if let oldSelection, let selection, kept(oldSelection.lowerBound, selection.lowerBound),
+               kept(oldSelection.upperBound, selection.upperBound) {
+                // Unchanged blocks keep their highlight; the rest redraws anyway.
+            } else {
+                let bands = [oldSelection.map { old.lineBand($0.lowerBound, $0.upperBound) },
+                             selection.map { new.lineBand($0.lowerBound, $0.upperBound) }]
+                for case let band? in bands {
+                    let rect = band.intersection(visible)
+                    if !rect.isNull, !rect.isEmpty { rects.append(rect) }
+                }
+            }
+        }
+        for rect in rects { canvas.setNeedsDisplay(rect) }
+        return rects
     }
 
     private func didDraw(_ duration: Duration) {
@@ -274,6 +389,9 @@ final class MarkdownDocumentView: NSView {
     var onDraw: (@MainActor (Duration) -> Void)?
     var onOpenLink: (@MainActor (String) -> Void)?
 
+    /// The rectangles the last install marked for redrawing, or nil when it
+    /// redrew everything; for tests.
+    var lastInvalidation: [CGRect]?
     /// Never empty; nil when nothing is selected.
     var selection: Range<TextPosition>?
     /// What the last click selected; drags and shift-clicks extend from it.

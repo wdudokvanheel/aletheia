@@ -19,9 +19,88 @@ public struct Timings: Sendable, Equatable {
     public var draw = Duration.zero
     /// False for the visible-only first step of an open or resize.
     public var isComplete = true
+    /// Blocks that kept their layout from the previous snapshot.
+    public var reusedBlocks = 0
+    /// Blocks laid out by this update, summed over both steps of an open or resize.
+    public var laidOutBlocks = 0
+    /// From submitting the update to the end of its install, including the
+    /// wait for the main thread: the cost the view paces updates by.
+    public var wall = Duration.zero
+    /// How long the next update waits because this one exceeded the
+    /// `UpdatePolicy` budget; zero within budget.
+    public var pause = Duration.zero
+
+    /// Time this update took on the main thread: the install plus the first draw.
+    public var mainThread: Duration { install + draw }
 
     public init(generation: UInt64) {
         self.generation = generation
+    }
+}
+
+/// How a `MarkdownPreviewView` paces updates while its source keeps changing.
+///
+/// There is no debounce: a new source starts processing as soon as no update
+/// is running. At most one update is in flight; sources set meanwhile
+/// coalesce, and only the newest is processed once it finishes, so nothing
+/// queues up. After an update whose wall time (submission to the end of its
+/// install, `Timings.wall`) exceeds `budget`, the next one waits
+/// `min(pauseFactor × wall, maximumPause)` from the end of that install. Very
+/// large documents then update at a bounded rate instead of keeping a core
+/// busy while the user types. Showing another document (`setSource` followed
+/// by a scroll position) does not wait.
+public struct UpdatePolicy: Sendable, Equatable {
+    public var budget: Duration
+    public var pauseFactor: Double
+    public var maximumPause: Duration
+
+    public init(budget: Duration = .milliseconds(16), pauseFactor: Double = 2,
+                maximumPause: Duration = .milliseconds(500)) {
+        self.budget = budget
+        self.pauseFactor = pauseFactor
+        self.maximumPause = maximumPause
+    }
+
+    public static let standard = UpdatePolicy()
+
+    /// The pause an update that took `wall` imposes on the next one.
+    public func pause(after wall: Duration) -> Duration {
+        wall > budget ? min(wall * max(pauseFactor, 0), maximumPause) : .zero
+    }
+}
+
+/// What a request for a new source lays out first. The view can change it
+/// until the worker reads it after parsing, so a scroll position set right
+/// after `setSource`, as when another document is shown, decides it.
+final class RenderPlan: Sendable {
+    enum FirstStep: Sendable, Equatable {
+        /// Everything that changed, at once: typing.
+        case everything
+        /// The area at a position in points, after every block above it, so
+        /// the position is exact; the rest follows. The top of an open is 0.
+        case offset(CGFloat)
+        /// The area at a fraction of the height, and every block above it.
+        /// Estimates below make the position approximate until the rest
+        /// follows.
+        case fraction(CGFloat)
+    }
+
+    private let state: Mutex<(step: FirstStep, isRead: Bool)>
+
+    init(_ step: FirstStep) {
+        state = Mutex((step, false))
+    }
+
+    /// Replaces the first step, unless the worker has read it.
+    func set(_ step: FirstStep) {
+        state.withLock { if !$0.isRead { $0.step = step } }
+    }
+
+    func read() -> FirstStep {
+        state.withLock {
+            $0.isRead = true
+            return $0.step
+        }
     }
 }
 
@@ -30,13 +109,16 @@ struct RenderRequest: Sendable {
     var sourceGeneration: UInt64
     var source: String
     var width: CGFloat
-    /// Where the visible area starts, as a fraction of the document height.
+    /// For a relayout of the same source: where the visible area starts, as a
+    /// fraction of the document height.
     var scrollFraction: CGFloat
     var viewportHeight: CGFloat
-    /// For a new source: lay out the visible area before the rest.
-    var visibleFirst: Bool
+    /// For a new source: what to lay out first.
+    var plan: RenderPlan
     /// False during live resize, when only the visible area is laid out.
     var complete: Bool
+    /// The installed snapshot, which a new source is diffed against.
+    var base: MarkdownSnapshot
 }
 
 enum RenderOutcome: Sendable {
@@ -55,6 +137,8 @@ enum RenderOutcome: Sendable {
 /// `latestGeneration` is only touched on that queue.
 final class RenderWorker: @unchecked Sendable {
     let latestGeneration = Atomic<UInt64>(0)
+    /// Requests that started work, rather than finding themselves superseded.
+    let runs = Atomic<Int>(0)
     private let typography: Typography
     private var current: MarkdownSnapshot?
     private var currentSourceGeneration: UInt64 = 0
@@ -73,83 +157,136 @@ final class RenderWorker: @unchecked Sendable {
     func process(_ request: RenderRequest, post: (RenderOutcome) -> Void) {
         let generation = request.generation
         guard !isSuperseded(generation) else { return }
+        runs.add(1, ordering: .relaxed)
         let columnWidth = typography.column(forWidth: request.width).width
         let isCancelled: @Sendable () -> Bool = { [self] in isSuperseded(generation) }
         var timings = Timings(generation: generation)
         let base: MarkdownSnapshot
+        /// Nil for a relayout, which starts at the current position.
+        var firstStep: RenderPlan.FirstStep?
 
         if let current, currentSourceGeneration == request.sourceGeneration {
             if current.width == request.width, current.isComplete {
                 timings.blockCount = current.layouts.count
+                timings.reusedBlocks = current.layouts.count
                 post(.snapshot(current.with(generation: generation), sourceGeneration: request.sourceGeneration,
                                timings: timings))
                 return
             }
             base = current
         } else {
+            // A new source: parse it in full, diff it against the installed
+            // snapshot, and keep the layouts of unchanged blocks.
             let start = ContinuousClock.now
-            let document: MarkdownDocument
+            let parsed: MarkdownDocument.ParseResult
             do {
-                document = try signposter.withIntervalSignpost("parse") { try MarkdownDocument.parse(request.source) }
+                parsed = try signposter.withIntervalSignpost("parse") {
+                    try MarkdownDocument.parse(request.source, reusing: request.base.document)
+                }
             } catch {
                 post(.failure(generation: generation, message: "\(error)"))
                 return
             }
             timings.parse = ContinuousClock.now - start
+            let document = parsed.document
+            let update = BlockUpdate(baseID: request.base.id, match: parsed.match, edit: parsed.edit)
+            let reused = MarkdownSnapshot.reusableLayouts(from: request.base, match: parsed.match,
+                                                          newCount: document.blocks.count,
+                                                          columnWidth: columnWidth, typography: typography)
             timings.blockCount = document.blocks.count
-            if request.visibleFirst {
-                let estimates = document.blocks.map { BlockLayout.estimate(for: $0, columnWidth: columnWidth, typography: typography) }
-                base = MarkdownSnapshot(document: document, layouts: estimates, width: request.width,
-                                        typography: typography, generation: generation)
+            timings.reusedBlocks = reused.count(where: { $0 != nil })
+            firstStep = request.plan.read()
+            if firstStep != .everything {
+                let layouts = reused.indices.map {
+                    reused[$0] ?? BlockLayout.estimate(for: document.blocks[$0], columnWidth: columnWidth,
+                                                       typography: typography)
+                }
+                base = MarkdownSnapshot(document: document, layouts: layouts, width: request.width,
+                                        typography: typography, generation: generation, update: update)
             } else {
                 let start = ContinuousClock.now
                 let layouts = signposter.withIntervalSignpost("layout") {
-                    BlockLayout.layOut(document.blocks, columnWidth: columnWidth, typography: typography,
-                                       isCancelled: isCancelled)
+                    BlockLayout.layOut(document.blocks, filling: reused, columnWidth: columnWidth,
+                                       typography: typography, isCancelled: isCancelled)
                 }
                 guard let layouts else { return }
                 timings.layout = ContinuousClock.now - start
+                timings.laidOutBlocks = layouts.count - timings.reusedBlocks
                 commit(MarkdownSnapshot(document: document, layouts: layouts, width: request.width,
-                                        typography: typography, generation: generation),
+                                        typography: typography, generation: generation, update: update),
                        request, timings, post: post)
                 return
             }
         }
         timings.blockCount = base.layouts.count
+        if base.generation != generation {
+            timings.reusedBlocks = base.layouts.count(where: { $0.isFinal(for: columnWidth) })
+        }
 
-        // Step 1: the blocks from the top of the visible area down, enough to
-        // fill it, laid out serially.
+        // Step 1: the visible area before the rest.
         var start = ContinuousClock.now
         var layouts = base.layouts
         let blocks = base.document.blocks
+        let target = max(request.viewportHeight, 400) * 1.5
         signposter.withIntervalSignpost("layout") {
-            var index = base.firstBlock(endingBelow: request.scrollFraction * base.totalHeight)
-            var covered: CGFloat = 0
-            let target = max(request.viewportHeight, 400) * 1.5
-            while index < layouts.count, covered < target {
-                if !layouts[index].isFinal(for: columnWidth) {
-                    layouts[index] = BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography)
+            guard let firstStep else {
+                // A relayout: from the top of the visible area down, enough
+                // to fill it, serially.
+                var index = base.firstBlock(endingBelow: request.scrollFraction * base.totalHeight)
+                var covered: CGFloat = 0
+                while index < layouts.count, covered < target {
+                    if !layouts[index].isFinal(for: columnWidth) {
+                        layouts[index] = BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography)
+                        timings.laidOutBlocks += 1
+                    }
+                    covered += layouts[index].height + layouts[index].marginBottom
+                    index += 1
                 }
-                covered += layouts[index].height + layouts[index].marginBottom
-                index += 1
+                return
+            }
+            // A new source: every block down to the bottom of the area at the
+            // position, in parallel, so everything above the area is laid
+            // out. Estimates decide how far that is, so repeat until the laid
+            // out blocks reach it.
+            var done = 0
+            while done < layouts.count, !isCancelled() {
+                let partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
+                                               typography: typography, generation: generation)
+                let top: CGFloat = switch firstStep {
+                case .offset(let y): y
+                case .fraction(let fraction): fraction * partial.totalHeight
+                case .everything: 0
+                }
+                let end = min(partial.firstBlock(endingBelow: top + target) + 1, layouts.count)
+                guard end > done else { break }
+                let range = done..<end
+                let kept = layouts[range].map { $0.isFinal(for: columnWidth) ? $0 : nil }
+                guard let laidOut = BlockLayout.layOut(Array(blocks[range]), filling: kept, columnWidth: columnWidth,
+                                                       typography: typography, isCancelled: isCancelled) else { return }
+                layouts.replaceSubrange(range, with: laidOut)
+                timings.laidOutBlocks += kept.count(where: { $0 == nil })
+                done = end
             }
         }
+        guard !isCancelled() else { return }
         let visible = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
-                                       typography: typography, generation: generation)
+                                       typography: typography, generation: generation, update: base.update)
         timings.layout = ContinuousClock.now - start
         commit(visible, request, timings, post: post)
         guard !visible.isComplete, request.complete, !isCancelled() else { return }
 
         // Step 2: everything else, in parallel.
         start = ContinuousClock.now
+        let kept = layouts.map { $0.isFinal(for: columnWidth) ? $0 : nil }
         let all = signposter.withIntervalSignpost("layout") {
-            BlockLayout.layOut(blocks, columnWidth: columnWidth, typography: typography, reusing: layouts,
+            BlockLayout.layOut(blocks, filling: kept, columnWidth: columnWidth, typography: typography,
                                isCancelled: isCancelled)
         }
         guard let all else { return }
         timings.layout += ContinuousClock.now - start
+        timings.laidOutBlocks += kept.count(where: { $0 == nil })
         commit(MarkdownSnapshot(document: base.document, layouts: all, width: request.width, typography: typography,
-                                generation: generation),
+                                generation: generation, update: base.update),
                request, timings, post: post)
     }
 
@@ -179,17 +316,24 @@ final class RenderPipeline {
         worker = RenderWorker(typography: typography)
     }
 
+    /// Requests that started work on the background queue.
+    var runs: Int { worker.runs.load(ordering: .relaxed) }
+
     /// Queues a request and returns its generation, which supersedes every
-    /// earlier one.
+    /// earlier one. A new source is diffed against `base`, which should be
+    /// the installed snapshot, and lays out first what `plan` says by the
+    /// time it is parsed; without a plan, the top when `visibleFirst`.
     @discardableResult
     func submit(sourceGeneration: UInt64, source: String, width: CGFloat, scrollFraction: CGFloat,
-                viewportHeight: CGFloat, visibleFirst: Bool, complete: Bool) -> UInt64 {
+                viewportHeight: CGFloat, visibleFirst: Bool, complete: Bool,
+                base: MarkdownSnapshot = .empty, plan: RenderPlan? = nil) -> UInt64 {
         generation += 1
         isCancelled = false
         worker.latestGeneration.store(generation, ordering: .relaxed)
         let request = RenderRequest(generation: generation, sourceGeneration: sourceGeneration, source: source,
                                     width: width, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
-                                    visibleFirst: visibleFirst, complete: complete)
+                                    plan: plan ?? RenderPlan(visibleFirst ? .offset(0) : .everything),
+                                    complete: complete, base: base)
         let post: @Sendable (RenderOutcome) -> Void = { [weak self] outcome in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.receive(outcome) }
