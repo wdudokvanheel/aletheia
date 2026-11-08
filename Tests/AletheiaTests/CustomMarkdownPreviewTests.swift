@@ -90,6 +90,26 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         preview.prepareForRelease()
     }
 
+    @MainActor func testCustomPreviewUpdatesWithoutADebounce() async throws {
+        _ = NSApplication.shared
+        let url = try temporaryMarkdown("# Title\n\nBody")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let preview = CustomMarkdownPreview()
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        document.onContentChange = { preview.contentChanged() }
+        preview.show(document)
+        try await eventually { preview.preview.snapshot.document.blocks.first?.text == "Title" }
+        let start = ContinuousClock.now
+        for (offset, character) in " now".enumerated() {
+            document.editor.insertText(String(character), replacementRange: NSRange(location: 7 + offset, length: 0))
+        }
+        try await eventually { preview.preview.snapshot.document.blocks.first?.text == "Title now" }
+        XCTAssertLessThan(ContinuousClock.now - start, .milliseconds(200), "no editing debounce")
+        XCTAssertEqual(preview.preview.snapshot.document.blocks.map(\.text), ["Title now", "Body"])
+        preview.prepareForRelease()
+    }
+
     @MainActor func testCustomPreviewRestoresEachDocumentsScrollOffset() async throws {
         _ = NSApplication.shared
         let first = try temporaryMarkdown(longMarkdown("First"))

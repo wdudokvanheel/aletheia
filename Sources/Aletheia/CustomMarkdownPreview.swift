@@ -12,7 +12,6 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     /// Opens web and mail links; replaced in tests.
     var openInSystem: (URL) -> Void = { NSWorkspace.shared.open($0) }
     private weak var document: EditorDocument?
-    private var pending: Task<Void, Never>?
     /// The buffer changed since it was last pushed.
     private var stale = false
     private var visible = true
@@ -50,8 +49,6 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     func show(_ document: EditorDocument?) {
         let changed = self.document !== document || document == nil
         self.document = document
-        pending?.cancel()
-        pending = nil
         guard let document else {
             nextFraction = nil
             restoring = false
@@ -75,19 +72,14 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
         }
     }
 
-    /// Mirrors WebKit: copy the buffer only after the 200 ms editing debounce.
+    /// No debounce, unlike WebKit: every change goes to the view at once.
+    /// The view runs one update at a time and coalesces sources set
+    /// meanwhile, pausing after slow updates, so copying the buffer is the
+    /// only work per keystroke here.
     func contentChanged() {
         guard document != nil else { return }
         stale = true
-        pending?.cancel()
-        pending = nil
-        guard visible else { return }
-        pending = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
-            guard let self, !Task.isCancelled else { return }
-            self.pending = nil
-            self.pushIfStale()
-        }
+        pushIfStale()
     }
 
     /// Hidden previews stay stale until shown, so they copy nothing.
@@ -112,12 +104,10 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     func setVisible(_ visible: Bool) {
         self.visible = visible
         preview.setVisible(visible)
-        if pending == nil { pushIfStale() }
+        pushIfStale()
     }
 
     func prepareForRelease() {
-        pending?.cancel()
-        pending = nil
         document = nil
         preview.setSource("")
     }
@@ -165,6 +155,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
             return String(format: "%.1f", Double(seconds) * 1000 + Double(attoseconds) / 1e15)
         }
         timingsLabel.stringValue = " parse \(ms(last.parse))  layout \(ms(last.layout))  install \(ms(last.install))"
-            + "  draw \(ms(last.draw)) ms  \(last.blockCount) blocks\(last.isComplete ? "" : " (partial)") "
+            + "  draw \(ms(last.draw)) ms  \(last.blockCount) blocks, \(last.laidOutBlocks) laid out"
+            + "\(last.isComplete ? "" : " (partial)") "
     }
 }
