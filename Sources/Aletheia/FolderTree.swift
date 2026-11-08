@@ -80,6 +80,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         guard !applyingReveal, pendingState == nil, let target = pendingReveal, let root else { return }
         applyingReveal = true
         defer { applyingReveal = false }
+        outline.expandItem(root)
         var node = root
         for component in target.pathComponents.dropFirst(root.url.standardizedFileURL.pathComponents.count) {
             guard node.isDirectory else { pendingReveal = nil; return }
@@ -113,6 +114,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
             URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
         }
         let expanded = Set(state.expandedPaths.map(canonical))
+        if root.wantsExpanded { outline.expandItem(root) }
         var waiting = false
         func visit(_ node: FolderNode) {
             guard !failedRestorationPaths.contains(node.url.path) else { return }
@@ -183,7 +185,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         root = FolderNode(url: url.resolvingSymlinksInPath(), isDirectory: true)
         gitStatus = GitStatusSnapshot()
         outline.reloadData()
-        if let root { load(root) }
+        if let root { outline.expandItem(root) }
         refreshGitStatus()
     }
 
@@ -289,13 +291,10 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                         previous.first { $0.url == child.url && $0.isDirectory == child.isDirectory }
                             ?? FolderNode(url: child.url, isDirectory: child.isDirectory)
                     }
-                    if node === self.root { self.outline.reloadData() }
-                    else {
-                        let expand = node.wantsExpanded
-                        self.outline.reloadItem(node, reloadChildren: true)
-                        if expand, self.pendingState == nil { self.outline.expandItem(node) }
-                        self.updateIcon(node)
-                    }
+                    let expand = node.wantsExpanded
+                    self.outline.reloadItem(node, reloadChildren: true)
+                    if expand, self.pendingState == nil { self.outline.expandItem(node) }
+                    self.updateIcon(node)
                 case .failure(let error):
                     // Keep nil so collapsing/re-expanding can retry after access changes.
                     self.failedRestorationPaths.insert(node.url.path)
@@ -312,13 +311,15 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let node = item as? FolderNode ?? root else { return 0 }
+        guard let item else { return root == nil ? 0 : 1 }
+        guard let node = item as? FolderNode else { return 0 }
         if node.children == nil { load(node) }
         return node.children?.count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        (item as? FolderNode ?? root!).children![index]
+        guard let item else { return root! }
+        return (item as! FolderNode).children![index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
