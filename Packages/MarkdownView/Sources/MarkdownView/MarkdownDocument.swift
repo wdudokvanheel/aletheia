@@ -1,3 +1,6 @@
+import CoreFoundation
+import Foundation
+
 /// The role of a stretch of display text. Layout picks fonts by role and the
 /// view picks colors by role at draw time, so a theme switch is only a redraw.
 public enum TextRole: UInt8, Sendable, CaseIterable {
@@ -151,6 +154,10 @@ public struct MarkdownBlock: Sendable, Equatable {
     public var links: [MarkdownLink]
     /// From `text` to `sourceText`, relative to their starts.
     public var sourceMap: SourceMap
+    /// The whitespace before the block on its first line. Indentation
+    /// changes how the rest of the block parses, so blocks with the same
+    /// source text are only interchangeable with equal indentation.
+    var indentation = ""
 
     /// Without a source map, display offsets map to the same source offsets.
     public init(kind: Kind, sourceRange: Range<Int>, sourceText: String, text: String, styleRuns: [StyleRun],
@@ -178,6 +185,14 @@ public struct MarkdownBlock: Sendable, Equatable {
 /// A parsed Markdown document: its top-level blocks in source order.
 public struct MarkdownDocument: Sendable, Equatable {
     public var blocks: [MarkdownBlock]
+    /// The source this was parsed from, as contiguous UTF-8, for diffing the
+    /// next parse against. Empty for documents built by hand.
+    private(set) var source = ""
+    private(set) var sourceUTF16Count = 0
+    /// Every part of the source that can hold a link reference definition,
+    /// which the display text of every block can depend on. Nil for
+    /// documents built by hand, which never match a parse.
+    private(set) var definitions: [UInt8]?
 
     public init(blocks: [MarkdownBlock]) {
         self.blocks = blocks
@@ -186,12 +201,59 @@ public struct MarkdownDocument: Sendable, Equatable {
     /// Parses GitHub-flavored Markdown with cmark-gfm. Safe to call off the
     /// main thread; cost is proportional to the source length.
     public static func parse(_ source: String) throws -> MarkdownDocument {
-        var source = source
-        source.makeContiguousUTF8()
-        let blocks = try source.utf8.withContiguousStorageIfAvailable { bytes in
-            try MarkdownParser.blocks(utf8: bytes)
+        try parse(source, reusing: nil).document
+    }
+
+    /// Parses `source` in full and diffs its top-level blocks against
+    /// `previous`: blocks equal to one of `previous` keep that block's display
+    /// content instead of building it again, unless the link reference
+    /// definitions differ, since every block's display text depends on them.
+    static func parse(_ source: String, reusing previous: MarkdownDocument?) throws -> ParseResult {
+        let source = contiguousUTF8(source)
+        let result = try source.utf8.withContiguousStorageIfAvailable { bytes in
+            try MarkdownParser.parse(utf8: bytes, previous: previous)
         }
-        return MarkdownDocument(blocks: blocks ?? [])
+        guard var result else { throw MarkdownError.parserUnavailable }
+        result.document.source = source
+        return result
+    }
+
+    /// `source` as contiguous UTF-8. Text bridged from an `NSString`, like an
+    /// `NSTextView`'s, converts through Core Foundation, about eight times
+    /// faster than the standard library's general path; text it rejects
+    /// (lone surrogates) takes that path instead, which repairs it.
+    static func contiguousUTF8(_ source: String) -> String {
+        if source.isContiguousUTF8 { return source }
+        let string = source as NSString as CFString
+        let range = CFRange(location: 0, length: CFStringGetLength(string))
+        let encoding = CFStringBuiltInEncodings.UTF8.rawValue
+        var needed: CFIndex = 0
+        if CFStringGetBytes(string, range, encoding, 0, false, nil, 0, &needed) == range.length {
+            let converted = String(unsafeUninitializedCapacity: needed) { buffer in
+                var used: CFIndex = 0
+                CFStringGetBytes(string, range, encoding, 0, false, buffer.baseAddress, needed, &used)
+                return used
+            }
+            if converted.utf8.count == needed { return converted }
+        }
+        var repaired = source
+        repaired.makeContiguousUTF8()
+        return repaired
+    }
+
+    struct ParseResult {
+        var document: MarkdownDocument
+        /// How the blocks line up with `previous`'s; nil when nothing could
+        /// be reused.
+        var match: BlockMatch?
+        /// The changed span of the source since `previous`.
+        var edit: SourceEdit
+    }
+
+    init(blocks: [MarkdownBlock], sourceUTF16Count: Int, definitions: [UInt8]) {
+        self.blocks = blocks
+        self.sourceUTF16Count = sourceUTF16Count
+        self.definitions = definitions
     }
 }
 

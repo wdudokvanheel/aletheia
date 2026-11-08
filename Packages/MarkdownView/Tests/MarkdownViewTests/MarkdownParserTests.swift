@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import MarkdownView
 
@@ -102,5 +103,18 @@ final class MarkdownParserTests: XCTestCase {
     func testEmptySource() throws {
         XCTAssertEqual(try MarkdownDocument.parse("").blocks, [])
         XCTAssertEqual(try MarkdownDocument.parse("\n\n  \n").blocks, [])
+    }
+
+    func testBridgedSourcesParseLikeNativeOnes() throws {
+        let native = "# Héllo 👍\n\nשלום and 日本語 with `code`.\n"
+        let bridged = NSMutableString(string: native).copy() as! NSString as String
+        XCTAssertFalse(bridged.isContiguousUTF8)
+        XCTAssertEqual(MarkdownDocument.contiguousUTF8(bridged), native)
+        XCTAssertTrue(MarkdownDocument.contiguousUTF8(bridged).isContiguousUTF8)
+        XCTAssertEqual(try MarkdownDocument.parse(bridged), try MarkdownDocument.parse(native))
+        // A lone surrogate is repaired, keeping UTF-16 offsets.
+        let lone = NSString(characters: [0x61, 0xD800, 0x62], length: 3) as String
+        XCTAssertEqual(MarkdownDocument.contiguousUTF8(lone), "a\u{FFFD}b")
+        XCTAssertEqual(try MarkdownDocument.parse(lone).blocks.first?.sourceRange, 0..<3)
     }
 }

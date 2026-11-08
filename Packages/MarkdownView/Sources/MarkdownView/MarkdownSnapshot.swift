@@ -1,4 +1,5 @@
 import CoreGraphics
+import Synchronization
 
 /// An immutable, fully positioned document: block layouts, their y offsets as
 /// prefix sums, the total height, and the width and generation it was made for.
@@ -22,12 +23,35 @@ public struct MarkdownSnapshot: Sendable {
     /// another width, between the two steps of an open or a resize.
     public let isComplete: Bool
     let typography: Typography
+    /// Unique per snapshot, so an update can name its base.
+    let id: UInt64
+    /// How `document` relates to the snapshot it was diffed against, kept by
+    /// every relayout of the same document.
+    let update: BlockUpdate?
+
+    private static let ids = Atomic<UInt64>(0)
+    #if DEBUG
+    /// Passes over every layout to compute y offsets, counted so tests can
+    /// check that installing a snapshot on the main thread makes none.
+    static let prefixSumPasses = Atomic<Int>(0)
+    #endif
 
     /// Positions `layouts` (one per block of `document`) top to bottom,
     /// collapsing adjacent margins as CSS does.
     public init(document: MarkdownDocument, layouts: [BlockLayout], width: CGFloat, typography: Typography,
                 generation: UInt64) {
+        self.init(document: document, layouts: layouts, width: width, typography: typography,
+                  generation: generation, update: nil)
+    }
+
+    /// Computes the y offsets as prefix sums, in one pass over the layouts.
+    /// Snapshots are built off the main thread; installing one only reads them.
+    init(document: MarkdownDocument, layouts: [BlockLayout], width: CGFloat, typography: Typography,
+         generation: UInt64, update: BlockUpdate?) {
         precondition(layouts.count == document.blocks.count, "one layout per block")
+        #if DEBUG
+        Self.prefixSumPasses.add(1, ordering: .relaxed)
+        #endif
         let column = typography.column(forWidth: width)
         var tops: [CGFloat] = []
         tops.reserveCapacity(layouts.count)
@@ -55,6 +79,8 @@ public struct MarkdownSnapshot: Sendable {
         totalHeight = (y + pendingMargin + typography.bottomInset).rounded(.up)
         isComplete = complete
         self.typography = typography
+        id = Self.ids.add(1, ordering: .relaxed).newValue
+        self.update = update
     }
 
     /// Lays out every block of `document` for a view `width`, in parallel.
@@ -91,7 +117,7 @@ public struct MarkdownSnapshot: Sendable {
 
     func with(generation: UInt64) -> MarkdownSnapshot {
         MarkdownSnapshot(document: document, layouts: layouts, width: width, typography: typography,
-                         generation: generation)
+                         generation: generation, update: update)
     }
 
     /// A scroll position as a block index plus a fraction of that block's

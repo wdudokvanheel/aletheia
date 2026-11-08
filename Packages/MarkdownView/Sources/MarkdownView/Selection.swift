@@ -261,16 +261,65 @@ extension MarkdownSnapshot {
     // MARK: Across updates
 
     /// Maps a range from `old`, a snapshot of an earlier source, onto this
-    /// one. Blocks are matched through their source ranges and text, so an
-    /// unchanged block keeps its offsets even when blocks above it changed.
-    /// In an edited block, offsets before and after the edit follow the text
-    /// and offsets inside it are clamped. Nil when a selected block vanished
-    /// or was replaced, as when another document is shown.
+    /// one. An unchanged block keeps its offsets even when blocks above it
+    /// changed. In an edited block, offsets before and after the edit follow
+    /// the text and offsets inside it are clamped. Nil when a selected block
+    /// vanished or was replaced, as when another document is shown.
+    ///
+    /// When `old` is this snapshot's base, the diff answers directly: matched
+    /// blocks keep their offsets at their new index, and other positions
+    /// follow the source edit through the blocks' source maps. Otherwise
+    /// blocks are matched by their source ranges and text.
     func mapRange(_ range: Range<TextPosition>, from old: MarkdownSnapshot) -> Range<TextPosition>? {
-        guard let lower = map(range.lowerBound, from: old), let upper = map(range.upperBound, from: old) else {
+        let lower: TextPosition?
+        let upper: TextPosition?
+        if let update = update(from: old) {
+            lower = map(range.lowerBound, from: old, through: update, upstream: false)
+            upper = map(range.upperBound, from: old, through: update, upstream: true)
+        } else {
+            lower = map(range.lowerBound, from: old)
+            upper = map(range.upperBound, from: old)
+        }
+        guard let lower, let upper else { return nil }
+        return lower <= upper ? lower..<upper : nil
+    }
+
+    /// A position carried through the diff from `old`, the base. A block the
+    /// edit replaced entirely is gone. Elsewhere in an edited block, a
+    /// position outside the edited span goes through its source map, the
+    /// source edit, and the new block's source map, which also follows
+    /// blocks that were split or merged. Inside the span, which can cover
+    /// unchanged text when edits at several places coalesced, the block is
+    /// paired by its place among the changed blocks and the offset follows
+    /// the display text, clamped, or is dropped when the text was replaced.
+    private func map(_ position: TextPosition, from old: MarkdownSnapshot, through update: BlockUpdate,
+                     upstream: Bool) -> TextPosition? {
+        let oldBlocks = old.document.blocks
+        guard oldBlocks.indices.contains(position.block) else { return nil }
+        if let index = update.match?.newIndex(ofOld: position.block) {
+            return TextPosition(block: index, offset: min(position.offset, layouts[index].textLength))
+        }
+        let block = oldBlocks[position.block]
+        let edit = update.edit
+        if !edit.old.isEmpty, edit.old.lowerBound <= block.sourceRange.lowerBound,
+           block.sourceRange.upperBound <= edit.old.upperBound {
             return nil
         }
-        return lower <= upper ? lower..<upper : nil
+        let source = block.sourceOffset(forDisplayOffset: position.offset)
+        guard source <= edit.old.lowerBound || source >= edit.old.upperBound else {
+            let paired = update.match.map { $0.pairedNewIndex(ofOld: position.block) }
+                ?? (position.block < layouts.count ? position.block : nil)
+            guard let index = paired, isSelectable(index),
+                  let offset = Self.mapOffset(position.offset, from: block.text, to: document.blocks[index].text)
+            else { return nil }
+            return TextPosition(block: index, offset: offset)
+        }
+        let mapped = edit.map(source, upstream: upstream)
+        let index = firstBlock(endingAtOrAfterSource: mapped)
+        guard index < layouts.count, document.blocks[index].sourceRange.lowerBound <= mapped,
+              isSelectable(index) else { return nil }
+        let offset = document.blocks[index].displayOffset(forSourceOffset: mapped)
+        return TextPosition(block: index, offset: min(max(offset, 0), layouts[index].textLength))
     }
 
     private func map(_ position: TextPosition, from old: MarkdownSnapshot) -> TextPosition? {

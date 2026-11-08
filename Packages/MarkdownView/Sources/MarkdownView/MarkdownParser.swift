@@ -1,13 +1,34 @@
 import cmark_gfm
 import cmark_gfm_extensions
 import Darwin
+import Dispatch
 
 /// Bridge to cmark-gfm with exactly the extensions the renderer supports.
 enum MarkdownParser {
     static let extensionNames = ["table", "strikethrough", "tasklist", "autolink"]
 
+    /// A top-level block as cmark positions it, before its display content
+    /// is built.
+    private struct Span {
+        let node: UnsafeMutablePointer<cmark_node>
+        let kind: MarkdownBlock.Kind
+        let start: (utf8: Int, utf16: Int)
+        let end: (utf8: Int, utf16: Int)
+        /// The UTF-8 offset of the start of the block's first line.
+        let lineStart: Int
+        /// False for blocks cmark gives no source position, which never match.
+        var isPositioned = true
+
+        var text: Range<Int> { start.utf8..<end.utf8 }
+        var indentation: Range<Int> { lineStart..<start.utf8 }
+    }
+
     /// Parses UTF-8 Markdown with source positions into top-level blocks.
-    static func blocks(utf8 bytes: UnsafeBufferPointer<UInt8>) throws -> [MarkdownBlock] {
+    /// Blocks equal to one of `previous` (same kind, indentation, and source
+    /// text) take its display content instead of building it again, as long
+    /// as both have the same link reference definitions.
+    static func parse(utf8 bytes: UnsafeBufferPointer<UInt8>,
+                      previous: MarkdownDocument?) throws -> MarkdownDocument.ParseResult {
         cmark_gfm_core_extensions_ensure_registered()
         guard let parser = cmark_parser_new(CMARK_OPT_SOURCEPOS) else { throw MarkdownError.parserUnavailable }
         defer { cmark_parser_free(parser) }
@@ -22,31 +43,185 @@ enum MarkdownParser {
         defer { cmark_node_free(document) }
 
         let lines = LineIndex(bytes)
-        var blocks: [MarkdownBlock] = []
+        var spans: [Span] = []
         var node = cmark_node_first_child(document)
         while let block = node {
-            let start = lines.offsets(bytes, line: cmark_node_get_start_line(block),
-                                      byteInLine: Int(cmark_node_get_start_column(block)) - 1)
+            node = cmark_node_next(block)
+            let startLine = cmark_node_get_start_line(block)
+            guard startLine > 0, cmark_node_get_end_line(block) > 0 else {
+                // The table extension splits text before a header row into a
+                // paragraph without a position. An empty range where the
+                // previous block ends keeps ranges in source order.
+                let at = spans.last?.end ?? (utf8: 0, utf16: 0)
+                var span = Span(node: block, kind: Self.kind(of: block), start: at, end: at, lineStart: at.utf8)
+                span.isPositioned = false
+                spans.append(span)
+                continue
+            }
+            let start = lines.offsets(bytes, line: startLine, byteInLine: Int(cmark_node_get_start_column(block)) - 1)
             var end = lines.offsets(bytes, line: cmark_node_get_end_line(block),
                                     byteInLine: Int(cmark_node_get_end_column(block)))
             if end.utf8 < start.utf8 { end = start }
-            let kind = Self.kind(of: block)
-            var display = DisplayText(source: bytes, lines: lines, start: start, end: end.utf8)
-            if kind != .htmlBlock { display.append(block) }
-            let sourceRange = start.utf16..<end.utf16
-            blocks.append(MarkdownBlock(
-                kind: kind,
-                sourceRange: sourceRange,
-                sourceText: String(decoding: UnsafeBufferPointer(rebasing: bytes[start.utf8..<end.utf8]), as: UTF8.self),
-                text: String(decoding: display.bytes, as: UTF8.self),
-                styleRuns: display.runs,
-                links: display.links,
-                sourceMap: SourceMap(anchors: display.anchors, displayLength: display.utf16Count,
-                                     sourceLength: sourceRange.count)
-            ))
-            node = cmark_node_next(block)
+            spans.append(Span(node: block, kind: Self.kind(of: block), start: start, end: end,
+                              lineStart: min(lines.utf8Start(ofLine: startLine) ?? start.utf8, start.utf8)))
         }
-        return blocks
+
+        let definitions = Self.definitions(in: bytes, spans: spans)
+        var match: BlockMatch?
+        if let previous, let old = previous.definitions, old == definitions {
+            match = BlockMatch(oldCount: previous.blocks.count, newCount: spans.count,
+                               equal: { isEqual(previous.blocks[$0], spans[$1], bytes) },
+                               oldHash: { hash(previous.blocks[$0]) },
+                               newHash: { hash(spans[$0], bytes) })
+        }
+
+        // Blocks the diff did not match get their display content built,
+        // in parallel when there are several: each walks only its own
+        // subtree, and the only thing cmark changes during a walk is the
+        // cached C string of a node in that subtree.
+        let unmatched = spans.indices.filter { match?.oldIndex(ofNew: $0) == nil }
+        let built = UnsafeMutableBufferPointer<MarkdownBlock>.allocate(capacity: unmatched.count)
+        defer { built.deallocate() }
+        let context = BuildContext(bytes: bytes, lines: lines, spans: spans, unmatched: unmatched, built: built)
+        if unmatched.count < 8 {
+            for slot in unmatched.indices { context.build(slot) }
+        } else {
+            DispatchQueue.concurrentPerform(iterations: unmatched.count) { context.build($0) }
+        }
+        var blocks: [MarkdownBlock] = []
+        blocks.reserveCapacity(spans.count)
+        var slot = 0
+        for (index, span) in spans.enumerated() {
+            if let previous, let old = match?.oldIndex(ofNew: index) {
+                var block = previous.blocks[old]
+                block.sourceRange = span.start.utf16..<span.end.utf16
+                blocks.append(block)
+            } else {
+                blocks.append(built.moveElement(from: slot))
+                slot += 1
+            }
+        }
+        return MarkdownDocument.ParseResult(
+            document: MarkdownDocument(blocks: blocks, sourceUTF16Count: lines.utf16Count, definitions: definitions),
+            match: match,
+            edit: sourceEdit(from: previous, to: bytes, lines: lines))
+    }
+
+    /// What building display content needs, shared read-only across
+    /// threads; each slot of `built` is written by one of them.
+    private struct BuildContext: @unchecked Sendable {
+        let bytes: UnsafeBufferPointer<UInt8>
+        let lines: LineIndex
+        let spans: [Span]
+        let unmatched: [Int]
+        let built: UnsafeMutableBufferPointer<MarkdownBlock>
+
+        func build(_ slot: Int) {
+            (built.baseAddress! + slot).initialize(to: MarkdownParser.block(for: spans[unmatched[slot]], bytes, lines))
+        }
+    }
+
+    /// A block's display text, style runs, links, and source map, from its
+    /// cmark subtree.
+    private static func block(for span: Span, _ bytes: UnsafeBufferPointer<UInt8>, _ lines: LineIndex) -> MarkdownBlock {
+        let sourceRange = span.start.utf16..<span.end.utf16
+        var display = DisplayText(source: bytes, lines: lines, start: span.start, end: span.end.utf8)
+        if span.kind != .htmlBlock { display.append(span.node) }
+        var block = MarkdownBlock(
+            kind: span.kind,
+            sourceRange: sourceRange,
+            sourceText: String(decoding: UnsafeBufferPointer(rebasing: bytes[span.text]), as: UTF8.self),
+            text: String(decoding: display.bytes, as: UTF8.self),
+            styleRuns: display.runs,
+            links: display.links,
+            sourceMap: SourceMap(anchors: display.anchors, displayLength: display.utf16Count,
+                                 sourceLength: sourceRange.count)
+        )
+        if !span.indentation.isEmpty {
+            block.indentation = String(decoding: UnsafeBufferPointer(rebasing: bytes[span.indentation]), as: UTF8.self)
+        }
+        return block
+    }
+
+    // MARK: Diffing
+
+    /// Every part of the source that can hold a link reference definition,
+    /// concatenated: text between top-level blocks that is not whitespace
+    /// (definitions alone in a paragraph leave no block), and blocks whose
+    /// source contains `]:`, which every definition does. Code and HTML
+    /// blocks cannot hold definitions.
+    private static func definitions(in bytes: UnsafeBufferPointer<UInt8>, spans: [Span]) -> [UInt8] {
+        var key: [UInt8] = []
+        func add(_ range: Range<Int>) {
+            key.append(contentsOf: bytes[range])
+            key.append(0)
+        }
+        func addGap(_ range: Range<Int>) {
+            let isBlank = bytes[range].allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }
+            if !isBlank { add(range) }
+        }
+        var cursor = 0
+        for span in spans {
+            if cursor < span.start.utf8 { addGap(cursor..<span.start.utf8) }
+            if span.kind != .codeBlock, span.kind != .htmlBlock, contains(bytes, span.text, "]:") { add(span.text) }
+            cursor = max(cursor, span.end.utf8)
+        }
+        if cursor < bytes.count { addGap(cursor..<bytes.count) }
+        return key
+    }
+
+    private static func contains(_ bytes: UnsafeBufferPointer<UInt8>, _ range: Range<Int>, _ needle: StaticString) -> Bool {
+        guard range.count >= needle.utf8CodeUnitCount, let base = bytes.baseAddress else { return false }
+        return memmem(base + range.lowerBound, range.count, needle.utf8Start, needle.utf8CodeUnitCount) != nil
+    }
+
+    private static func isEqual(_ block: MarkdownBlock, _ span: Span, _ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        let text = span.text
+        guard span.isPositioned, !text.isEmpty, block.sourceText.utf8.count == text.count, block.kind == span.kind,
+              block.indentation.utf8.elementsEqual(bytes[span.indentation]) else { return false }
+        guard let base = bytes.baseAddress else { return false }
+        var sourceText = block.sourceText
+        return sourceText.withUTF8 { memcmp($0.baseAddress, base + text.lowerBound, text.count) == 0 }
+    }
+
+    /// Hashes indentation and source text the same way for old and new blocks.
+    private static func hash(_ block: MarkdownBlock) -> Int {
+        var hasher = Hasher()
+        var indentation = block.indentation
+        var sourceText = block.sourceText
+        indentation.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        sourceText.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        return hasher.finalize()
+    }
+
+    private static func hash(_ span: Span, _ bytes: UnsafeBufferPointer<UInt8>) -> Int {
+        var hasher = Hasher()
+        hasher.combine(bytes: UnsafeRawBufferPointer(UnsafeBufferPointer(rebasing: bytes[span.indentation])))
+        hasher.combine(bytes: UnsafeRawBufferPointer(UnsafeBufferPointer(rebasing: bytes[span.text])))
+        return hasher.finalize()
+    }
+
+    /// The span that changed since `previous`: everything between the
+    /// longest common prefix and suffix of the two sources, on scalar
+    /// boundaries.
+    private static func sourceEdit(from previous: MarkdownDocument?, to bytes: UnsafeBufferPointer<UInt8>,
+                                   lines: LineIndex) -> SourceEdit {
+        guard var old = previous?.source, !old.isEmpty, let oldCount = previous?.sourceUTF16Count else {
+            return SourceEdit(old: 0..<(previous?.sourceUTF16Count ?? 0), new: 0..<lines.utf16Count)
+        }
+        return old.withUTF8 { old in
+            var prefix = commonPrefixLength(old, bytes)
+            while prefix > 0, (prefix < bytes.count && isContinuation(bytes[prefix]))
+                    || (prefix < old.count && isContinuation(old[prefix])) {
+                prefix -= 1
+            }
+            var suffix = commonSuffixLength(old, bytes, limit: min(old.count, bytes.count) - prefix)
+            while suffix > 0, isContinuation(bytes[bytes.count - suffix]) { suffix -= 1 }
+            let start = lines.utf16Offset(ofUTF8: prefix)
+            let newEnd = lines.utf16Offset(ofUTF8: bytes.count - suffix)
+            let oldEnd = oldCount - (lines.utf16Count - newEnd)
+            return SourceEdit(old: start..<max(oldEnd, start), new: start..<newEnd)
+        }
     }
 
     private static func kind(of node: UnsafeMutablePointer<cmark_node>) -> MarkdownBlock.Kind {
@@ -83,8 +258,12 @@ private enum ExtensionNode {
 private struct LineIndex {
     private var utf8Starts = [0]
     private var utf16Starts = [0]
+    private let bytes: UnsafeBufferPointer<UInt8>
+    /// The length of the whole source in UTF-16 units.
+    private(set) var utf16Count = 0
 
     init(_ bytes: UnsafeBufferPointer<UInt8>) {
+        self.bytes = bytes
         var utf16 = 0
         var index = 0
         while index < bytes.count {
@@ -96,6 +275,21 @@ private struct LineIndex {
                 utf16Starts.append(utf16)
             }
         }
+        utf16Count = utf16
+    }
+
+    /// The UTF-16 offset of a UTF-8 offset on a scalar boundary.
+    func utf16Offset(ofUTF8 target: Int) -> Int {
+        var low = 0
+        var high = utf8Starts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if utf8Starts[mid] <= target { low = mid + 1 } else { high = mid }
+        }
+        let line = max(low - 1, 0)
+        var utf16 = utf16Starts[line]
+        for index in utf8Starts[line]..<min(target, bytes.count) { utf16 += utf16Width(bytes[index]) }
+        return utf16
     }
 
     /// The UTF-8 offset of a 1-based line's start, or nil past the last line.
@@ -112,6 +306,9 @@ private struct LineIndex {
         return (target, utf16)
     }
 }
+
+@inline(__always)
+private func isContinuation(_ byte: UInt8) -> Bool { byte & 0xC0 == 0x80 }
 
 /// The length of the UTF-8 sequence a lead byte starts.
 @inline(__always)

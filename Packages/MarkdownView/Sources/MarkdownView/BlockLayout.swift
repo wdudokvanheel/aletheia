@@ -312,19 +312,39 @@ extension BlockLayout {
     static func layOut(_ blocks: [MarkdownBlock], columnWidth: CGFloat, typography: Typography,
                        reusing existing: [BlockLayout]? = nil,
                        isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
-        let count = blocks.count
-        guard count > 0 else { return [] }
-        let results = ResultBuffer(count: count)
-        defer { results.free() }
-        DispatchQueue.concurrentPerform(iterations: count) { index in
-            guard !isCancelled() else { return }
-            if let existing, existing[index].isFinal(for: columnWidth) {
-                results.store(existing[index], at: index)
-            } else {
-                results.store(BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography), at: index)
+        let kept = existing?.map { $0.isFinal(for: columnWidth) ? $0 : nil }
+            ?? [BlockLayout?](repeating: nil, count: blocks.count)
+        return layOut(blocks, filling: kept, columnWidth: columnWidth, typography: typography, isCancelled: isCancelled)
+    }
+
+    /// Lays out the blocks whose entry in `layouts` is nil, in parallel when
+    /// there are several, and keeps the others. Work is proportional to the
+    /// blocks laid out, plus one pass over `layouts`.
+    static func layOut(_ blocks: [MarkdownBlock], filling layouts: [BlockLayout?], columnWidth: CGFloat,
+                       typography: Typography, isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
+        precondition(layouts.count == blocks.count, "one layout per block")
+        let missing = layouts.indices.filter { layouts[$0] == nil }
+        var layouts = layouts
+        if missing.count == 1, !isCancelled() {
+            layouts[missing[0]] = BlockLayout(block: blocks[missing[0]], columnWidth: columnWidth, typography: typography)
+        } else if missing.count > 1 {
+            let results = ResultBuffer(count: missing.count)
+            defer { results.free() }
+            DispatchQueue.concurrentPerform(iterations: missing.count) { slot in
+                guard !isCancelled() else { return }
+                let index = missing[slot]
+                results.store(BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography), at: slot)
             }
+            guard let laidOut = results.collect() else { return nil }
+            for (slot, index) in missing.enumerated() { layouts[index] = laidOut[slot] }
         }
-        return results.collect()
+        var result: [BlockLayout] = []
+        result.reserveCapacity(layouts.count)
+        for layout in layouts {
+            guard let layout else { return nil }
+            result.append(layout)
+        }
+        return result
     }
 }
 
