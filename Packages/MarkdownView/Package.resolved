@@ -1,0 +1,15 @@
+{
+  "originHash" : "72c17443988cbf0d0aee3f4693283f1269811911925ff6e33a18001218c5b254",
+  "pins" : [
+    {
+      "identity" : "swift-cmark",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-cmark",
+      "state" : {
+        "revision" : "08ddb528923cc1a6527e02b7a1aee9e516ca749a",
+        "version" : "0.9.0"
+      }
+    }
+  ],
+  "version" : 3
+}
