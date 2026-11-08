@@ -28,7 +28,12 @@ public struct Palette: Sendable, Equatable {
         text: .textColor,
         headingText: .textColor,
         codeText: .textColor,
-        codeBackground: .textColor.withAlphaComponent(0.07),
+        // `withAlphaComponent` would resolve `textColor` once, for whatever
+        // appearance is current at creation, so build a dynamic color instead.
+        codeBackground: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(white: isDark ? 1 : 0, alpha: 0.07)
+        },
         mutedText: .secondaryLabelColor
     )
 
