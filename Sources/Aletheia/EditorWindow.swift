@@ -51,6 +51,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     private(set) var preview: (any MarkdownPreviewing)?
     private var previewRelease: Task<Void, Never>?
     private var previewSuspended = false
+    private var windowVisible = true
+    private var rendererSwitch: Task<Void, Never>?
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
     private let watcher = FileWatcher()
     private var diskCheckTask: Task<Void, Never>?
@@ -151,6 +153,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             name: AppSettings.didChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(revealSelectedFile),
             name: AppSettings.revealActiveFileDidChange, object: AppSettings.shared)
+        NotificationCenter.default.addObserver(self, selector: #selector(markdownRendererDidChange),
+            name: AppSettings.markdownRendererDidChange, object: AppSettings.shared)
         applyTheme()
         watcher.onChange = { [weak self] paths in
             guard let self, !self.closed else { return }
@@ -338,10 +342,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         let mode = document.isMarkdown ? document.markdownMode : .editor
         modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
         guard !previewSuspended else { return }
-        if mode != .editor, preview == nil {
-            preview = MarkdownPreview()
-            preview?.onOpen = { [weak self] in self?.openFile($0) }
-        }
+        if mode != .editor, preview == nil { preview = makePreview() }
         preview?.show(mode == .editor ? nil : document)
         let content: NSView
         switch mode {
@@ -365,6 +366,49 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         editorHost.layoutSubtreeIfNeeded()
         document.setSourceVisible(mode != .preview)
         findBar.synchronize()
+    }
+
+    private func makePreview() -> any MarkdownPreviewing {
+        let preview: any MarkdownPreviewing = AppSettings.shared.markdownRenderer == .custom
+            ? CustomMarkdownPreview() : MarkdownPreview()
+        preview.onOpen = { [weak self] in self?.openFile($0) }
+        preview.setVisible(windowVisible)
+        return preview
+    }
+
+    private func previewMatchesRenderer(_ preview: any MarkdownPreviewing) -> Bool {
+        (preview is CustomMarkdownPreview) == (AppSettings.shared.markdownRenderer == .custom)
+    }
+
+    /// Swaps only the preview. Buffers, undo, selection, source scroll, mode and
+    /// split sizes stay; the shown document's position carries over as a fraction.
+    @objc private func markdownRendererDidChange() {
+        rendererSwitch?.cancel()
+        rendererSwitch = nil
+        guard !closed, let old = preview, !previewMatchesRenderer(old) else { return }
+        let shown = selected.flatMap { $0.isMarkdown && $0.markdownMode != .editor ? $0 : nil }
+        guard shown != nil else {
+            // Not in the layout: drop it; the next Split or Preview creates the new kind.
+            old.show(nil)
+            old.prepareForRelease()
+            preview = nil
+            return
+        }
+        rendererSwitch = Task { [weak self] in
+            let fraction = await old.scrollFraction()
+            guard let self, !Task.isCancelled, !self.closed, self.preview === old,
+                  !self.previewMatchesRenderer(old) else { return }
+            self.rendererSwitch = nil
+            self.previewRelease?.cancel()
+            self.previewRelease = nil
+            self.releasePreview()
+            let next = self.makePreview()
+            if let fraction, self.selected === shown { next.setScrollFraction(fraction) }
+            self.preview = next
+            self.layoutEditor()
+            // A hidden window releases a new WebKit preview again after the usual delay.
+            if !self.windowVisible { self.updatePreviewVisibility(isVisible: false) }
+        }
     }
 
     private func installContent(_ content: NSView) {
@@ -718,6 +762,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     // Losing key-window status alone must not release a still-visible preview.
     func updatePreviewVisibility(isVisible: Bool) {
         guard !closed else { return }
+        windowVisible = isVisible
         preview?.setVisible(isVisible)
         if isVisible {
             previewRelease?.cancel()
@@ -725,11 +770,13 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             let needsLayout = previewSuspended
             previewSuspended = false
             if needsLayout { layoutEditor() }
-        } else if previewRelease == nil, !previewSuspended {
+        } else if previewRelease == nil, !previewSuspended, !(preview is CustomMarkdownPreview) {
+            // Custom keeps its content and only pauses; WebKit is released.
             previewRelease = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
                 guard let self, !Task.isCancelled, !self.closed else { return }
                 self.previewRelease = nil
+                guard !(self.preview is CustomMarkdownPreview) else { return }
                 self.previewSuspended = true
                 self.releasePreview()
             }
@@ -759,6 +806,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         watcher.stop()
         diskCheckTask?.cancel()
         diskCheckTask = nil
+        rendererSwitch?.cancel()
+        rendererSwitch = nil
         previewRelease?.cancel()
         previewRelease = nil
         releasePreview()
