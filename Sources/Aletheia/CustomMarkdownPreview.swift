@@ -7,14 +7,20 @@ import MarkdownView
 /// It also keeps each document's last snapshot while another document is
 /// shown and hands it back when that document is shown again, so its
 /// unchanged blocks keep their layouts instead of starting cold.
+///
+/// It is the view's image provider: `PreviewImageLoader` loads images
+/// relative to the shown document's folder under `PreviewFilePolicy`, and
+/// HTTPS images under its remote rules.
 @MainActor
-final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
+final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImageProvider {
     let preview = MarkdownPreviewView(frame: .zero)
     var view: NSView { preview }
     var focusView: NSView { preview.documentView ?? preview }
     var onOpen: ((URL) -> Void)?
     /// Opens web and mail links; replaced in tests.
     var openInSystem: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    /// Loads the preview's images; shared by every window.
+    private let imageLoader: PreviewImageLoader
     private weak var document: EditorDocument?
     /// The buffer changed since it was last pushed.
     private var stale = false
@@ -40,7 +46,8 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     /// Documents with a kept snapshot; for tests.
     var keptSnapshotCount: Int { kept.count }
 
-    override init() {
+    init(imageLoader: PreviewImageLoader = .shared) {
+        self.imageLoader = imageLoader
         super.init()
         preview.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged),
@@ -68,6 +75,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
         let changed = self.document !== document || document == nil
         if changed { keepSnapshot() }
         self.document = document
+        preview.imageProvider = self
         guard let document else {
             nextFraction = nil
             restoring = false
@@ -180,6 +188,30 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
 
     private func recordPosition() {
         document?.previewPosition = EditorDocument.validPosition(preview.contentView.bounds.origin)
+    }
+
+    /// Loads an image of the shown document. The loader resolves relative
+    /// sources against its folder, refusing what `PreviewFilePolicy` refuses,
+    /// and loads only HTTPS remotely; its errors pass through.
+    func requestImage(source: String, displaySize: CGSize?, scale: CGFloat,
+                      completion: @escaping @MainActor (Result<MarkdownImage, any Error>) -> Void)
+        -> MarkdownImageRequest? {
+        let directory = document?.file.url.deletingLastPathComponent()
+        let task = imageLoader.image(for: source, relativeTo: directory, displaySize: displaySize,
+                                     scale: scale) { (result: Result<PreviewImage, PreviewImageError>) in
+            switch result {
+            case .success(let image): completion(.success(Self.markdownImage(image)))
+            case .failure(let error): completion(.failure(error))
+            }
+        }
+        guard let task else { return nil }
+        return MarkdownImageRequest { task.cancel() }
+    }
+
+    private nonisolated static func markdownImage(_ image: PreviewImage) -> MarkdownImage {
+        guard image.frameCount > 1 else { return MarkdownImage(image: image.image, size: image.size, byteCount: image.cost) }
+        return MarkdownImage(image: image.image, size: image.size, frameDelays: image.frameDelays, byteCount: image.cost,
+                             frame: { @Sendable index in image.frame(at: index) })
     }
 
     /// The WebKit preview's click rules, through the same shared function.

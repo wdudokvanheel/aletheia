@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import MarkdownView
 import WebKit
 import XCTest
@@ -173,7 +174,7 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         XCTAssertEqual(reused, layouts.count - 1)
 
         // A closed document's snapshot goes with it.
-        weak var closed = b
+        weak let closed = b
         b = nil
         XCTAssertNil(closed)
         preview.show(c)
@@ -415,5 +416,130 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         editor.undoManager?.undo()
         XCTAssertEqual(editor.string, longMarkdown("Switch"))
         controller.window?.performClose(nil)
+    }
+}
+
+/// The Custom preview's image provider: `PreviewImageLoader` relative to the
+/// shown document's folder, with its errors passed through.
+final class CustomMarkdownImageTests: XCTestCase {
+    private var folder: URL!
+
+    override func setUp() async throws {
+        folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("doc/images"),
+                                                withIntermediateDirectories: true)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    private func png(width: Int, height: Int) -> Data {
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    @MainActor private func document(_ text: String) throws -> EditorDocument {
+        let url = folder.appendingPathComponent("doc/README.md")
+        try Data(text.utf8).write(to: url)
+        return EditorDocument(file: try TextFile.read(url))
+    }
+
+    @MainActor private func request(_ preview: CustomMarkdownPreview, _ source: String,
+                                    displaySize: CGSize = CGSize(width: 600, height: CGFloat.infinity))
+        async -> Result<MarkdownImage, any Error> {
+        await withCheckedContinuation { continuation in
+            _ = preview.requestImage(source: source, displaySize: displaySize, scale: 2) { continuation.resume(returning: $0) }
+        }
+    }
+
+    @MainActor func testRelativeSourcesResolveAgainstTheDocumentsFolder() async throws {
+        _ = NSApplication.shared
+        try png(width: 64, height: 48).write(to: folder.appendingPathComponent("doc/images/pic.png"))
+        try png(width: 40, height: 40).write(to: folder.appendingPathComponent("outside.png"))
+        let preview = CustomMarkdownPreview(imageLoader: PreviewImageLoader(configuration: .ephemeral, cache: nil))
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        let document = try document("# Images\n\n![Picture](images/pic.png)\n\nAfter.")
+        preview.show(document)
+        XCTAssertTrue(preview.preview.imageProvider === preview)
+        let image = try await request(preview, "images/pic.png").get()
+        XCTAssertEqual(image.size, CGSize(width: 64, height: 48))
+        XCTAssertEqual(image.image.width, 64)
+        XCTAssertFalse(image.isAnimated)
+        // Shown in the view, it replaces its alt text.
+        try await eventually {
+            preview.preview.snapshot.document.blocks.count == 3 && preview.preview.snapshot.layouts[1].height == 48
+        }
+        XCTAssertEqual(preview.preview.retainedImageCount, 1)
+        // Downsampled to the size asked for.
+        let small = try await request(preview, "images/pic.png", displaySize: CGSize(width: 32, height: 24)).get()
+        XCTAssertEqual(small.image.width, 64, "32 points at scale 2")
+        let smaller = try await request(preview, "./images/pic.png", displaySize: CGSize(width: 16, height: 12)).get()
+        XCTAssertEqual(smaller.image.width, 32)
+        preview.prepareForRelease()
+    }
+
+    @MainActor func testLoaderErrorsPassThrough() async throws {
+        _ = NSApplication.shared
+        try png(width: 40, height: 40).write(to: folder.appendingPathComponent("outside.png"))
+        try Data("not an image".utf8).write(to: folder.appendingPathComponent("doc/images/broken.png"))
+        try Data("<svg xmlns='http://www.w3.org/2000/svg'/>".utf8).write(to: folder.appendingPathComponent("doc/images/logo.svg"))
+        let preview = CustomMarkdownPreview(imageLoader: PreviewImageLoader(configuration: .ephemeral, cache: nil))
+        // The preview holds its document weakly.
+        let document = try document("# Errors")
+        preview.show(document)
+        for (source, expected) in [("images/missing.png", PreviewImageError.notFound), ("../outside.png", .blocked),
+                                   ("http://example.com/a.png", .blocked), ("images/broken.png", .decode),
+                                   ("images/logo.svg", .badType)] {
+            let result = await request(preview, source)
+            guard case .failure(let error) = result else { XCTFail("\(source) loaded"); continue }
+            XCTAssertEqual(error as? PreviewImageError, expected, source)
+        }
+        withExtendedLifetime(document) { preview.prepareForRelease() }
+    }
+
+    /// The generated traversal fixture, end to end: only the image linked
+    /// inside the folder loads; every other block keeps its alt text.
+    @MainActor func testGeneratedTraversalFixtureShowsAltText() async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("build/markdown-corpus/generated/images/traversal.md")
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            throw XCTSkip("Run `swift run -c release MarkdownViewBench generate` in Packages/MarkdownView")
+        }
+        _ = NSApplication.shared
+        let preview = CustomMarkdownPreview(imageLoader: PreviewImageLoader(configuration: .ephemeral, cache: nil))
+        preview.view.frame = NSRect(x: 0, y: 0, width: 700, height: 4000)
+        let document = EditorDocument(file: try TextFile.read(root))
+        preview.show(document)
+        func height(of text: String) -> CGFloat? {
+            let snapshot = preview.preview.snapshot
+            return snapshot.document.blocks.firstIndex { $0.text == text }.map { snapshot.layouts[$0].height }
+        }
+        try await eventually { height(of: "Link inside the folder, block") == 48 }
+        try await Task.sleep(for: .milliseconds(200))
+        let line = Typography.standard.bodyFontSize * Typography.standard.lineHeightMultiple
+        for name in ["Parent traversal", "Traversal to a real image", "Absolute file URL", "Absolute path", "Escaping link"] {
+            XCTAssertEqual(height(of: "\(name), block"), line, name)
+        }
+        XCTAssertEqual(preview.preview.retainedImageCount, 1)
+        withExtendedLifetime(document) { preview.prepareForRelease() }
+    }
+
+    @MainActor private func eventually(file: StaticString = #filePath, line: UInt = #line,
+                                       _ predicate: () async throws -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if try await predicate() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Preview did not settle", file: file, line: line)
     }
 }
