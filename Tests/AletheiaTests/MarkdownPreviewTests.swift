@@ -248,7 +248,7 @@ final class MarkdownPreviewTests: XCTestCase {
         editor.insertText(" edited", replacementRange: NSRange(location: 10, length: 0))
         let selection = editor.selectedRange()
         weak let oldPreview = controller.preview
-        weak let oldWebView = controller.preview?.webView
+        weak let oldWebView = (controller.preview as? MarkdownPreview)?.webView
         XCTAssertNotNil(oldPreview)
         controller.updatePreviewVisibility(isVisible: false)
         try await Task.sleep(for: .milliseconds(100))
@@ -260,7 +260,7 @@ final class MarkdownPreviewTests: XCTestCase {
         try await eventually { controller.preview == nil }
         try await eventually { oldPreview == nil && oldWebView == nil }
         controller.updatePreviewVisibility(isVisible: true)
-        let recreated = try XCTUnwrap(controller.preview)
+        let recreated = try XCTUnwrap(controller.preview as? MarkdownPreview)
         try await eventually {
             guard recreated.ready else { return false }
             return try await self.script(recreated, "return document.querySelector('h1')?.textContent") as? String == "Retained edited"
@@ -290,6 +290,24 @@ final class MarkdownPreviewTests: XCTestCase {
         XCTAssertNil(resources.localURL(URL(string: resources.base + "escape/secret.png")!))
         resources.token = UUID().uuidString
         XCTAssertNil(resources.localURL(url))
+    }
+
+    func testFilePolicyAllowsOnlyRegularFilesInsideCanonicalDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let folder = root.appendingPathComponent("folder")
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: folder.appendingPathComponent("image.PNG"))
+        try Data().write(to: root.appendingPathComponent("secret.png"))
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("escape"), withDestinationURL: root)
+        let image = try XCTUnwrap(PreviewFilePolicy.localURL(for: "sub/../image.PNG", in: folder))
+        XCTAssertEqual(image, folder.appendingPathComponent("image.PNG"))
+        XCTAssertEqual(PreviewFilePolicy.imageType(of: image), "image/png")
+        XCTAssertNil(PreviewFilePolicy.imageType(of: folder.appendingPathComponent("notes.md")))
+        XCTAssertNotNil(PreviewFilePolicy.localURL(for: "secret.png", in: root))
+        XCTAssertNil(PreviewFilePolicy.localURL(for: "../secret.png", in: folder))
+        XCTAssertNil(PreviewFilePolicy.localURL(for: "escape/secret.png", in: folder))
+        XCTAssertNil(PreviewFilePolicy.localURL(for: "sub", in: folder))
     }
 
     @MainActor func testWindowModesRestoreAndRetainNativeEditingState() async throws {

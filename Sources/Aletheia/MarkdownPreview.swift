@@ -15,12 +15,7 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
         guard url.scheme == "aletheia-preview", url.host == "document",
               let directory, url.pathComponents.count >= 3,
               url.pathComponents[1] == token else { return nil }
-        let root = directory.resolvingSymlinksInPath().standardizedFileURL
-        let relative = url.pathComponents.dropFirst(2).joined(separator: "/")
-        let file = root.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
-        guard file.path.hasPrefix(root.path == "/" ? "/" : root.path + "/"),
-              (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
-        return file
+        return PreviewFilePolicy.localURL(for: url.pathComponents.dropFirst(2).joined(separator: "/"), in: directory)
     }
 
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
@@ -36,8 +31,7 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
                                                          withExtension: nil, subdirectory: "Preview")
         } else {
             file = localURL(url)
-            mime = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-                    "gif": "image/gif", "webp": "image/webp", "avif": "image/avif"][file?.pathExtension.lowercased() ?? ""]
+            mime = file.flatMap(PreviewFilePolicy.imageType)
         }
         guard let file, let mime else {
             task.didFailWithError(URLError(.noPermissionsToReadFile)); return
@@ -79,8 +73,10 @@ private final class PreviewScrollHandler: NSObject, WKScriptMessageHandler {
 }
 
 @MainActor
-final class MarkdownPreview: NSObject, WKNavigationDelegate {
+final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing {
     let webView: WKWebView
+    var view: NSView { webView }
+    var focusView: NSView { webView }
     let resources = PreviewResources()
     private weak var document: EditorDocument?
     private var pending: Task<Void, Never>?
@@ -175,6 +171,11 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     }
 
     func contentChanged() { schedule(clear: false) }
+
+    /// WebKit content is released by the window's occlusion handling instead.
+    func setVisible(_ visible: Bool) {}
+
+    func prepareForRelease() { webView.stopLoading() }
 
     private func schedule(clear: Bool, immediately: Bool = false) {
         generation += 1

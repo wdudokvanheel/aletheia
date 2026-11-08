@@ -48,7 +48,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     private var contentConstraints: [NSLayoutConstraint] = []
     private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
         trackingMode: .selectOne, target: nil, action: nil)
-    private(set) var preview: MarkdownPreview?
+    private(set) var preview: (any MarkdownPreviewing)?
     private var previewRelease: Task<Void, Never>?
     private var previewSuspended = false
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
@@ -208,7 +208,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         findBar.onClose = { [weak self] in
             guard let self, let document = self.selected, document.isEditable else { return }
             self.window?.makeFirstResponder(document.isMarkdown && document.markdownMode == .preview
-                ? self.preview?.webView : document.editor)
+                ? self.preview?.focusView : document.editor)
         }
         modeControl.target = self
         modeControl.action = #selector(changeMarkdownMode(_:))
@@ -325,7 +325,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         NSLayoutConstraint.deactivate(contentConstraints)
         contentConstraints.removeAll()
         selected?.detachContent()
-        preview?.webView.removeFromSuperview()
+        preview?.view.removeFromSuperview()
         placeholder.isHidden = selected != nil
         modeControl.isHidden = selected?.isMarkdown != true
         guard let document = selected else { preview?.show(nil); return }
@@ -346,22 +346,22 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         let content: NSView
         switch mode {
         case .editor: content = document.scroll
-        case .preview: content = preview!.webView
+        case .preview: content = preview!.view
         case .split:
             document.scroll.translatesAutoresizingMaskIntoConstraints = true
-            preview!.webView.translatesAutoresizingMaskIntoConstraints = true
+            preview!.view.translatesAutoresizingMaskIntoConstraints = true
             document.scroll.isHidden = false
-            preview!.webView.isHidden = false
+            preview!.view.isHidden = false
             content = markdownSplit
         }
         installContent(content)
         if mode == .split {
             markdownSplit.addArrangedSubview(document.scroll)
-            markdownSplit.addArrangedSubview(preview!.webView)
+            markdownSplit.addArrangedSubview(preview!.view)
             markdownSplit.applyPreferredSize()
         }
         document.setHighlightingActive(mode != .preview)
-        window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
+        window?.makeFirstResponder(mode == .preview ? preview!.focusView : document.editor)
         editorHost.layoutSubtreeIfNeeded()
         document.setSourceVisible(mode != .preview)
         findBar.synchronize()
@@ -718,6 +718,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     // Losing key-window status alone must not release a still-visible preview.
     func updatePreviewVisibility(isVisible: Bool) {
         guard !closed else { return }
+        preview?.setVisible(isVisible)
         if isVisible {
             previewRelease?.cancel()
             previewRelease = nil
@@ -738,15 +739,15 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     private func releasePreview() {
         guard let preview else { return }
         preview.show(nil)
-        preview.webView.stopLoading()
-        if markdownSplit.arrangedSubviews.contains(preview.webView) {
+        preview.prepareForRelease()
+        if markdownSplit.arrangedSubviews.contains(preview.view) {
             markdownSplit.removeFromSuperview()
             for view in markdownSplit.arrangedSubviews {
                 markdownSplit.removeArrangedSubview(view)
                 view.removeFromSuperview()
             }
         }
-        preview.webView.removeFromSuperview()
+        preview.view.removeFromSuperview()
         self.preview = nil
         // Constraints retain their views too, including a preview-only WKWebView.
         NSLayoutConstraint.deactivate(contentConstraints)
