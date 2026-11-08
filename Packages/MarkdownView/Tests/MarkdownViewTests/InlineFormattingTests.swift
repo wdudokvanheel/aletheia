@@ -98,8 +98,9 @@ final class InlineFormattingTests: XCTestCase {
 
     func testInlineHTMLIsDroppedAndItsTextKept() throws {
         let block = try block("Some <b>bold</b> and <span class=\"x\">span</span> text<br> <!-- note --> end")
-        XCTAssertEqual(block.text, "Some bold and span text  end")
-        XCTAssertEqual(block.styleRuns, [run(0..<28)])
+        // The spaces around the dropped tags collapse, as `white-space: normal` shows them.
+        XCTAssertEqual(block.text, "Some bold and span text end")
+        XCTAssertEqual(block.styleRuns, [run(0..<27)])
     }
 
     func testHardAndSoftBreaks() throws {

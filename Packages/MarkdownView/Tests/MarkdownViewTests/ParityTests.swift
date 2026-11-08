@@ -60,7 +60,7 @@ final class ParityTests: XCTestCase {
         Text <img src="inline.png" alt="inline"> after.
         """).blocks
         XCTAssertEqual(blocks.map(\.kind), [.htmlBlock, .paragraph])
-        XCTAssertEqual(blocks[1].text, "Text  after.")
+        XCTAssertEqual(blocks[1].text, "Text after.")
         XCTAssertTrue(blocks.allSatisfy(\.images.isEmpty))
     }
 

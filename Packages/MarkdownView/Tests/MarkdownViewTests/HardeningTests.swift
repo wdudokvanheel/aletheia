@@ -184,6 +184,41 @@ final class HardeningTests: XCTestCase {
         }
     }
 
+    // MARK: Spaces (F12)
+
+    func testRunsOfSpacesCollapseOutsideCode() throws {
+        let cases: [(String, String)] = [
+            ("One.  Two   three", "One. Two three"),
+            ("a\tb", "a b"),
+            ("- item  with   spaces", "item with spaces"),
+            ("| a     b |\n|---|\n", "a b"),
+            ("**bold**  *em*   `code  kept`  end", "bold em code  kept end"),
+            ("x &#32; y", "x y"),
+            ("line one  \nline two", "line one\nline two"),
+        ]
+        for (markdown, expected) in cases {
+            let block = try XCTUnwrap(MarkdownDocument.parse(markdown).blocks.first)
+            XCTAssertEqual(block.text, expected, markdown.debugDescription)
+            XCTAssertEqual(block.sourceMap.displayLength, expected.utf16.count)
+        }
+        let code = try XCTUnwrap(MarkdownDocument.parse("```\na   b\n```").blocks.first)
+        XCTAssertEqual(code.text, "a   b")
+    }
+
+    func testCollapsedSpacesMapToTheirSource() throws {
+        let markdown = "One.  Two   three"
+        let block = try XCTUnwrap(MarkdownDocument.parse(markdown).blocks.first)
+        XCTAssertEqual(block.text, "One. Two three")
+        XCTAssertEqual(block.sourceOffset(forDisplayOffset: 5), 6, "Two")
+        XCTAssertEqual(block.sourceOffset(forDisplayOffset: 9), 12, "three")
+        XCTAssertEqual(block.displayOffset(forSourceOffset: 12), 9)
+        let source = markdown as NSString
+        for (display, word) in [(0, "One."), (5, "Two"), (9, "three")] {
+            let start = block.sourceOffset(forDisplayOffset: display)
+            XCTAssertEqual(source.substring(with: NSRange(location: start, length: word.utf16.count)), word)
+        }
+    }
+
     // MARK: NUL (F13)
 
     func testNULKeepsSourceRangesInPlace() throws {

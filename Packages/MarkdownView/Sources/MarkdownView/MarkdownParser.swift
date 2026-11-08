@@ -609,6 +609,10 @@ private struct DisplayText {
     private var segmentStart: Int?
     /// The newline owed before the next text, in the role of the text before it.
     private var pendingSeparator: (role: TextRole, styles: InlineStyle)?
+    /// Whether a space appended now collapses, as `white-space: normal`
+    /// collapses it: after another space, and at the start of a line or a
+    /// table cell.
+    private var collapsesSpace = true
     /// The table being walked, and the 1-based source line of each of its rows.
     private var table: TableStructure?
     private var tableRowLines: [Int32] = []
@@ -723,9 +727,11 @@ private struct DisplayText {
             case CMARK_NODE_CODE:
                 appendLiteral(node, isCode: true)
             case CMARK_NODE_SOFTBREAK:
-                appendByte(0x20)
+                if !collapsesSpace { appendByte(0x20) }
+                collapsesSpace = true
             case CMARK_NODE_LINEBREAK:
                 appendByte(0x0A)
+                collapsesSpace = true
             case CMARK_NODE_DOCUMENT, CMARK_NODE_HTML_BLOCK, CMARK_NODE_HTML_INLINE:
                 // Raw HTML is dropped, blocks entirely and inline tags with
                 // the text between them kept.
@@ -749,6 +755,7 @@ private struct DisplayText {
                     }
                 case .row where entering:
                     if cmark_node_previous(node) != nil { appendByte(0x0A) }
+                    collapsesSpace = true
                     let line = cmark_node_get_start_line(node)
                     tableRowLines.append(line)
                     // cmark gives the header row another line; see `endTable`.
@@ -756,6 +763,7 @@ private struct DisplayText {
                 case .cell:
                     if entering {
                         if cmark_node_previous(node) != nil { appendByte(0x09) }
+                        collapsesSpace = true
                         cellStart = utf16Count
                     } else {
                         table?.cells.append(Int32(clamping: cellStart)..<Int32(clamping: utf16Count))
@@ -868,6 +876,7 @@ private struct DisplayText {
             pendingSeparator = nil
             bytes.append(0x0A)
             extendRun(by: 1, role: separator.role, styles: separator.styles)
+            collapsesSpace = true
         }
         if segmentStart == nil { segmentStart = utf16Count }
     }
@@ -901,6 +910,7 @@ private struct DisplayText {
             addAnchor(display: utf16Count, source: utf16Offset(ofUTF8: start) - blockStart.utf16)
             bytes.append(contentsOf: [0xEF, 0xBF, 0xBC])
             extendRun(by: 1, styles: styles)
+            collapsesSpace = false
             if let imageSpan { cursor = max(cursor, imageSpan.upperBound) }
         }
         images.append(InlineImage(range: imageStart..<utf16Count, source: imageSource, title: imageTitle))
@@ -932,13 +942,56 @@ private struct DisplayText {
             let span = span(of: node)
             if isCode {
                 mapCode(text, span: span)
-            } else if let span, align(text, from: span.lowerBound, to: span.upperBound) {
+                append(text, styles: styles.union(.code))
+                collapsesSpace = false
+                return
+            }
+            let collapsed = collapsingSpaces(text)
+            if let span, align(text, from: span.lowerBound, to: span.upperBound, dropped: collapsed?.dropped) {
                 // Mapped piece by piece.
             } else {
                 mapBySearch(text)
             }
-            append(text, styles: isCode ? styles.union(.code) : styles)
+            if let collapsed {
+                collapsed.bytes.withUnsafeBufferPointer { append($0, styles: styles) }
+            } else {
+                append(text, styles: styles)
+            }
         }
+    }
+
+    /// Text with runs of spaces and tabs collapsed to one space, as
+    /// `white-space: normal` shows them, and the indices of the bytes left
+    /// out; nil when it shows as is. Updates `collapsesSpace` for the text
+    /// after it.
+    private mutating func collapsingSpaces(_ text: UnsafeBufferPointer<UInt8>) -> (bytes: [UInt8], dropped: [Bool])? {
+        let collapsesAtStart = collapsesSpace
+        var collapses = collapsesAtStart
+        var changes = false
+        for byte in text {
+            if byte == 0x20 || byte == 0x09 {
+                if collapses || byte == 0x09 { changes = true }
+                collapses = true
+            } else {
+                collapses = false
+            }
+        }
+        collapsesSpace = collapses
+        guard changes else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(text.count)
+        var dropped = [Bool](repeating: false, count: text.count)
+        collapses = collapsesAtStart
+        for (index, byte) in text.enumerated() {
+            if byte == 0x20 || byte == 0x09 {
+                if collapses { dropped[index] = true } else { bytes.append(0x20) }
+                collapses = true
+            } else {
+                bytes.append(byte)
+                collapses = false
+            }
+        }
+        return (bytes, dropped)
     }
 
     /// Code block lines are mapped one by one, since containers and fence
@@ -1009,7 +1062,8 @@ private struct DisplayText {
     /// In a table row the text may run on past cmark's end, to the line's
     /// end: cmark positions cell text after unescaping `\|`, one byte short
     /// for each.
-    private mutating func align(_ text: UnsafeBufferPointer<UInt8>, from start: Int, to end: Int) -> Bool {
+    private mutating func align(_ text: UnsafeBufferPointer<UInt8>, from start: Int, to end: Int,
+                                dropped: [Bool]? = nil) -> Bool {
         let end = max(end, rowEnd ?? end)
         var pieces = [(display: 0, utf8: start)]
         var index = 0
@@ -1028,13 +1082,22 @@ private struct DisplayText {
                 // An entity decoded to one character.
                 pieces.append((units, position))
                 let characterEnd = min(index + utf8Length(text[index]), text.count)
-                for unit in text[index..<characterEnd] { units += utf16Width(unit) }
+                if dropped?[index] != true {
+                    for unit in text[index..<characterEnd] { units += utf16Width(unit) }
+                }
                 index = characterEnd
                 position = entityEnd
                 pieces.append((units, position))
                 continue
             }
             guard text[index] == source[position] else { return false }
+            if dropped?[index] == true {
+                // A collapsed space: the source moves on without the display.
+                index += 1
+                position += 1
+                pieces.append((units, position))
+                continue
+            }
             units += utf16Width(text[index])
             index += 1
             position += 1
