@@ -114,7 +114,8 @@ final class RenderPipelineTests: XCTestCase {
 
     func testHiddenPreviewCoalescesSourcesIntoOneUpdate() {
         let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
-        XCTAssertEqual(view.documentView?.frame.width, 600)
+        XCTAssertEqual(view.documentView?.frame.width, view.contentView.bounds.width, "tracks the clip view width")
+        XCTAssertGreaterThan(view.contentView.bounds.width, 500)
         view.setVisible(false)
         for text in ["# a", "# b", "# c"] { view.setSource(text) }
         XCTAssertEqual(view.pipeline.generation, 0)
