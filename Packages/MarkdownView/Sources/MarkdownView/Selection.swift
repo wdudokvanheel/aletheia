@@ -180,7 +180,9 @@ extension MarkdownSnapshot {
             range = table.cell(cell.row, cell.column)
         }
         if granularity == .word, !range.isEmpty {
-            let index = min(max(forward ? offset - 1 : offset, start), contentsEnd - 1)
+            // Within the unit, which in a table is the cell: a cell can hold
+            // U+2029, which ends the paragraph Foundation finds.
+            let index = min(max(forward ? offset - 1 : offset, range.lowerBound), range.upperBound - 1)
             range = Self.wordRange(in: text, at: index, within: range)
             // An image is a word: its whole alt text.
             if let image = document.blocks[position.block].images.first(where: { $0.range.overlaps(range) }) {
@@ -201,8 +203,9 @@ extension MarkdownSnapshot {
             let token = CFStringTokenizerGetCurrentTokenRange(tokenizer)
             if token.location != kCFNotFound, token.length > 0 { return token.location..<(token.location + token.length) }
         }
+        guard index >= 0, index < text.length else { return paragraph }
         let composed = text.rangeOfComposedCharacterSequence(at: index)
-        return composed.location..<(composed.location + composed.length)
+        return max(composed.location, paragraph.lowerBound)..<min(composed.location + composed.length, paragraph.upperBound)
     }
 
     // MARK: Drawing and invalidation

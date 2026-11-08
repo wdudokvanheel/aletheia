@@ -77,4 +77,28 @@ final class HardeningTests: XCTestCase {
             }
         }
     }
+
+    // MARK: Word selection in a cell (F2)
+
+    func testWordSelectionInACellHoldingAParagraphSeparator() throws {
+        for scalar in ["\u{2029}", "\u{2028}", "\u{85}"] {
+            let snapshot = MarkdownSnapshot.layOut(try MarkdownDocument.parse("| \(scalar) |\n|---|\n| a\(scalar)b |\n"),
+                                                   width: 700)
+            for offset in 0...snapshot.layouts[0].textLength {
+                for forward in [false, true] {
+                    let range = snapshot.unitRange(at: TextPosition(block: 0, offset: offset), granularity: .word,
+                                                   forward: forward)
+                    XCTAssertLessThanOrEqual(range.upperBound.offset, snapshot.layouts[0].textLength)
+                    XCTAssertLessThanOrEqual(range.lowerBound, range.upperBound)
+                }
+            }
+        }
+    }
+
+    func testWordSelectionJustPastACellStaysInTheCell() throws {
+        let snapshot = MarkdownSnapshot.layOut(try MarkdownDocument.parse("| alpha | beta |\n|---|---|\n"), width: 700)
+        // Offset 5 is the end of "alpha", on the tab before "beta".
+        let range = snapshot.unitRange(at: TextPosition(block: 0, offset: 5), granularity: .word)
+        XCTAssertEqual(snapshot.text(in: range), "alpha")
+    }
 }
