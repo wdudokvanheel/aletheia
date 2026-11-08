@@ -379,7 +379,7 @@ public struct MarkdownDocument: Sendable, Equatable {
     /// content instead of building it again, unless the link reference
     /// definitions differ, since every block's display text depends on them.
     static func parse(_ source: String, reusing previous: MarkdownDocument?) throws -> ParseResult {
-        let source = contiguousUTF8(source)
+        let source = withoutNUL(contiguousUTF8(source))
         if let previous, previous.definitions != nil, isSameText(previous.source, source) {
             // Unchanged, as when a document is shown again: nothing to parse.
             let count = previous.blocks.count
@@ -424,6 +424,22 @@ public struct MarkdownDocument: Sendable, Equatable {
         var repaired = source
         repaired.makeContiguousUTF8()
         return repaired
+    }
+
+    /// `source` with each U+0000 replaced by U+FFFD, as cmark replaces it.
+    /// cmark counts its columns after that replacement, which is three
+    /// UTF-8 bytes for one, so positions after a NUL would be off; both
+    /// are one UTF-16 unit, so every offset into the source stays valid.
+    static func withoutNUL(_ source: String) -> String {
+        var source = source
+        let hasNUL = source.withUTF8 { bytes in
+            guard let base = bytes.baseAddress else { return false }
+            return memchr(base, 0, bytes.count) != nil
+        }
+        guard hasNUL else { return source }
+        source = source.replacingOccurrences(of: "\u{0}", with: "\u{FFFD}")
+        source.makeContiguousUTF8()
+        return source
     }
 
     struct ParseResult {

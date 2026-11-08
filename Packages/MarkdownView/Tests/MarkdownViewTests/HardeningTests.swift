@@ -154,4 +154,16 @@ final class HardeningTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(new.anchoredY(y, from: old, through: update), 0)
         }
     }
+
+    // MARK: NUL (F13)
+
+    func testNULKeepsSourceRangesInPlace() throws {
+        let markdown = "x\u{0}ab **c**\n\nnext"
+        let blocks = try MarkdownDocument.parse(markdown).blocks
+        XCTAssertEqual(blocks.map(\.sourceRange), [0..<10, 12..<16])
+        XCTAssertEqual(blocks[0].sourceText, "x\u{FFFD}ab **c**")
+        XCTAssertEqual(blocks[0].text, "x\u{FFFD}ab c")
+        let emoji = try MarkdownDocument.parse("x\u{0}🧑\n\nnext").blocks
+        XCTAssertEqual(emoji.map(\.sourceRange), [0..<4, 6..<10])
+    }
 }
