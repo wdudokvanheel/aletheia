@@ -136,6 +136,61 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertEqual(view.scrollFraction, 0.25, accuracy: 0.001)
     }
 
+    func testScrollOffsetSetBeforeRenderAppliesToTheNewContent() {
+        let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        view.setSource("# Short\n\nOld content.")
+        waitForInstall(view) { $0.isComplete && !$0.layouts.isEmpty }
+        view.setSource(longSource)
+        view.setScrollOffset(1200)
+        XCTAssertEqual(view.scrollOffset, 1200)
+        var installed: [(complete: Bool, offset: CGFloat, height: CGFloat)] = []
+        view.onInstall = { snapshot in
+            installed.append((snapshot.isComplete, view.contentView.bounds.minY, view.documentView!.frame.height))
+        }
+        waitForInstall(view) { $0.isComplete && $0.layouts.count == 300 }
+        XCTAssertEqual(view.contentView.bounds.minY, 1200)
+        XCTAssertEqual(view.scrollOffset, 1200)
+        // Called after the install sized the view and applied the offset.
+        XCTAssertEqual(installed.last?.complete, true)
+        XCTAssertEqual(installed.last?.offset, 1200)
+        XCTAssertEqual(installed.last?.height, view.snapshot.totalHeight)
+        view.setScrollOffset(300)
+        XCTAssertEqual(view.contentView.bounds.minY, 300)
+        view.setScrollOffset(.greatestFiniteMagnitude)
+        XCTAssertEqual(view.contentView.bounds.maxY, view.snapshot.totalHeight, accuracy: 0.5)
+    }
+
+    func testScrollFractionSetOnTheVisibleStepAppliesToTheCompleteSnapshot() {
+        let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        var setOnVisibleStep = false
+        view.onInstall = { snapshot in
+            guard !snapshot.isComplete, !setOnVisibleStep else { return }
+            setOnVisibleStep = true
+            view.scrollFraction = 0.5
+        }
+        view.setSource(longSource)
+        waitForInstall(view) { $0.isComplete && !$0.layouts.isEmpty }
+        XCTAssertTrue(setOnVisibleStep, "an open at the top lays out the visible area first")
+        XCTAssertEqual(view.contentView.bounds.minY, view.snapshot.totalHeight * 0.5, accuracy: 0.5)
+        XCTAssertEqual(view.scrollFraction, 0.5, accuracy: 0.001)
+    }
+
+    func testSourceSetWhileHiddenDropsOlderWork() {
+        let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        view.setSource("# Old")
+        view.setVisible(false)
+        view.setSource("# New")
+        var installs = 0
+        view.onInstall = { _ in installs += 1 }
+        view.pipeline.queue.sync {}
+        let flushed = expectation(description: "flushed")
+        DispatchQueue.main.async { flushed.fulfill() }
+        wait(for: [flushed], timeout: 5)
+        XCTAssertEqual(installs, 0, "the old source does not install after a newer one was set")
+        view.setVisible(true)
+        waitForInstall(view) { $0.document.blocks.first?.text == "New" && $0.isComplete }
+    }
+
     func testKeyboardScrollsByPage() throws {
         let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         view.setSource(longSource)

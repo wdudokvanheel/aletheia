@@ -15,6 +15,9 @@ public final class MarkdownPreviewView: NSScrollView {
 
     /// Called on the main thread after the first draw of each installed update.
     public var onTimings: (@MainActor (Timings) -> Void)?
+    /// Called on the main thread right after each snapshot installs, before it
+    /// draws. A pending scroll position has been applied by then.
+    public var onInstall: (@MainActor (MarkdownSnapshot) -> Void)?
     public private(set) var lastTimings: Timings?
     /// Whether updates run. Hidden previews keep their content.
     public private(set) var isShown = true
@@ -31,8 +34,10 @@ public final class MarkdownPreviewView: NSScrollView {
     private var source = ""
     private var sourceGeneration: UInt64 = 0
     private var installedSourceGeneration: UInt64 = 0
-    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool)?
-    private var pendingScrollFraction: CGFloat?
+    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, visibleFirst: Bool)?
+    /// The source generation of the last complete snapshot installed.
+    private var completedSourceGeneration: UInt64 = 0
+    private var pendingScroll: ScrollTarget?
     private var timingsAwaitingDraw: Timings?
 
     public override init(frame frameRect: NSRect) {
@@ -62,6 +67,8 @@ public final class MarkdownPreviewView: NSScrollView {
         source = text
         sourceGeneration += 1
         scheduleUpdate()
+        // Hidden or without a width: nothing older may install meanwhile.
+        if submitted?.sourceGeneration != sourceGeneration { pipeline.cancel() }
     }
 
     /// Hidden previews keep their snapshot and start no work. Sources set
@@ -73,22 +80,69 @@ public final class MarkdownPreviewView: NSScrollView {
     }
 
     /// The top of the visible area as a fraction of the document height, for
-    /// carrying the position across renderers. Setting it before the current
-    /// source has rendered applies it when that render installs.
+    /// carrying the position across renderers. Setting it after `setSource(_:)`
+    /// and before that source's complete snapshot has installed applies it to
+    /// the new content when it installs; until then, reading it returns it.
     public var scrollFraction: Double {
         get {
-            if let pendingScrollFraction { return Double(pendingScrollFraction) }
             let height = canvas.frame.height
-            return height > 0 ? Double(contentView.bounds.minY / height) : 0
+            switch pendingScroll {
+            case .fraction(let fraction): return Double(fraction)
+            case .offset(let y): return height > 0 ? Double(min(y / height, 1)) : 0
+            case nil: return height > 0 ? Double(contentView.bounds.minY / height) : 0
+            }
         }
         set {
-            let fraction = CGFloat(min(max(newValue, 0), 1))
-            if sourceGeneration > 0, installedSourceGeneration == sourceGeneration {
-                pendingScrollFraction = nil
-                scroll(toY: fraction * canvas.frame.height)
-            } else {
-                pendingScrollFraction = fraction
-            }
+            requestScroll(.fraction(newValue.isFinite ? CGFloat(min(max(newValue, 0), 1)) : 0))
+        }
+    }
+
+    /// The top of the visible area in points, or a pending position as
+    /// described for `scrollFraction`.
+    public var scrollOffset: CGFloat {
+        switch pendingScroll {
+        case .fraction(let fraction): fraction * canvas.frame.height
+        case .offset(let y): y
+        case nil: contentView.bounds.minY
+        }
+    }
+
+    /// Scrolls so `y` is at the top, clamped to the content. Like
+    /// `scrollFraction`, a position set before the current source's complete
+    /// snapshot has installed applies to that snapshot.
+    public func setScrollOffset(_ y: CGFloat) {
+        requestScroll(.offset(y.isFinite ? max(y, 0) : 0))
+    }
+
+    /// Deselects all text.
+    public func clearSelection() {
+        canvas.selectionAnchor = nil
+        canvas.setSelection(nil)
+    }
+
+    private func requestScroll(_ target: ScrollTarget) {
+        if sourceGeneration > 0, completedSourceGeneration == sourceGeneration {
+            pendingScroll = nil
+            scroll(to: target)
+            return
+        }
+        pendingScroll = target
+        if installedSourceGeneration == sourceGeneration {
+            // Only the visible part is laid out: show about the right place now
+            // and settle on the complete snapshot.
+            scroll(to: target)
+        } else if let submitted, submitted.sourceGeneration == sourceGeneration,
+                  submitted.visibleFirst != wantsVisibleFirst {
+            // The position decides whether laying out the visible part first pays off.
+            self.submitted = nil
+            scheduleUpdate()
+        }
+    }
+
+    private func scroll(to target: ScrollTarget) {
+        switch target {
+        case .fraction(let fraction): scroll(toY: fraction * canvas.frame.height)
+        case .offset(let y): scroll(toY: y)
         }
     }
 
@@ -121,14 +175,21 @@ public final class MarkdownPreviewView: NSScrollView {
            submitted.complete || !complete {
             return
         }
-        submitted = (sourceGeneration, width, complete)
-        // Visible-first only pays off when the position in the new document is
-        // known without laying out what is above it: the top.
-        let visibleFirst = installedSourceGeneration != sourceGeneration
-            && (pendingScrollFraction == 0 || (pendingScrollFraction == nil && installedSourceGeneration == 0))
+        let visibleFirst = wantsVisibleFirst
+        submitted = (sourceGeneration, width, complete, visibleFirst)
         let fraction = visibleFirst ? 0 : CGFloat(scrollFraction)
         pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width, scrollFraction: fraction,
                         viewportHeight: contentView.bounds.height, visibleFirst: visibleFirst, complete: complete)
+    }
+
+    /// Visible-first only pays off when the position in the new document is
+    /// known without laying out what is above it: the top.
+    private var wantsVisibleFirst: Bool {
+        guard installedSourceGeneration != sourceGeneration else { return false }
+        switch pendingScroll {
+        case .fraction(let value), .offset(let value): return value == 0
+        case nil: return installedSourceGeneration == 0
+        }
     }
 
     private func handle(_ outcome: RenderOutcome) {
@@ -151,12 +212,14 @@ public final class MarkdownPreviewView: NSScrollView {
         canvas.install(snapshot, sourceChanged: sourceGeneration != installedSourceGeneration)
         installedSourceGeneration = sourceGeneration
         canvas.setFrameSize(NSSize(width: canvas.frame.width, height: snapshot.totalHeight))
-        if sourceGeneration == self.sourceGeneration, let fraction = pendingScrollFraction {
-            pendingScrollFraction = nil
-            scroll(toY: fraction * snapshot.totalHeight)
+        let isCurrent = sourceGeneration == self.sourceGeneration
+        if isCurrent, let target = pendingScroll {
+            scroll(to: target)
+            if snapshot.isComplete { pendingScroll = nil }
         } else if let anchor {
             scroll(toY: snapshot.y(for: anchor))
         }
+        if isCurrent, snapshot.isComplete { completedSourceGeneration = sourceGeneration }
         canvas.needsDisplay = true
         messageLabel.isHidden = true
         pipeline.release(old)
@@ -164,6 +227,7 @@ public final class MarkdownPreviewView: NSScrollView {
         timings.install = ContinuousClock.now - start
         signposter.endInterval("install", interval)
         timingsAwaitingDraw = timings
+        onInstall?(snapshot)
     }
 
     private func didDraw(_ duration: Duration) {
@@ -179,6 +243,11 @@ public final class MarkdownPreviewView: NSScrollView {
 
     private func scroll(toY y: CGFloat) {
         canvas.scroll(toY: y)
+    }
+
+    private enum ScrollTarget {
+        case fraction(CGFloat)
+        case offset(CGFloat)
     }
 
     private func applyPalette() {

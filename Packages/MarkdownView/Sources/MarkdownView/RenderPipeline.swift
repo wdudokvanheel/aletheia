@@ -171,6 +171,8 @@ final class RenderPipeline {
     let queue = DispatchQueue(label: "MarkdownView.render", qos: .userInitiated)
     private let worker: RenderWorker
     private(set) var generation: UInt64 = 0
+    /// Set by `cancel()` until the next request.
+    private var isCancelled = false
     var onOutcome: (@MainActor (RenderOutcome) -> Void)?
 
     init(typography: Typography) {
@@ -183,6 +185,7 @@ final class RenderPipeline {
     func submit(sourceGeneration: UInt64, source: String, width: CGFloat, scrollFraction: CGFloat,
                 viewportHeight: CGFloat, visibleFirst: Bool, complete: Bool) -> UInt64 {
         generation += 1
+        isCancelled = false
         worker.latestGeneration.store(generation, ordering: .relaxed)
         let request = RenderRequest(generation: generation, sourceGeneration: sourceGeneration, source: source,
                                     width: width, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
@@ -196,6 +199,13 @@ final class RenderPipeline {
         return generation
     }
 
+    /// Stops the work for every request so far and drops its outcomes,
+    /// without starting another.
+    func cancel() {
+        isCancelled = true
+        worker.latestGeneration.store(generation &+ 1, ordering: .relaxed)
+    }
+
     /// Releases a replaced snapshot on the background queue, so freeing its
     /// layouts never costs main-thread time.
     func release(_ snapshot: MarkdownSnapshot) {
@@ -203,7 +213,7 @@ final class RenderPipeline {
     }
 
     private func receive(_ outcome: RenderOutcome) {
-        guard outcome.generation == generation else { return }
+        guard !isCancelled, outcome.generation == generation else { return }
         onOutcome?(outcome)
     }
 }
