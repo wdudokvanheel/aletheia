@@ -37,8 +37,44 @@ Default paths are relative to the repository root:
 Deterministic: each file has its own SplitMix64 stream seeded from `--seed` and the file name.
 It writes `sizes/` (prose, mixed README-style and code-heavy at 1 KiB to 10 MiB), `tables/`,
 `nesting/`, `unicode/`, `links/`, `pathological/`, typing traces in `traces/`, and
-`generated-manifest.json` (`sets.generated[]`: `name`, `group`, `path`, `bytes`, `sha256`;
-`traces[]`). Image fixtures are Phase 7 and are listed under `pending`.
+`generated-manifest.json` (version 2; `sets.generated[]`: `name`, `group`, `path`, `bytes`,
+`sha256`; `traces[]`; `images`).
+
+### Image fixtures (Phase 7)
+
+`images/` holds one document per fixture type, each with a block and an inline image (`png`,
+`jpeg`, `gif`, `webp`, `avif`, `gif-animated`, `webp-animated`, `svg`, `svg-external`,
+`missing`, `corrupt`, `huge`, `traversal`), plus `images-500.md` (all 500 small images inline),
+`badges.md` (230 remote badges, in rows and in a sentence, plus three `http:` badges and a `data:` URL) and
+`remote-block.md` (eight large remote block images). These documents are also in
+`sets.generated`. The image files are in `images/files/` and `images/small/`:
+
+- PNG, JPEG, GIF and AVIF (64 x 48) and the animated GIF (4 frames, 100 to 500 ms, looping)
+  are written by ImageIO. If a format cannot be encoded on this macOS, its encoder is
+  `unavailable`, the file is not written and its references expect `missing`.
+- WebP (48 x 32) and the animated WebP (3 frames) are embedded bytes: ImageIO has no WebP encoder.
+- `valid.svg` is a hand-written shape. `external.svg` also names remote images (`href`,
+  `xlink:href`), an `@import`, a font, a paint server and a `<use>`; decoding it must fetch nothing.
+- `corrupt.png` is a PNG signature and a valid 64 x 48 IHDR, then 4 KiB of seeded noise.
+- `huge-10000.png` is a real 10,000 x 10,000 flat gray PNG (about 450 KiB).
+- `small/000.png` to `499.png` are 16 x 16 seeded colors.
+- `files/escape.png` links to `../../images-outside/real.png`, outside the folder;
+  `files/inside-link.png` links to `valid.png`.
+
+Remote images use `https://img.example.invalid/...`, a host that cannot resolve, so only the
+test stub can serve them. Their `width` and `height` are the size the stub should serve.
+
+`images` in the manifest has `encoders` (format to `ImageIO <type>`, `embedded`,
+`hand-written` or `unavailable`), `files[]` (`path`, `kind`, `width`, `height`, `frames`,
+`bytes`, `sha256`, or `symlink` for a link) and `references[]`, one per image in document
+order: `document`, `source` (as written), `placement` (`block` or `inline`), `kind`, `path`
+(relative sources only, `..` resolved; a leading `..` means it escapes the root), `width`,
+`height`, and `expected`: `ok`, `missing`, `corrupt`, `too-large` or `blocked`. Local SVG
+expects `blocked` because local images are raster only; HTTP, `data:`, `file:`, absolute
+paths, traversal and the escaping link are `blocked`.
+
+Reruns are byte-identical on the same macOS (checked with `diff -r` on two runs); none of
+the encoders embeds a timestamp. ImageIO output can change between macOS versions.
 
 A trace is `{name, description, base, edits: [{location, length, replacement}]}`. Ranges are
 UTF-16 and apply in order, each to the text left by the previous edit.
