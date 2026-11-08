@@ -342,12 +342,27 @@ public struct MarkdownDocument: Sendable, Equatable {
     /// definitions differ, since every block's display text depends on them.
     static func parse(_ source: String, reusing previous: MarkdownDocument?) throws -> ParseResult {
         let source = contiguousUTF8(source)
+        if let previous, previous.definitions != nil, isSameText(previous.source, source) {
+            // Unchanged, as when a document is shown again: nothing to parse.
+            let count = previous.blocks.count
+            let match = BlockMatch(oldCount: count, newCount: count, equal: { $0 == $1 }, oldHash: { $0 }, newHash: { $0 })
+            let end = previous.sourceUTF16Count
+            return ParseResult(document: previous, match: match, edit: SourceEdit(old: end..<end, new: end..<end))
+        }
         let result = try source.utf8.withContiguousStorageIfAvailable { bytes in
             try MarkdownParser.parse(utf8: bytes, previous: previous)
         }
         guard var result else { throw MarkdownError.parserUnavailable }
         result.document.source = source
         return result
+    }
+
+    /// Whether two contiguous UTF-8 strings hold the same bytes.
+    private static func isSameText(_ a: String, _ b: String) -> Bool {
+        guard a.utf8.count == b.utf8.count, !a.isEmpty else { return false }
+        var a = a
+        var b = b
+        return a.withUTF8 { left in b.withUTF8 { right in memcmp(left.baseAddress, right.baseAddress, left.count) == 0 } }
     }
 
     /// `source` as contiguous UTF-8. Text bridged from an `NSString`, like an

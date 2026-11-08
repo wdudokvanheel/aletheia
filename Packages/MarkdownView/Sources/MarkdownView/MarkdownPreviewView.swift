@@ -56,6 +56,9 @@ public final class MarkdownPreviewView: NSScrollView {
     private var completedSourceGeneration: UInt64 = 0
     private var pendingScroll: ScrollTarget?
     private var timingsAwaitingDraw: Timings?
+    /// The snapshot `setSource(_:reusing:)` diffs its source against, until
+    /// that source installs.
+    private var reusedBase: (sourceGeneration: UInt64, snapshot: MarkdownSnapshot)?
 
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -86,9 +89,26 @@ public final class MarkdownPreviewView: NSScrollView {
     /// handed to the background queue, and while hidden it is only stored.
     /// While an update runs, the newest source waits for it to finish.
     public func setSource(_ text: String) {
+        replaceSource(text, reusing: nil)
+    }
+
+    /// Shows another document: replaces the source as `setSource(_:)` does,
+    /// but diffs it against `snapshot`, that document's last snapshot (the
+    /// `snapshot` this view had when it last showed it), instead of the
+    /// installed one. Blocks unchanged since keep their layouts when the
+    /// width is the same, so an unchanged document installs without parsing
+    /// or layout. Without a snapshot it starts from nothing. It neither
+    /// waits for typing updates nor pauses, and lays out the top first
+    /// unless a scroll position follows.
+    public func setSource(_ text: String, reusing snapshot: MarkdownSnapshot?) {
+        replaceSource(text, reusing: snapshot ?? .empty)
+    }
+
+    private func replaceSource(_ text: String, reusing snapshot: MarkdownSnapshot?) {
         source = text
         sourceGeneration += 1
-        scheduleUpdate()
+        reusedBase = snapshot.map { (sourceGeneration, $0) }
+        scheduleUpdate(waiting: snapshot == nil)
         // Hidden or without a width: nothing older may install meanwhile.
         if !isShown || canvas.frame.width < 1 { cancelUpdates() }
     }
@@ -230,10 +250,11 @@ public final class MarkdownPreviewView: NSScrollView {
         resumeTask = nil
         let plan = RenderPlan(firstStep)
         submitted = (sourceGeneration, width, complete, plan)
+        let base = reusedBase.flatMap { $0.sourceGeneration == sourceGeneration ? $0.snapshot : nil } ?? canvas.snapshot
         let generation = pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width,
                                          scrollFraction: CGFloat(scrollFraction),
                                          viewportHeight: contentView.bounds.height, visibleFirst: false,
-                                         complete: complete, base: canvas.snapshot, plan: plan)
+                                         complete: complete, base: base, plan: plan)
         inFlight = (generation, .now)
     }
 
@@ -254,7 +275,9 @@ public final class MarkdownPreviewView: NSScrollView {
         switch pendingScroll {
         case .fraction(let value): value == 0 ? .offset(0) : .fraction(value)
         case .offset(let value): .offset(value)
-        case nil: installedSourceGeneration == 0 ? .offset(0) : .everything
+        case nil:
+            // Typing lays out what changed at once; a new document, its top.
+            installedSourceGeneration == 0 || reusedBase?.sourceGeneration == sourceGeneration ? .offset(0) : .everything
         }
     }
 
@@ -288,6 +311,7 @@ public final class MarkdownPreviewView: NSScrollView {
         let oldSelection = canvas.selection
         canvas.install(snapshot, sourceChanged: sourceChanged)
         installedSourceGeneration = sourceGeneration
+        if reusedBase?.sourceGeneration == sourceGeneration { reusedBase = nil }
         canvas.setFrameSize(NSSize(width: canvas.frame.width, height: snapshot.totalHeight))
         let isCurrent = sourceGeneration == self.sourceGeneration
         var redrawsAll = true
