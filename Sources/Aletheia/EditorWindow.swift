@@ -221,6 +221,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             column.leadingAnchor.constraint(equalTo: right.leadingAnchor),
             column.trailingAnchor.constraint(equalTo: right.trailingAnchor),
             column.bottomAnchor.constraint(equalTo: right.bottomAnchor),
+            header.heightAnchor.constraint(equalToConstant: 44),
             tabScroll.heightAnchor.constraint(equalToConstant: 44),
             tabs.heightAnchor.constraint(equalTo: tabScroll.contentView.heightAnchor),
             editorHost.leadingAnchor.constraint(equalTo: right.leadingAnchor),

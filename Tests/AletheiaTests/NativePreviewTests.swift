@@ -11,11 +11,11 @@ final class NativePreviewTests: XCTestCase {
         return url
     }
 
-    @MainActor private func png(width: Int = 16) throws -> Data {
+    @MainActor private func png(width: Int = 16, height: Int = 12) throws -> Data {
         let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width,
-            pixelsHigh: 12, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
             isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
-        for y in 0..<12 { for x in 0..<width { bitmap.setColor(NSColor(deviceRed: 0.1, green: 0.4, blue: 0.8, alpha: 1), atX: x, y: y) } }
+        for y in 0..<height { for x in 0..<width { bitmap.setColor(NSColor(deviceRed: 0.1, green: 0.4, blue: 0.8, alpha: 1), atX: x, y: y) } }
         return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
     }
 
@@ -88,6 +88,55 @@ final class NativePreviewTests: XCTestCase {
         try pdf(locked: true).write(to: url)
         XCTAssertThrowsError(try DocumentFile.read(url)) {
             guard case PreviewFile.LoadError.lockedPDF = $0 else { return XCTFail("Unexpected error: \($0)") }
+        }
+    }
+
+    @MainActor func testTabHeaderStaysCompactForDifferentImageSizesAndWindowResizes() async throws {
+        _ = NSApplication.shared
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sizes = [(16, 12), (1024, 1024), (32, 1024), (1024, 32)]
+        let images = try sizes.enumerated().map { index, size in
+            let url = root.appendingPathComponent("image-\(index).png")
+            try png(width: size.0, height: size.1).write(to: url)
+            return url
+        }
+        let controller = EditorWindow()
+        defer { controller.window?.close() }
+        await withCheckedContinuation { continuation in
+            controller.restore(WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                rootPath: root.path, filePaths: images.map(\.path), selectedPath: images[0].path)) { skipped in
+                XCTAssertTrue(skipped.isEmpty)
+                continuation.resume()
+            }
+        }
+        let window = try XCTUnwrap(controller.window)
+        let rootView = try XCTUnwrap(window.contentView)
+        func firstTab(in view: NSView) -> EditorTabView? {
+            (view as? EditorTabView) ?? view.subviews.lazy.compactMap { firstTab(in: $0) }.first
+        }
+        for size in [NSSize(width: 900, height: 600), NSSize(width: 1400, height: 1000), NSSize(width: 620, height: 360)] {
+            window.setContentSize(size)
+            for url in images {
+                controller.openFile(url)
+                rootView.layoutSubtreeIfNeeded()
+                let tab = try XCTUnwrap(firstTab(in: rootView))
+                let tabScroll = try XCTUnwrap(tab.enclosingScrollView)
+                let header = try XCTUnwrap(tabScroll.superview)
+                XCTAssertEqual(header.frame.height, 44, accuracy: 0.5, url.lastPathComponent)
+                let document = try XCTUnwrap(controller.documents.first { $0.file.url == url })
+                let image = document.contentView
+                let imageFrame = image.convert(image.bounds, to: rootView)
+                let headerFrame = header.convert(header.bounds, to: rootView)
+                if rootView.isFlipped {
+                    XCTAssertEqual(imageFrame.minY, headerFrame.maxY, accuracy: 0.5)
+                    XCTAssertEqual(imageFrame.maxY, rootView.bounds.maxY, accuracy: 0.5)
+                } else {
+                    XCTAssertEqual(imageFrame.maxY, headerFrame.minY, accuracy: 0.5)
+                    XCTAssertEqual(imageFrame.minY, rootView.bounds.minY, accuracy: 0.5)
+                }
+                XCTAssertEqual(imageFrame.height, rootView.bounds.height - 44, accuracy: 0.5)
+            }
         }
     }
 
