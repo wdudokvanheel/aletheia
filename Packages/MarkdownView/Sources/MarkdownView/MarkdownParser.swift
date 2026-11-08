@@ -10,7 +10,8 @@ enum MarkdownParser {
     /// A top-level block as cmark positions it, before its display content
     /// is built.
     private struct Span {
-        let node: UnsafeMutablePointer<cmark_node>
+        /// Nil for front matter, which cmark never sees.
+        let node: UnsafeMutablePointer<cmark_node>?
         let kind: MarkdownBlock.Kind
         let start: (utf8: Int, utf16: Int)
         let end: (utf8: Int, utf16: Int)
@@ -18,6 +19,7 @@ enum MarkdownParser {
         let lineStart: Int
         /// False for blocks cmark gives no source position, which never match.
         var isPositioned = true
+        var isFrontMatter = false
 
         var text: Range<Int> { start.utf8..<end.utf8 }
         var indentation: Range<Int> { lineStart..<start.utf8 }
@@ -38,12 +40,28 @@ enum MarkdownParser {
             }
             cmark_parser_attach_syntax_extension(parser, syntaxExtension)
         }
-        bytes.withMemoryRebound(to: CChar.self) { cmark_parser_feed(parser, $0.baseAddress, $0.count) }
+        // Front matter is split off first. cmark gets an empty line for each
+        // of its lines, so the rest keeps its line numbers and every source
+        // offset stays absolute.
+        let frontMatter = FrontMatter.find(in: bytes)
+        if let frontMatter {
+            let blank = [CChar](repeating: 0x0A, count: frontMatter.lineCount)
+            cmark_parser_feed(parser, blank, blank.count)
+        }
+        let rest = UnsafeBufferPointer(rebasing: bytes[(frontMatter?.restStart ?? 0)...])
+        if !rest.isEmpty { rest.withMemoryRebound(to: CChar.self) { cmark_parser_feed(parser, $0.baseAddress, $0.count) } }
         guard let document = cmark_parser_finish(parser) else { throw MarkdownError.parserUnavailable }
         defer { cmark_node_free(document) }
 
         let lines = LineIndex(bytes)
         var spans: [Span] = []
+        if let frontMatter {
+            let end = (utf8: frontMatter.end, utf16: lines.utf16Offset(ofUTF8: frontMatter.end))
+            var span = Span(node: nil, kind: frontMatter.isKeyValue ? .table : .codeBlock, start: (0, 0), end: end,
+                            lineStart: 0)
+            span.isFrontMatter = true
+            spans.append(span)
+        }
         var node = cmark_node_first_child(document)
         while let block = node {
             node = cmark_node_next(block)
@@ -124,10 +142,13 @@ enum MarkdownParser {
     /// A block's display text, style runs, links, and source map, from its
     /// cmark subtree.
     private static func block(for span: Span, _ bytes: UnsafeBufferPointer<UInt8>, _ lines: LineIndex) -> MarkdownBlock {
+        guard let node = span.node else {
+            return FrontMatter.block(source: UnsafeBufferPointer(rebasing: bytes[span.text]), isKeyValue: span.kind == .table)
+        }
         let sourceRange = span.start.utf16..<span.end.utf16
         var display = DisplayText(source: bytes, lines: lines, start: span.start, end: span.end.utf8,
                                   tracksStructure: span.kind == .list || span.kind == .blockQuote)
-        if span.kind != .htmlBlock { display.append(span.node) }
+        if span.kind != .htmlBlock { display.append(node) }
         var block = MarkdownBlock(
             kind: span.kind,
             sourceRange: sourceRange,
@@ -167,7 +188,9 @@ enum MarkdownParser {
         var cursor = 0
         for span in spans {
             if cursor < span.start.utf8 { addGap(cursor..<span.start.utf8) }
-            if span.kind != .codeBlock, span.kind != .htmlBlock, contains(bytes, span.text, "]:") { add(span.text) }
+            if span.kind != .codeBlock, span.kind != .htmlBlock, !span.isFrontMatter, contains(bytes, span.text, "]:") {
+                add(span.text)
+            }
             cursor = max(cursor, span.end.utf8)
         }
         if cursor < bytes.count { addGap(cursor..<bytes.count) }
@@ -182,6 +205,7 @@ enum MarkdownParser {
     private static func isEqual(_ block: MarkdownBlock, _ span: Span, _ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
         let text = span.text
         guard span.isPositioned, !text.isEmpty, block.sourceText.utf8.count == text.count, block.kind == span.kind,
+              block.isFrontMatter == span.isFrontMatter,
               block.indentation.utf8.elementsEqual(bytes[span.indentation]) else { return false }
         guard let base = bytes.baseAddress else { return false }
         var sourceText = block.sourceText
@@ -260,6 +284,172 @@ private enum ExtensionNode {
     static func isTaskItem(_ node: UnsafeMutablePointer<cmark_node>) -> Bool {
         guard let name = cmark_node_get_type_string(node) else { return false }
         return strcmp(name, "tasklist") == 0
+    }
+}
+
+/// YAML front matter at the very top of a file: a `---` line, then lines up
+/// to a closing `---` or `...` line; without a closing line there is none.
+/// It is shown without a YAML parser: as a two-column key/value table when
+/// every non-blank line is a simple `key: value` pair (no header row; keys in
+/// the muted quote role), and otherwise as a monospaced block of the lines
+/// between the delimiters.
+enum FrontMatter {
+    struct Location {
+        /// The UTF-8 end of the closing line, before its line break.
+        let end: Int
+        /// Where the rest of the source starts, past that line break.
+        let restStart: Int
+        /// Lines from the opening line to the closing one.
+        let lineCount: Int
+        let isKeyValue: Bool
+    }
+
+    private struct Line {
+        let content: Range<Int>
+        /// The start of the next line.
+        let next: Int
+    }
+
+    static func find(in bytes: UnsafeBufferPointer<UInt8>) -> Location? {
+        let first = line(in: bytes, from: 0)
+        guard first.next > first.content.upperBound, isDelimiter(bytes, first.content, closing: false) else { return nil }
+        var start = first.next
+        var count = 1
+        var isKeyValue = true
+        while start < bytes.count {
+            let line = line(in: bytes, from: start)
+            count += 1
+            if isDelimiter(bytes, line.content, closing: true) {
+                return Location(end: line.content.upperBound, restStart: line.next, lineCount: count, isKeyValue: isKeyValue)
+            }
+            if isKeyValue, !isBlank(bytes, line.content) { isKeyValue = pair(in: bytes, line.content) != nil }
+            start = line.next
+        }
+        return nil
+    }
+
+    /// The display content of front matter whose source, from its opening
+    /// line to the end of its closing line, is `source`.
+    static func block(source: UnsafeBufferPointer<UInt8>, isKeyValue: Bool) -> MarkdownBlock {
+        var bytes: [UInt8] = []
+        var runs: [StyleRun] = []
+        var anchors: [SourceMap.Anchor] = []
+        var structure = TableStructure(alignments: [.none, .none], hasHeader: false, isQuoted: false)
+        var utf16Count = 0
+        // UTF-16 offsets of source bytes, converted forward.
+        var converted = (utf8: 0, utf16: 0)
+        func utf16(_ offset: Int) -> Int {
+            for index in converted.utf8..<offset { converted.utf16 += utf16Width(source[index]) }
+            converted.utf8 = offset
+            return converted.utf16
+        }
+        func append(_ range: Range<Int>, role: TextRole) {
+            guard !range.isEmpty else { return }
+            bytes.append(contentsOf: source[range])
+            let start = utf16Count
+            for byte in source[range] { utf16Count += utf16Width(byte) }
+            if let last = runs.last, last.role == role, last.range.upperBound == start {
+                runs[runs.count - 1].range = last.range.lowerBound..<utf16Count
+            } else {
+                runs.append(StyleRun(range: start..<utf16Count, role: role))
+            }
+        }
+        func separator(_ byte: UInt8, role: TextRole) {
+            bytes.append(byte)
+            utf16Count += 1
+            if let last = runs.last, last.role == role, last.range.upperBound == utf16Count - 1 {
+                runs[runs.count - 1].range = last.range.lowerBound..<utf16Count
+            } else {
+                runs.append(StyleRun(range: (utf16Count - 1)..<utf16Count, role: role))
+            }
+        }
+        func anchor(_ sourceOffset: Int) {
+            anchors.append(SourceMap.Anchor(display: Int32(clamping: utf16Count), source: Int32(clamping: utf16(sourceOffset))))
+        }
+
+        var start = line(in: source, from: 0).next
+        var lines = 0
+        while start < source.count {
+            let line = line(in: source, from: start)
+            // The closing line ends the source.
+            guard line.next < source.count || line.content.upperBound < source.count else { break }
+            defer { start = line.next }
+            if isKeyValue {
+                guard !isBlank(source, line.content), let pair = pair(in: source, line.content) else { continue }
+                if lines > 0 { separator(0x0A, role: .body) }
+                lines += 1
+                structure.rowLines.append(Int32(clamping: line.content.lowerBound)..<Int32(clamping: line.content.upperBound))
+                structure.rowSourceStarts.append(Int32(clamping: utf16(line.content.lowerBound)))
+                anchor(pair.key.lowerBound)
+                let keyStart = utf16Count
+                append(pair.key, role: .quote)
+                structure.cells.append(Int32(clamping: keyStart)..<Int32(clamping: utf16Count))
+                separator(0x09, role: .body)
+                anchor(pair.value.lowerBound)
+                let valueStart = utf16Count
+                append(pair.value, role: .body)
+                structure.cells.append(Int32(clamping: valueStart)..<Int32(clamping: utf16Count))
+            } else {
+                if lines > 0 { separator(0x0A, role: .code) }
+                lines += 1
+                anchor(line.content.lowerBound)
+                append(line.content, role: .code)
+            }
+        }
+        let sourceLength = utf16(source.count)
+        if anchors.isEmpty { anchors = [SourceMap.Anchor(display: 0, source: 0)] }
+        var block = MarkdownBlock(kind: isKeyValue ? .table : .codeBlock, sourceRange: 0..<sourceLength,
+                                  sourceText: String(decoding: source, as: UTF8.self),
+                                  text: String(decoding: bytes, as: UTF8.self), styleRuns: runs,
+                                  sourceMap: SourceMap(anchors: anchors, displayLength: utf16Count, sourceLength: sourceLength))
+        block.isFrontMatter = true
+        if isKeyValue, !structure.cells.isEmpty { block.tables = [structure] }
+        return block
+    }
+
+    /// A line's content up to its LF, CR, or CRLF, and where the next starts.
+    private static func line(in bytes: UnsafeBufferPointer<UInt8>, from start: Int) -> Line {
+        var end = start
+        while end < bytes.count, bytes[end] != 0x0A, bytes[end] != 0x0D { end += 1 }
+        var next = end
+        if next < bytes.count {
+            next += bytes[next] == 0x0D && next + 1 < bytes.count && bytes[next + 1] == 0x0A ? 2 : 1
+        }
+        return Line(content: start..<end, next: next)
+    }
+
+    private static func isSpace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 }
+
+    private static func isBlank(_ bytes: UnsafeBufferPointer<UInt8>, _ range: Range<Int>) -> Bool {
+        bytes[range].allSatisfy(isSpace)
+    }
+
+    /// `---`, or for a closing line also `...`, with nothing after it but spaces.
+    private static func isDelimiter(_ bytes: UnsafeBufferPointer<UInt8>, _ range: Range<Int>, closing: Bool) -> Bool {
+        guard range.count >= 3 else { return false }
+        let mark = bytes[range.lowerBound]
+        guard mark == 0x2D || (closing && mark == 0x2E),
+              bytes[range.lowerBound + 1] == mark, bytes[range.lowerBound + 2] == mark else { return false }
+        return bytes[(range.lowerBound + 3)..<range.upperBound].allSatisfy(isSpace)
+    }
+
+    /// A simple `key: value` line: a key that is not indented and does not
+    /// start a comment, sequence entry, flow collection, or other YAML
+    /// syntax, then the first colon followed by a space or the line's end.
+    /// Both parts without the spaces around them; the value may be empty.
+    private static func pair(in bytes: UnsafeBufferPointer<UInt8>, _ range: Range<Int>) -> (key: Range<Int>, value: Range<Int>)? {
+        guard let first = range.first.map({ bytes[$0] }), !isSpace(first),
+              !"#[{?|>%@`,]}:".utf8.contains(first) else { return nil }
+        if first == 0x2D, range.count == 1 || isSpace(bytes[range.lowerBound + 1]) { return nil }
+        guard let colon = range.first(where: { bytes[$0] == 0x3A && ($0 + 1 == range.upperBound || isSpace(bytes[$0 + 1])) })
+        else { return nil }
+        var keyEnd = colon
+        while keyEnd > range.lowerBound, isSpace(bytes[keyEnd - 1]) { keyEnd -= 1 }
+        var valueStart = colon + 1
+        while valueStart < range.upperBound, isSpace(bytes[valueStart]) { valueStart += 1 }
+        var valueEnd = range.upperBound
+        while valueEnd > valueStart, isSpace(bytes[valueEnd - 1]) { valueEnd -= 1 }
+        return keyEnd > range.lowerBound ? (range.lowerBound..<keyEnd, valueStart..<valueEnd) : nil
     }
 }
 

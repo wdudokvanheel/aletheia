@@ -13,7 +13,7 @@ struct BlockLayoutBuilder {
     let typography: Typography
     /// Estimates measure heights from text lengths and build no lines.
     let isEstimate: Bool
-    /// Raw HTML takes no space.
+    /// Raw HTML and empty front matter take no space.
     let isDropped: Bool
     /// An earlier layout whose tables lend rows and natural widths.
     var hint: BlockLayout?
@@ -42,7 +42,7 @@ struct BlockLayoutBuilder {
         self.columnWidth = columnWidth
         self.typography = typography
         self.isEstimate = isEstimate
-        isDropped = block.kind == .htmlBlock
+        isDropped = block.kind == .htmlBlock || (block.isFrontMatter && textLength == 0)
     }
 
     /// A list or quote that contains the segment being laid out.

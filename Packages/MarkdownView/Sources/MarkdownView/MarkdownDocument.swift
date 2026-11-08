@@ -287,6 +287,9 @@ public struct MarkdownBlock: Sendable, Equatable {
     /// The grid of each table in the block, in display order: one for a
     /// table block, any number in a list or quote.
     var tables: [TableStructure] = []
+    /// Front matter at the top of the file: a key/value `table`, or a
+    /// `codeBlock` when its lines are not all simple `key: value` pairs.
+    var isFrontMatter = false
 
     /// Without a source map, display offsets map to the same source offsets.
     public init(kind: Kind, sourceRange: Range<Int>, sourceText: String, text: String, styleRuns: [StyleRun],

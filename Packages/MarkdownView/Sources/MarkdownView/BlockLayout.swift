@@ -118,7 +118,8 @@ public final class BlockLayout: @unchecked Sendable {
     /// The length of the block's display text in UTF-16 units.
     let textLength: Int
     let styleRuns: [StyleRun]
-    /// Dropped blocks (raw HTML) take no space and do not separate margins.
+    /// Dropped blocks (raw HTML, empty front matter) take no space and do
+    /// not separate margins.
     let isDropped: Bool
     /// A placeholder with an estimated height and no lines, used for blocks
     /// that are not laid out yet during a visible-first open.
