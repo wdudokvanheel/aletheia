@@ -323,42 +323,65 @@ extension MarkdownSnapshot {
 
     // MARK: Links
 
-    /// The destination of the link whose text is under `point`, in view
-    /// coordinates: within a line box, between the link's glyph edges.
+    /// The destination of the live link whose text is under `point`, in view
+    /// coordinates: within a line box, between the link's glyph edges, or
+    /// on an image inside the link.
     func linkDestination(at point: CGPoint, codeOffsets: CodeOffsets = [:]) -> String? {
+        guard let hit = linkOrImage(at: point, codeOffsets: codeOffsets) else { return nil }
+        let block = document.blocks[hit.block]
+        guard let link = hit.kind == .underline ? hit.index : enclosingLink(ofImage: hit.index, in: block),
+              block.links[link].isLive else { return nil }
+        return block.links[link].destination
+    }
+
+    /// The title of the live link or the image under `point`, for its
+    /// tooltip: an image's own title, else that of the link around it.
+    func toolTip(at point: CGPoint, codeOffsets: CodeOffsets = [:]) -> String? {
+        guard let hit = linkOrImage(at: point, codeOffsets: codeOffsets) else { return nil }
+        let block = document.blocks[hit.block]
+        var title = hit.kind == .underline ? block.links[hit.index].title : block.images[hit.index].title
+        if title.isEmpty, hit.kind == .image, let link = enclosingLink(ofImage: hit.index, in: block) {
+            title = block.links[link].title
+        }
+        return title.isEmpty ? nil : title
+    }
+
+    private func enclosingLink(ofImage image: Int, in block: MarkdownBlock) -> Int? {
+        BlockLayout.linkIndex(in: block.links[...], at: block.images[image].range.lowerBound)
+    }
+
+    /// The link underline or placed image under `point`, in view
+    /// coordinates, with its block and its index in the block's links or
+    /// images.
+    private func linkOrImage(at point: CGPoint, codeOffsets: CodeOffsets) -> (block: Int, kind: Decoration.Kind, index: Int)? {
         let index = firstBlock(endingBelow: point.y)
         guard index < layouts.count, blockTops[index] <= point.y else { return nil }
         let layout = layouts[index]
-        let links = document.blocks[index].links
-        guard !links.isEmpty else { return nil }
+        let block = document.blocks[index]
+        guard !block.links.isEmpty || !block.images.isEmpty else { return nil }
         let y = point.y - blockTops[index]
+        let hit: (Decoration.Kind, Int)?
         if let table = table(inBlock: index, atY: y) {
             let origin = tableOrigin(table, inBlock: index, codeOffsets)
-            guard let hit = table.line(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)) else { return nil }
-            return linkDestination(on: hit.line, atX: point.x - origin.x - hit.origin.x, inBlock: index)
+            guard let line = table.line(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)) else { return nil }
+            hit = linkOrImage(on: line.line, atX: point.x - origin.x - line.origin.x, in: block)
+        } else {
+            let lineIndex = layout.firstLine(endingBelow: y)
+            guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
+            // Code blocks have no links or images, so scrolling never moves one.
+            hit = linkOrImage(on: layout.lines[lineIndex], atX: point.x - columnX - layout.lines[lineIndex].x, in: block)
         }
-        let lineIndex = layout.firstLine(endingBelow: y)
-        guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
-        // Code blocks have no links, so scrolling never moves one.
-        return linkDestination(on: layout.lines[lineIndex], atX: point.x - columnX - layout.lines[lineIndex].x,
-                               inBlock: index)
+        return hit.map { (index, $0.0, $0.1) }
     }
 
-    /// The destination of the link under `x` on a line of block `index`:
-    /// its underlined text, or an image inside it.
-    private func linkDestination(on line: LineLayout, atX x: CGFloat, inBlock index: Int) -> String? {
-        let block = document.blocks[index]
+    /// The link underline or image under `x` on a line of `block`.
+    private func linkOrImage(on line: LineLayout, atX x: CGFloat, in block: MarkdownBlock) -> (Decoration.Kind, Int)? {
         for decoration in line.decorations where decoration.rect.minX <= x && x < decoration.rect.maxX {
             let tag = Int(decoration.tag)
             switch decoration.kind {
-            case .underline where block.links.indices.contains(tag):
-                return block.links[tag].destination
-            case .image where block.images.indices.contains(tag):
-                if let link = BlockLayout.linkIndex(in: block.links[...], at: block.images[tag].range.lowerBound) {
-                    return block.links[link].destination
-                }
-            default:
-                break
+            case .underline where block.links.indices.contains(tag): return (.underline, tag)
+            case .image where block.images.indices.contains(tag): return (.image, tag)
+            default: break
             }
         }
         return nil

@@ -420,7 +420,7 @@ public final class BlockLayout: @unchecked Sendable {
                     decorations.append(Decoration(kind: .codeBackground, rect: rect, color: 0, tag: Int32(styleIndex)))
                 }
             }
-            if style.styles.contains(.link), let link = linkIndex(in: links, at: location) {
+            if style.styles.contains(.link), let link = linkIndex(in: links, at: location), links[link].isLive {
                 let y = baseline - CTFontGetUnderlinePosition(base) - thickness / 2
                 decorations.append(Decoration(kind: .underline,
                                               rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),

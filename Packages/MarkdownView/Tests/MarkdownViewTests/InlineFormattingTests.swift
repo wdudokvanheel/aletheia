@@ -67,7 +67,7 @@ final class InlineFormattingTests: XCTestCase {
         """)
         XCTAssertEqual(block.text, "See the docs, https://example.com, www.example.org, and mail@example.com.")
         XCTAssertEqual(block.links, [
-            MarkdownLink(range: 4..<12, destination: "docs/guide.md"),
+            MarkdownLink(range: 4..<12, destination: "docs/guide.md", title: "Guide"),
             MarkdownLink(range: 14..<33, destination: "https://example.com"),
             MarkdownLink(range: 35..<50, destination: "http://www.example.org"),
             MarkdownLink(range: 56..<72, destination: "mailto:mail@example.com")

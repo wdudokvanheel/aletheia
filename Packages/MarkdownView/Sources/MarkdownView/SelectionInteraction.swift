@@ -5,7 +5,7 @@ import AppKit
 /// blocks the selection ends in, and only the lines between the moved ends
 /// redraw.
 extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations, NSDraggingSource,
-    @preconcurrency NSServicesMenuRequestor {
+    NSViewToolTipOwner, @preconcurrency NSServicesMenuRequestor {
     // MARK: Mouse
 
     /// How far the pointer may move during a click on a link before the
@@ -103,7 +103,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
 
     /// One tracking area following the visible rect: the cursor is a
     /// pointing hand over link text and an I-beam elsewhere, decided by a
-    /// binary search per mouse move.
+    /// binary search per mouse move, which also finds the tooltip.
     func addCursorTracking() {
         guard trackingAreas.isEmpty else { return }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
@@ -121,6 +121,25 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     private func updateCursor(for event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         (snapshot.linkDestination(at: point, codeOffsets: codeOffsets) != nil ? NSCursor.pointingHand : NSCursor.iBeam).set()
+        updateToolTip(at: point)
+    }
+
+    // MARK: Tooltips
+
+    /// Link and image titles show as tooltips. While the pointer is over a
+    /// title, one tooltip area covers the visible rect; it is set again
+    /// whenever the title under the pointer changes, so AppKit asks anew.
+    func updateToolTip(at point: CGPoint) {
+        let title = snapshot.toolTip(at: point, codeOffsets: codeOffsets)
+        guard title != shownToolTip else { return }
+        shownToolTip = title
+        removeAllToolTips()
+        if title != nil { addToolTip(visibleRect, owner: self, userData: nil) }
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+              userData data: UnsafeMutableRawPointer?) -> String {
+        snapshot.toolTip(at: point, codeOffsets: codeOffsets) ?? ""
     }
 
     /// Starts a selection at `point`: a click selects nothing, a double-click
@@ -267,11 +286,35 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     }
 
     @objc func lookUpSelection(_ sender: Any?) {
-        guard let selection, let origin = snapshot.baselineOrigin(of: selection.lowerBound, codeOffsets: codeOffsets)
-        else { return }
+        guard let selection else { return }
+        lookUp(selection)
+    }
+
+    /// A force click, or the trackpad's Look Up gesture, looks up the
+    /// selection under the pointer or the word there, as in text views.
+    override func quickLook(with event: NSEvent) {
+        guard let range = lookUpRange(at: convert(event.locationInWindow, from: nil)) else {
+            return super.quickLook(with: event)
+        }
+        lookUp(range)
+    }
+
+    /// What a force click at `point` looks up: the selection, when the point
+    /// is on it, else the word under the point; nil off the text.
+    func lookUpRange(at point: CGPoint) -> Range<TextPosition>? {
+        if let selection, isOnSelection(point) { return selection }
+        guard snapshot.isOverText(point, codeOffsets: codeOffsets),
+              let position = snapshot.position(at: point, codeOffsets: codeOffsets) else { return nil }
+        let word = snapshot.unitRange(at: position, granularity: .word)
+        return snapshot.text(in: word).contains { !$0.isWhitespace } ? word : nil
+    }
+
+    /// Shows the system's definition of `range` over its text.
+    private func lookUp(_ range: Range<TextPosition>) {
+        guard let origin = snapshot.baselineOrigin(of: range.lowerBound, codeOffsets: codeOffsets) else { return }
         let font = snapshot.typography.font(origin.style.role, origin.style.styles) as NSFont
         let color = palette.color(for: origin.style.role, styles: origin.style.styles)
-        let string = NSAttributedString(string: snapshot.text(in: selection), attributes: [.font: font, .foregroundColor: color])
+        let string = NSAttributedString(string: snapshot.text(in: range), attributes: [.font: font, .foregroundColor: color])
         showDefinition(for: string, at: origin.point)
     }
 

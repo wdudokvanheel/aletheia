@@ -554,10 +554,12 @@ private struct DisplayText {
     private var linkDepth = 0
     private var linkStart = 0
     private var linkDestination = ""
+    private var linkTitle = ""
     /// Images nest only in image descriptions; the outermost one counts.
     private var imageDepth = 0
     private var imageStart = 0
     private var imageSource = ""
+    private var imageTitle = ""
     /// The image's UTF-8 range in the source, from `!` to `)`.
     private var imageSpan: Range<Int>?
 
@@ -642,8 +644,10 @@ private struct DisplayText {
                 if entering, linkDepth == 1 {
                     linkStart = utf16Count
                     linkDestination = cmark_node_get_url(node).map { String(cString: $0) } ?? ""
+                    linkTitle = cmark_node_get_title(node).map { String(cString: $0) } ?? ""
                 } else if !entering, linkDepth == 0, linkStart < utf16Count {
-                    links.append(MarkdownLink(range: linkStart..<utf16Count, destination: linkDestination))
+                    links.append(MarkdownLink(range: linkStart..<utf16Count, destination: linkDestination,
+                                              title: linkTitle))
                 }
                 updateStyles()
             case CMARK_NODE_IMAGE:
@@ -853,6 +857,7 @@ private struct DisplayText {
         flushSeparator()
         imageStart = utf16Count
         imageSource = cmark_node_get_url(node).map { String(cString: $0) } ?? ""
+        imageTitle = cmark_node_get_title(node).map { String(cString: $0) } ?? ""
         imageSpan = span(of: node)
     }
 
@@ -867,7 +872,7 @@ private struct DisplayText {
             extendRun(by: 1, styles: styles)
             if let imageSpan { cursor = max(cursor, imageSpan.upperBound) }
         }
-        images.append(InlineImage(range: imageStart..<utf16Count, source: imageSource))
+        images.append(InlineImage(range: imageStart..<utf16Count, source: imageSource, title: imageTitle))
     }
 
     private mutating func updateStyles() {

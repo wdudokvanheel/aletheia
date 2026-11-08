@@ -369,7 +369,7 @@ public final class MarkdownPreviewView: NSScrollView {
             install(snapshot, sourceGeneration: sourceGeneration, timings: timings, isLast: isLast)
         case .failure(_, let message):
             isLast = true
-            messageLabel.stringValue = "Preview failed: \(message)"
+            messageLabel.stringValue = "Markdown preview unavailable: \(message)"
             messageLabel.isHidden = false
             tile()
         }
@@ -524,6 +524,8 @@ final class MarkdownDocumentView: NSView {
     /// Where a click on the selection started, until it drags the selected
     /// text or ends as a click.
     var pressedSelection: CGPoint?
+    /// The title of the tooltip area, while the pointer is over one.
+    var shownToolTip: String?
     /// Starts a drag of the selected text; replaced in tests.
     var beginDragging: (MarkdownDocumentView, [NSDraggingItem], NSEvent) -> Void = { view, items, event in
         view.beginDraggingSession(with: items, event: event, source: view)

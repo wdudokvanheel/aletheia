@@ -62,10 +62,26 @@ public struct StyleRun: Sendable, Equatable {
 public struct MarkdownLink: Sendable, Equatable {
     public var range: Range<Int>
     public var destination: String
+    /// The link's title, shown as its tooltip; empty without one.
+    public var title: String
 
-    public init(range: Range<Int>, destination: String) {
+    public init(range: Range<Int>, destination: String, title: String = "") {
         self.range = range
         self.destination = destination
+        self.title = title
+    }
+
+    /// Whether the link is live, as the WebKit preview keeps links: an empty
+    /// or relative reference, or an `http`, `https`, or `mailto` URL. Other
+    /// links (`javascript:`, `file:`, `ftp:`, malformed URLs) keep the link
+    /// color, but are not underlined, do not take the pointing hand, and do
+    /// not open.
+    public var isLive: Bool { Self.isLive(destination) }
+
+    static func isLive(_ destination: String) -> Bool {
+        guard let url = URL(string: destination) else { return destination.isEmpty }
+        guard let scheme = url.scheme?.lowercased() else { return true }
+        return scheme == "http" || scheme == "https" || scheme == "mailto"
     }
 }
 
@@ -142,6 +158,8 @@ struct InlineImage: Sendable, Equatable {
     /// The destination as written, with entities and escapes decoded and
     /// relative paths left unresolved.
     var source: String
+    /// The image's title, shown as its tooltip; empty without one.
+    var title = ""
 }
 
 /// A leaf block inside a top-level list or block quote, in display order: a
