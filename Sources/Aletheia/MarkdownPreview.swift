@@ -87,6 +87,9 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
     private var resetScroll = true
     private var searchQuery = ""
     private var searchRange: NSRange?
+    private var nextFraction: Double?
+    /// Replaces the stored offset on the shown document's first render.
+    private var carriedFraction: Double?
     private let scrollHandler = PreviewScrollHandler()
     var onOpen: ((URL) -> Void)?
 
@@ -123,6 +126,8 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
             resources.directory = document?.file.url.deletingLastPathComponent()
             resources.token = UUID().uuidString
             resetScroll = true
+            carriedFraction = document == nil ? nil : nextFraction
+            nextFraction = nil
         }
         schedule(clear: changed, immediately: true)
     }
@@ -177,6 +182,17 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
 
     func prepareForRelease() { webView.stopLoading() }
 
+    func scrollFraction() async -> Double? {
+        guard ready, document != nil, committedGeneration != nil,
+              let values = try? await webView.callAsyncJavaScript(
+                  "return [window.scrollY, document.documentElement.scrollHeight]",
+                  arguments: [:], in: nil, contentWorld: .page) as? [Double],
+              values.count == 2, values[0].isFinite, values[1].isFinite, values[1] > 0 else { return nil }
+        return min(max(values[0] / values[1], 0), 1)
+    }
+
+    func setScrollFraction(_ fraction: Double) { nextFraction = fraction }
+
     private func schedule(clear: Bool, immediately: Bool = false) {
         generation += 1
         pending?.cancel()
@@ -208,11 +224,13 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
                     "return commitPreview(html, value, reset, token, position, source)",
                     arguments: ["html": html, "source": source, "value": value, "reset": self.resetScroll,
                                 "token": self.resources.token,
-                                "position": ["x": document.previewPosition.x, "y": document.previewPosition.y]],
+                                "position": ["x": document.previewPosition.x, "y": document.previewPosition.y,
+                                             "fraction": self.carriedFraction.map { $0 as Any } ?? NSNull()]],
                     in: nil, contentWorld: .page)
                 if value == self.generation {
                     self.committedGeneration = value
                     self.resetScroll = false
+                    self.carriedFraction = nil
                 }
             } catch {
                 guard value == self.generation else { return }

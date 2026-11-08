@@ -16,4 +16,9 @@ protocol MarkdownPreviewing: AnyObject {
     func setVisible(_ visible: Bool)
     /// Stops in-flight work before the window drops this preview.
     func prepareForRelease()
+    /// The top of the visible area as a fraction of the document height, for
+    /// carrying the position to another renderer. Nil before content is shown.
+    func scrollFraction() async -> Double?
+    /// Positions the next shown document at `fraction` instead of its stored offset.
+    func setScrollFraction(_ fraction: Double)
 }

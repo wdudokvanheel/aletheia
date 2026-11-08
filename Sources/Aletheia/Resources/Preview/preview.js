@@ -177,6 +177,10 @@ function commitPreview(html, value, resetScroll, token = '', position = { x: 0, 
   let remaining = images.length;
   const restore = () => {
     if (committed !== identity || generation !== value || restoration !== target) return;
+    // A position carried over from the other renderer is a fraction of the height.
+    if (resetScroll && Number.isFinite(position.fraction)) {
+      target.y = position.fraction * document.documentElement.scrollHeight;
+    }
     window.scrollTo(target.x, target.y); // WebKit clamps to the rendered document bounds.
     if (remaining === 0) {
       restoration = null;
