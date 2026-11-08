@@ -13,7 +13,7 @@ let usage = """
       generated files   build/markdown-corpus/generated/
       manifest          build/markdown-corpus/manifest.json (set "generated" reads generated/generated-manifest.json)
       results           build/markdown-corpus/results/<renderer>-<set>.json
-      preview resources Sources/Aletheia/Resources/Preview
+      preview resources Sources/Aletheia/Resources/Preview (WebKit only)
     Run in Release: swift run -c release MarkdownViewBench ...
     """
 
@@ -83,10 +83,7 @@ case "run":
         let set = arguments.string("--set") ?? "curated"
         let renderer = arguments.string("--renderer") ?? "webkit"
         guard ["curated", "own", "smoke", "generated"].contains(set) else { throw BenchError.unavailable("unknown set \(set)") }
-        guard renderer != "custom" else {
-            throw BenchError.unavailable("renderer custom is not available yet; it is reserved for the MarkdownView renderer")
-        }
-        guard renderer == "webkit" else { throw BenchError.unavailable("unknown renderer \(renderer)") }
+        guard ["webkit", "custom"].contains(renderer) else { throw BenchError.unavailable("unknown renderer \(renderer)") }
         options = RunOptions(
             manifest: arguments.path("--manifest") ?? Paths.corpus.appendingPathComponent("manifest.json"),
             set: set, renderer: renderer, repetitions: max(1, try arguments.number("--reps", default: 20)),
@@ -98,7 +95,8 @@ case "run":
             idleSeconds: try arguments.number("--idle-seconds", default: 3.0),
             timeout: try arguments.number("--timeout", default: 300.0),
             onscreen: arguments.flag("--onscreen"))
-        guard FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
+        guard renderer == "custom"
+                || FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
             throw BenchError.unavailable("no index.html in \(options.previewResources.path); pass --preview-resources")
         }
     } catch {

@@ -65,6 +65,16 @@ enum ProcessMetrics {
 
     static func footprint(_ pid: pid_t) -> UInt64? { usage(pid)?.ri_phys_footprint }
 
+    /// Bytes allocated and not freed, summed over every malloc zone.
+    static func heapInUse() -> UInt64 {
+        var statistics = malloc_statistics_t()
+        malloc_zone_statistics(nil, &statistics)
+        return UInt64(statistics.size_in_use)
+    }
+
+    /// Returns free malloc pages to the system, so a later footprint difference counts new pages.
+    static func relieveHeap() { _ = malloc_zone_pressure_relief(nil, 0) }
+
     /// User plus system CPU time; rusage reports mach ticks.
     static func cpuNanoseconds(_ pid: pid_t) -> UInt64? {
         usage(pid).map { ($0.ri_user_time + $0.ri_system_time) * ticks.numer / ticks.denom }
@@ -142,6 +152,10 @@ struct Memory: Codable {
     let total: Double
     let helpersByKind: [String: Double]
     let helperProcesses: Int
+    /// Custom: footprint growth from opening one more view on the document.
+    var view: Double?
+    /// Custom: malloc bytes in use over the same span.
+    var viewHeap: Double?
 }
 
 struct IdleCPU: Codable {

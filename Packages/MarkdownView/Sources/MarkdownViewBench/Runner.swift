@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownView
 import WebKit
 
 struct RunOptions {
@@ -13,6 +14,7 @@ struct RunOptions {
     var idleSeconds: Double
     var timeout: Double
     var onscreen: Bool
+    var custom: Bool { renderer == "custom" }
 }
 
 struct ManifestEntry {
@@ -103,6 +105,9 @@ struct DocumentResult: Codable {
     var ms: [String: Summary]?
     var memoryMiB: Memory?
     var idleCPUPercent: IdleCPU?
+    /// Custom: the library's Timings per repetition, by metric.
+    var library: [String: [LibraryTimings]]?
+    var scroll: ScrollResult?
 }
 
 struct WindowInfo: Codable {
@@ -114,8 +119,12 @@ struct WindowInfo: Codable {
     let displayAsleep: Bool
     /// `transparent`: alpha 0 and click-through on the main screen; `onscreen`: visible.
     let placement: String
-    let occlusionDetection: Bool
+    /// WebKit only.
+    let occlusionDetection: Bool?
+    /// Custom only: `overlay` or `legacy`, which takes width from the text column.
+    let scrollerStyle: String?
 }
+
 
 struct RunHeader: Codable {
     let timestamp: String
@@ -128,7 +137,7 @@ struct RunHeader: Codable {
     let filter: String?
     let idleSeconds: Double
     let debounceMs: Int
-    let previewResources: String
+    let previewResources: String?
     let machine: Environment.Machine
     let os: Environment.OS
     let build: String
@@ -137,7 +146,7 @@ struct RunHeader: Codable {
     let window: WindowInfo
     let firstPreviewMs: Double
     let baselineMemoryMiB: Double
-    let helperAttribution: String
+    let helperAttribution: String?
     let definitions: [String: String]
 }
 
@@ -158,11 +167,22 @@ struct Aggregate: Codable {
     let elapsedSeconds: Double
     let ms: [String: AggregateLatency]
     let memoryTotalMiB: Summary?
+    /// Custom: the per-view footprint growth (`memoryMiB.view`) over documents.
+    let memoryViewMiB: Summary?
     let idleCPUTotalPercent: Summary?
+    let scroll: ScrollTotals?
 }
+
+struct ScrollTotals: Codable {
+    let frames: Int
+    let over144Hz: Int
+    let over60Hz: Int
+}
+
 
 /// Streams one result file: the header, then a line per document, then the aggregate.
 final class ResultWriter {
+    static let schema = "aletheia-markdown-bench/2"
     private let handle: FileHandle
     private var first = true
     private let encoder: JSONEncoder = {
@@ -177,7 +197,7 @@ final class ResultWriter {
             throw BenchError.unavailable("cannot write \(url.path)")
         }
         handle = try FileHandle(forWritingTo: url)
-        try write("{\"schema\":\"aletheia-markdown-bench/1\",\"run\":\(encode(header)),\"documents\":[\n")
+        try write("{\"schema\":\"\(Self.schema)\",\"run\":\(encode(header)),\"documents\":[\n")
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
@@ -196,7 +216,7 @@ final class ResultWriter {
 
 @MainActor
 final class Runner {
-    static let metrics = ["startup", "open", "tabSwitch", "update", "updateWork"]
+    static let metrics = ["startup", "firstScreen", "open", "tabSwitch", "update", "updateWork", "updateMain", "scrollFrame"]
     static let definitions = [
         "rendered": "commitPreview returned to the bench (the last point the app observes), then one more callAsyncJavaScript that forces style and layout and resolves after the next requestAnimationFrame plus a zero timeout, so the frame's rendering update has run. Images are not awaited.",
         "startup": "new preview (WKWebView, configuration, scheme handler, index.html load) until didFinish",
@@ -218,7 +238,8 @@ final class Runner {
     let options: RunOptions
     let window: NSWindow
     private var preview: WebKitPreview?
-    private var timeout: Duration { .milliseconds(Int(options.timeout * 1000)) }
+    var customPreview: CustomPreview?
+    var timeout: Duration { .milliseconds(Int(options.timeout * 1000)) }
 
     init(options: RunOptions) {
         self.options = options
@@ -243,46 +264,57 @@ final class Runner {
         window.orderFrontRegardless()
 
         let baseline = Double(ProcessMetrics.ownFootprint()) / 1_048_576
-        // The first preview after launch also starts the shared GPU and networking helpers.
-        let first: (startup: Double, open: Double)
-        do {
-            first = try await open(BenchDocument(url: scratchURL(), text: Self.otherText), timeout: .seconds(60))
-        } catch BenchError.stalled(let state) {
-            throw BenchError.unavailable("the preview page is \(state), so WebKit does not render frames; "
-                + (options.onscreen ? "--onscreen needs an awake, unlocked display" : "the occlusion override failed"))
+        // The first preview after launch: for WebKit it also starts the shared GPU and networking helpers.
+        let firstOpen: Double
+        if options.custom {
+            firstOpen = try await openCustom(Self.otherText, timeout: .seconds(60)).open
+            disposeCustom()
+        } else {
+            do {
+                firstOpen = try await open(BenchDocument(url: scratchURL(), text: Self.otherText), timeout: .seconds(60)).open
+            } catch BenchError.stalled(let state) {
+                throw BenchError.unavailable("the preview page is \(state), so WebKit does not render frames; "
+                    + (options.onscreen ? "--onscreen needs an awake, unlocked display" : "the occlusion override failed"))
+            }
+            dispose()
         }
-        dispose()
 
-        let environment = Environment.current(repository: Paths.repository,
-            webkitVersion: Bundle(for: WKWebView.self).object(forInfoDictionaryKey: "CFBundleVersion") as? String)
+        let environment = Environment.current(repository: Paths.repository, webkitVersion: options.custom ? nil
+            : Bundle(for: WKWebView.self).object(forInfoDictionaryKey: "CFBundleVersion") as? String)
         let header = RunHeader(
             timestamp: ISO8601DateFormatter().string(from: Date()), renderer: options.renderer, set: options.set,
             manifest: manifest.path, documents: entries.count, repetitions: options.repetitions,
             limit: options.limit, filter: options.filter, idleSeconds: options.idleSeconds, debounceMs: 200,
-            previewResources: options.previewResources.path, machine: environment.machine, os: environment.os,
-            build: environment.build, git: environment.git, webkit: environment.webkit,
+            previewResources: options.custom ? nil : options.previewResources.path, machine: environment.machine,
+            os: environment.os, build: environment.build, git: environment.git, webkit: environment.webkit,
             window: WindowInfo(width: window.frame.width, height: window.frame.height,
                                backingScale: window.backingScaleFactor,
                                screenRefreshHz: window.screen?.maximumFramesPerSecond ?? 0,
                                displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
                                placement: options.onscreen ? "onscreen" : "transparent",
-                               occlusionDetection: options.onscreen),
-            firstPreviewMs: round2(first.open), baselineMemoryMiB: round1(baseline),
-            helperAttribution: ProcessMetrics.attribution, definitions: Self.definitions)
+                               occlusionDetection: options.custom ? nil : options.onscreen,
+                               scrollerStyle: options.custom ? (NSScroller.preferredScrollerStyle == .overlay ? "overlay" : "legacy") : nil),
+            firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),
+            helperAttribution: options.custom ? nil : ProcessMetrics.attribution,
+            definitions: options.custom ? Self.customDefinitions : Self.definitions)
         let writer = try ResultWriter(options.output, header: header)
         print("\(options.renderer) \(options.set): \(entries.count) documents, \(options.repetitions) repetitions, "
-              + "first preview \(String(format: "%.1f", first.open)) ms")
-        print(Self.tableHeader)
+              + "first preview \(String(format: "%.1f", firstOpen)) ms")
+        print(options.custom ? Self.customTableHeader : Self.tableHeader)
 
         var pooled: [String: [Double]] = [:]
         var worst: [String: (Double, String)] = [:]
         var memory: [Double] = []
+        var viewMemory: [Double] = []
         var idle: [Double] = []
         var counts = ["ok": 0, "failed": 0, "skipped": 0]
+        var scroll = ScrollTotals(frames: 0, over144Hz: 0, over60Hz: 0)
         for entry in entries {
-            let (result, samples) = await interval("document") { await measure(entry) }
+            let (result, samples) = await interval("document") {
+                options.custom ? await measureCustom(entry) : await measure(entry)
+            }
             try writer.append(result)
-            print(Self.row(result))
+            print(Self.row(result, custom: options.custom))
             counts[result.status, default: 0] += 1
             guard result.status == "ok" else { continue }
             for (metric, values) in samples { pooled[metric, default: []] += values }
@@ -290,7 +322,12 @@ final class Runner {
                 worst[metric] = (summary.p95, result.path)
             }
             if let total = result.memoryMiB?.total { memory.append(total) }
+            if let view = result.memoryMiB?.view { viewMemory.append(view) }
             if let total = result.idleCPUPercent?.total { idle.append(total) }
+            if let frames = result.scroll {
+                scroll = ScrollTotals(frames: scroll.frames + frames.frames, over144Hz: scroll.over144Hz + frames.over144Hz,
+                                      over60Hz: scroll.over60Hz + frames.over60Hz)
+            }
         }
         var latency: [String: AggregateLatency] = [:]
         for (metric, values) in pooled {
@@ -298,9 +335,11 @@ final class Runner {
             latency[metric] = AggregateLatency(n: summary.n, p50: summary.p50, p95: summary.p95, max: summary.max,
                                                worstP95: worst.0, worstDocument: worst.1)
         }
-        let aggregate = Aggregate(documents: entries.count, ok: counts["ok"] ?? 0, failed: counts["failed"] ?? 0,
-                                  skipped: counts["skipped"] ?? 0, elapsedSeconds: round1(milliseconds(started, now()) / 1000),
-                                  ms: latency, memoryTotalMiB: Summary(memory), idleCPUTotalPercent: Summary(idle))
+        let aggregate = Aggregate(
+            documents: entries.count, ok: counts["ok"] ?? 0, failed: counts["failed"] ?? 0,
+            skipped: counts["skipped"] ?? 0, elapsedSeconds: round1(milliseconds(started, now()) / 1000),
+            ms: latency, memoryTotalMiB: Summary(memory), memoryViewMiB: Summary(viewMemory),
+            idleCPUTotalPercent: Summary(idle), scroll: options.custom ? scroll : nil)
         try writer.finish(aggregate)
         print(Self.summary(aggregate))
         print("wrote \(options.output.path)")
@@ -324,7 +363,7 @@ final class Runner {
         }
     }
 
-    private func dispose() {
+    func dispose() {
         guard let preview else { return }
         preview.show(nil)
         preview.prepareForRelease()
@@ -423,11 +462,24 @@ final class Runner {
     static let tableHeader = pad("document", 34, left: true) + pad("KiB", 8) + pad("open p50/p95", 16)
         + pad("tab p50/p95", 14) + pad("update p50/p95", 16) + pad("work p95", 10) + pad("MiB", 7) + pad("idle%", 7)
 
-    static func row(_ result: DocumentResult) -> String {
+    static let customTableHeader = pad("document", 34, left: true) + pad("KiB", 8) + pad("first p50/p95", 15)
+        + pad("open p50/p95", 15) + pad("tab p50/p95", 14) + pad("update p50/p95", 16) + pad("work p95", 10)
+        + pad("main p95", 10) + pad("scroll p95", 11) + pad(">144Hz", 8) + pad("view MiB", 10) + pad("idle%", 7)
+
+    static func row(_ result: DocumentResult, custom: Bool) -> String {
         let label = result.name ?? result.path.split(separator: "/").suffix(2).joined(separator: "/")
         let kib = result.bytes.map { String(format: "%.1f", Double($0) / 1024) } ?? "-"
         guard result.status == "ok", let ms = result.ms else {
             return pad(label, 34, left: true) + pad(kib, 8) + "  \(result.status): \(result.error ?? "")"
+        }
+        func p95(_ metric: String) -> String { ms[metric].map { String(format: "%.1f", $0.p95) } ?? "-" }
+        if custom {
+            return pad(label, 34, left: true) + pad(kib, 8) + pad(pair(ms["firstScreen"]), 15) + pad(pair(ms["open"]), 15)
+                + pad(pair(ms["tabSwitch"]), 14) + pad(pair(ms["update"]), 16) + pad(p95("updateWork"), 10)
+                + pad(p95("updateMain"), 10) + pad(p95("scrollFrame"), 11)
+                + pad(result.scroll.map { "\($0.over144Hz)" } ?? "-", 8)
+                + pad(result.memoryMiB?.view.map { String(format: "%.1f", $0) } ?? "-", 10)
+                + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7)
         }
         return pad(label, 34, left: true) + pad(kib, 8) + pad(pair(ms["open"]), 16) + pad(pair(ms["tabSwitch"]), 14)
             + pad(pair(ms["update"]), 16) + pad(ms["updateWork"].map { String(format: "%.1f", $0.p95) } ?? "-", 10)
@@ -447,6 +499,12 @@ final class Runner {
         }
         if let memory = aggregate.memoryTotalMiB {
             lines.append(String(format: "memory total MiB: p50 %.1f, p95 %.1f, max %.1f", memory.p50, memory.p95, memory.max))
+        }
+        if let memory = aggregate.memoryViewMiB {
+            lines.append(String(format: "memory per view MiB: p50 %.1f, p95 %.1f, max %.1f", memory.p50, memory.p95, memory.max))
+        }
+        if let scroll = aggregate.scroll {
+            lines.append("scroll frames: \(scroll.frames), over 1000/144 ms: \(scroll.over144Hz), over 16.7 ms: \(scroll.over60Hz)")
         }
         if let idle = aggregate.idleCPUTotalPercent {
             lines.append(String(format: "idle CPU %%: p50 %.2f, p95 %.2f, max %.2f", idle.p50, idle.p95, idle.max))
