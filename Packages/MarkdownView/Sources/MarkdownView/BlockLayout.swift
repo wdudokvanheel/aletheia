@@ -13,6 +13,11 @@ struct LineLayout {
     /// The single role of the whole line, or `nil` when roles are mixed and
     /// runs are colored one by one.
     let role: TextRole?
+    /// Whether the line ends with a `\n` from a hard break or block separator.
+    let endsWithNewline: Bool
+
+    /// The last caret offset on the line: before its newline, if it has one.
+    var caretEnd: Int { endsWithNewline ? range.upperBound - 1 : range.upperBound }
 }
 
 /// A block laid out at one column width with Core Text. Immutable, so it can
@@ -27,6 +32,8 @@ public final class BlockLayout: @unchecked Sendable {
     /// Line positions are relative to the block's top; x is this inset.
     let lines: [LineLayout]
     let textInset: CGFloat
+    /// The length of the block's display text in UTF-16 units.
+    let textLength: Int
     let styleRuns: [StyleRun]
     let drawsCodeBackground: Bool
     /// Dropped blocks (raw HTML) take no space and do not separate margins.
@@ -80,12 +87,14 @@ public final class BlockLayout: @unchecked Sendable {
         self.lines = lines
         self.height = height
         self.isEstimate = isEstimate
+        textLength = block.text.utf16.count
     }
 
     private static func lines(for block: MarkdownBlock, width: CGFloat, top: CGFloat, typography: Typography) -> [LineLayout] {
         guard !block.text.isEmpty, let string = makeString(block, typography: typography) else { return [] }
         let typesetter = CTTypesetterCreateWithAttributedString(string)
         let length = CFAttributedStringGetLength(string)
+        let characters = CFAttributedStringGetString(string)
         var lines: [LineLayout] = []
         var start = 0
         var y = top
@@ -113,7 +122,8 @@ public final class BlockLayout: @unchecked Sendable {
 
             let halfLeading = (lineHeight - (ascent + descent)) / 2
             lines.append(LineLayout(line: line, range: range, top: y, height: lineHeight,
-                                    baseline: y + halfLeading + ascent, role: role))
+                                    baseline: y + halfLeading + ascent, role: role,
+                                    endsWithNewline: CFStringGetCharacterAtIndex(characters, range.upperBound - 1) == 0x0A))
             y += lineHeight
             start = range.upperBound
         }
@@ -163,6 +173,28 @@ public final class BlockLayout: @unchecked Sendable {
             if lines[mid].top + lines[mid].height <= y { low = mid + 1 } else { high = mid }
         }
         return low
+    }
+
+    /// The index of the line holding a caret `offset`. At a soft wrap the
+    /// offset ends one line and starts the next: `upstream` picks the first.
+    /// Requires at least one line.
+    func lineIndex(containing offset: Int, upstream: Bool) -> Int {
+        var low = 0
+        var high = lines.count
+        while low < high {
+            let mid = (low + high) / 2
+            let start = lines[mid].range.lowerBound
+            if upstream ? start < offset : start <= offset { low = mid + 1 } else { high = mid }
+        }
+        return max(low - 1, 0)
+    }
+
+    /// The caret offset on `line` nearest to `x` (relative to the text's left
+    /// edge), never after the line's newline.
+    func offset(on line: LineLayout, atX x: CGFloat) -> Int {
+        let index = CTLineGetStringIndexForPosition(line.line, CGPoint(x: x, y: 0))
+        guard index != kCFNotFound else { return line.range.lowerBound }
+        return min(max(index, line.range.lowerBound), line.caretEnd)
     }
 }
 
