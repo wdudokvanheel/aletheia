@@ -41,6 +41,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private let tree = FolderTree()
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
+    let findBar = FindBar()
     private let editorHost = EditorHostView()
     private let split = PaneSplitView(proportional: false, preferredSize: 230)
     private let markdownSplit = PaneSplitView(proportional: true, preferredSize: 0.5)
@@ -192,8 +193,20 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         header.spacing = 8
         header.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
         header.translatesAutoresizingMaskIntoConstraints = false
-        right.addSubview(header)
-        right.addSubview(editorHost)
+        let column = NSStackView(views: [header, findBar, editorHost])
+        column.orientation = .vertical
+        column.alignment = .width
+        column.spacing = 0
+        column.translatesAutoresizingMaskIntoConstraints = false
+        right.addSubview(column)
+        findBar.onNavigate = { [weak self] query, range in
+            self?.preview?.setSearch(query: query, sourceRange: range)
+        }
+        findBar.onClose = { [weak self] in
+            guard let self, let document = self.selected else { return }
+            self.window?.makeFirstResponder(document.isMarkdown && document.markdownMode == .preview
+                ? self.preview?.webView : document.editor)
+        }
         modeControl.target = self
         modeControl.action = #selector(changeMarkdownMode(_:))
         modeControl.controlSize = .small
@@ -203,12 +216,12 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         markdownSplit.dividerStyle = .thin
         markdownSplit.autoresizingMask = [.width, .height]
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: right.topAnchor),
-            header.leadingAnchor.constraint(equalTo: right.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: right.trailingAnchor),
+            column.topAnchor.constraint(equalTo: right.topAnchor),
+            column.leadingAnchor.constraint(equalTo: right.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: right.trailingAnchor),
+            column.bottomAnchor.constraint(equalTo: right.bottomAnchor),
             tabScroll.heightAnchor.constraint(equalToConstant: 44),
             tabs.heightAnchor.constraint(equalTo: tabScroll.contentView.heightAnchor),
-            editorHost.topAnchor.constraint(equalTo: header.bottomAnchor),
             editorHost.leadingAnchor.constraint(equalTo: right.leadingAnchor),
             editorHost.trailingAnchor.constraint(equalTo: right.trailingAnchor),
             editorHost.bottomAnchor.constraint(equalTo: right.bottomAnchor)
@@ -264,9 +277,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         document.applyTheme()
         document.onChange = { [weak self] in self?.refreshTabs(); self?.updateTitle() }
         document.onContentChange = { [weak self, weak document] in
-            guard let self, let document, self.selected === document,
-                  document.isMarkdown, document.markdownMode != .editor else { return }
-            self.preview?.contentChanged()
+            guard let self, let document, self.selected === document else { return }
+            self.findBar.contentChanged()
+            if document.isMarkdown, document.markdownMode != .editor { self.preview?.contentChanged() }
         }
     }
 
@@ -275,6 +288,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         selected?.setHighlightingActive(false)
         selected?.scroll.removeFromSuperview()
         selected = document
+        findBar.bind(document)
         if let document, document.isMarkdown { lastMarkdownMode = document.markdownMode }
         layoutEditor()
         refreshTabs()
@@ -342,6 +356,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
         editorHost.layoutSubtreeIfNeeded()
         document.setSourceVisible(mode != .preview)
+        findBar.synchronize()
     }
 
     private func refreshTabs() {
@@ -438,6 +453,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         window?.representedURL = selected?.file.requestedURL
         window?.isDocumentEdited = documents.contains(where: \.isDirty)
     }
+
+    @objc func showFind(_ sender: Any?) { findBar.show(replacing: false) }
+    @objc func showReplace(_ sender: Any?) { findBar.show(replacing: true) }
 
     @objc private func selectTab(_ sender: NSButton) { select(documents[sender.tag]) }
     @objc private func closeTabButton(_ sender: NSButton) { close(documents[sender.tag]) }

@@ -48,6 +48,12 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
+    func revealSearchMatch(_ range: NSRange) {
+        pendingSourcePosition = nil
+        editor.setSelectedRange(range)
+        if sourceVisible { editor.scrollRangeToVisible(range) }
+    }
+
     var diskUnavailable = false { didSet { updateDirty() } }
     var busy = false
     var markdownMode = MarkdownMode.split

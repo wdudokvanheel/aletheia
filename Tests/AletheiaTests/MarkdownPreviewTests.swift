@@ -19,6 +19,104 @@ final class MarkdownPreviewTests: XCTestCase {
                                                       in: nil, contentWorld: .page)
     }
 
+    @MainActor func testSearchUsesSourceOccurrenceIncludingHiddenDestinationsAndUTF16() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        let source = "😀 first\r\n\r\n[repeat](repeat) repeat **repeat**\r\n\r\nrepeat\r\n\r\n[hidden]: destination"
+        try Data(source.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let preview = MarkdownPreview()
+        preview.show(document)
+        try await eventually {
+            guard preview.ready else { return false }
+            return try await self.script(preview, "return committedSource") as? String == source
+        }
+        let ns = source as NSString
+        var cursor = 0
+        var occurrences: [NSRange] = []
+        while cursor < ns.length {
+            let range = ns.range(of: "repeat", options: .literal, range: NSRange(location: cursor, length: ns.length - cursor))
+            if range.location == NSNotFound { break }
+            occurrences.append(range)
+            cursor = NSMaxRange(range)
+        }
+        for index in [0, 2, 3, 4] {
+            let range = occurrences[index]
+            preview.setSearch(query: "repeat", sourceRange: range)
+            try await eventually {
+                try await self.script(preview, """
+                    const selection = window.getSelection();
+                    return selection.toString() === 'repeat' &&
+                      Number(selection.anchorNode?.parentElement.closest('[data-text-start]')?.dataset.textStart) + selection.anchorOffset === location;
+                    """, ["location": range.location]) as? Bool == true
+            }
+        }
+        // The identical word in the link destination has no visible range.
+        _ = try await script(preview, "Element.prototype.scrollIntoView = function() { window.searchedBlock = Number(this.dataset.sourceStart); }")
+        preview.setSearch(query: "repeat", sourceRange: occurrences[1])
+        try await eventually {
+            try await self.script(preview, "return window.getSelection().toString() === '' && window.searchedBlock === start",
+                                  ["start": ns.range(of: "[repeat]").location]) as? Bool == true
+        }
+        preview.setSearch(query: "**", sourceRange: ns.range(of: "**"))
+        try await eventually {
+            try await self.script(preview, "return window.getSelection().toString() === ''") as? Bool == true
+        }
+        for (query, expected) in [("**repeat**\r\n\r\nrepeat", ns.range(of: "[repeat]").location),
+                                  ("destination", occurrences[4].location)] {
+            _ = try await script(preview, "window.searchedBlock = -1")
+            preview.setSearch(query: query, sourceRange: ns.range(of: query))
+            try await eventually {
+                try await self.script(preview, "return window.searchedBlock === start && window.getSelection().toString() === ''",
+                                      ["start": expected]) as? Bool == true
+            }
+        }
+        preview.show(nil)
+    }
+
+    @MainActor func testSearchSurvivesPendingRenderAndReloadButClearsOnSwitch() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("first target".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let other = EditorDocument(file: try TextFile.read(url))
+        let preview = MarkdownPreview()
+        preview.show(document)
+        preview.setSearch(query: "target", sourceRange: NSRange(location: 6, length: 6))
+        try await eventually {
+            guard preview.ready else { return false }
+            return try await self.script(preview, "return window.getSelection().toString()") as? String == "target"
+        }
+        document.editor.insertText("new ", replacementRange: NSRange(location: 0, length: 0))
+        preview.contentChanged()
+        preview.setSearch(query: "target", sourceRange: NSRange(location: 10, length: 6))
+        try await eventually {
+            try await self.script(preview, "return committedSource === 'new first target' && window.getSelection().toString() === 'target'") as? Bool == true
+        }
+        let originValue = try await script(preview, "return performance.timeOrigin") as? Double
+        let origin = try XCTUnwrap(originValue)
+        preview.webView.reload()
+        try await eventually {
+            guard preview.ready else { return false }
+            return try await self.script(preview, "return performance.timeOrigin !== origin && committedSource === 'new first target' && window.getSelection().toString() === 'target'", ["origin": origin]) as? Bool == true
+        }
+        preview.show(other)
+        try await eventually {
+            try await self.script(preview, "return committedSource === 'first target' && search === null && window.getSelection().toString() === ''") as? Bool == true
+        }
+        preview.setSearch(query: "target", sourceRange: NSRange(location: 6, length: 6))
+        preview.setSearch(query: "", sourceRange: nil)
+        try await eventually {
+            try await self.script(preview, "return search === null && window.getSelection().toString() === ''") as? Bool == true
+        }
+        preview.show(nil)
+        try await eventually {
+            try await self.script(preview, "return search === null && committed === null") as? Bool == true
+        }
+    }
+
     @MainActor func testGFMAndUnsafeContentUseRealBundledRenderer() async throws {
         _ = NSApplication.shared
         let preview = MarkdownPreview()

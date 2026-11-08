@@ -89,6 +89,8 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     private(set) var ready = false
     private var committedGeneration: Int?
     private var resetScroll = true
+    private var searchQuery = ""
+    private var searchRange: NSRange?
     private let scrollHandler = PreviewScrollHandler()
     var onOpen: ((URL) -> Void)?
 
@@ -116,9 +118,11 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     }
 
     func show(_ document: EditorDocument?) {
-        let changed = self.document !== document
+        let changed = self.document !== document || document == nil
         self.document = document
         if changed {
+            searchQuery = ""
+            searchRange = nil
             committedGeneration = nil
             resources.directory = document?.file.url.deletingLastPathComponent()
             resources.token = UUID().uuidString
@@ -149,6 +153,27 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
             in: nil, in: .page) { _ in }
     }
 
+    /// The native source search owns matching; JavaScript receives UTF-16 offsets.
+    func setSearch(query: String, sourceRange: NSRange?) {
+        if document != nil, !query.isEmpty, let sourceRange,
+           sourceRange.location != NSNotFound, sourceRange.length > 0 {
+            searchQuery = query
+            searchRange = sourceRange
+        } else {
+            searchQuery = ""
+            searchRange = nil
+        }
+        sendSearch()
+    }
+
+    private func sendSearch() {
+        guard ready else { return }
+        let range: Any = searchRange.map { ["location": $0.location, "length": $0.length] as Any } ?? NSNull()
+        webView.callAsyncJavaScript("setPreviewSearch(query, range, token, value)",
+            arguments: ["query": searchQuery, "range": range,
+                        "token": resources.token, "value": generation], in: nil, in: .page) { _ in }
+    }
+
     func contentChanged() { schedule(clear: false) }
 
     private func schedule(clear: Bool, immediately: Bool = false) {
@@ -160,6 +185,7 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
             webView.callAsyncJavaScript("invalidatePreview(value, clear)",
                 arguments: ["value": value, "clear": clear], in: nil, in: .page) { _ in }
         }
+        sendSearch()
         guard document != nil, ready else { return }
         pending = Task { [weak self] in
             if !immediately {
@@ -170,15 +196,16 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
             do {
                 // Copy the unsaved buffer only after the debounce, never on every key.
                 self.renderCount += 1
+                let source = document.editor.string
                 let html = try await self.webView.callAsyncJavaScript(
                     "return renderMarkdown(markdown, base)",
-                    arguments: ["markdown": document.editor.string, "base": self.resources.base],
+                    arguments: ["markdown": source, "base": self.resources.base],
                     in: nil, contentWorld: .page)
                 guard !Task.isCancelled, value == self.generation, self.document === document,
                       let html = html as? String else { return }
                 _ = try await self.webView.callAsyncJavaScript(
-                    "return commitPreview(html, value, reset, token, position)",
-                    arguments: ["html": html, "value": value, "reset": self.resetScroll,
+                    "return commitPreview(html, value, reset, token, position, source)",
+                    arguments: ["html": html, "source": source, "value": value, "reset": self.resetScroll,
                                 "token": self.resources.token,
                                 "position": ["x": document.previewPosition.x, "y": document.previewPosition.y]],
                     in: nil, contentWorld: .page)
@@ -197,6 +224,12 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        ready = false
+        pending?.cancel()
+        committedGeneration = nil
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         ready = true
         applyTheme()
@@ -206,7 +239,8 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }
-        if url == PreviewResources.origin, action.navigationType == .other {
+        if url == PreviewResources.origin,
+           action.navigationType == .other || action.navigationType == .reload {
             decisionHandler(.allow); return
         }
         decisionHandler(.cancel)
