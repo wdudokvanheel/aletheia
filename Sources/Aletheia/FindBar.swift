@@ -47,10 +47,14 @@ final class FindBar: NSStackView, NSTextFieldDelegate {
             row.orientation = .horizontal
             row.spacing = 6
             addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: widthAnchor, constant: -16).isActive = true
+            row.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -16).isActive = true
         }
-        query.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        replacement.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        for field in [query, replacement] {
+            field.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
+            let preferredWidth = field.widthAnchor.constraint(equalToConstant: 240)
+            preferredWidth.priority = .defaultHigh
+            preferredWidth.isActive = true
+        }
         count.setContentCompressionResistancePriority(.required, for: .horizontal)
         replaceRow.isHidden = true
         isHidden = true
