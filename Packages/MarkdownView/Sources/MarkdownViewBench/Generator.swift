@@ -310,6 +310,7 @@ struct Generator {
         print("generating into \(output.path) (seed \(seed))")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         var mixed100k = ""
+        var mixed1m = ""
         for (label, bytes) in Self.sizes {
             for style in ["prose", "mixed", "code"] {
                 let name = "\(style)-\(label)"
@@ -323,6 +324,7 @@ struct Generator {
                     }
                 }
                 if name == "mixed-100k" { mixed100k = text }
+                if name == "mixed-1m" { mixed1m = text }
                 try write("sizes", name, text)
             }
         }
@@ -344,7 +346,15 @@ struct Generator {
         try write("links", "reference-links-1000", referenceLinks(stream("reference-links-1000")))
         try pathological(mixed100k: mixed100k)
         try images()
-        try writeTraces(mixed100k: mixed100k, table1500: table1500)
+        // The 1 MiB traces (Phase 4 exit) repeat the five edits on sizes/mixed-1m.md and a
+        // 7,200-row table of about 1 MiB, which is only written as the trace's base.
+        var tableMaker = stream("rows-7200-cols-4")
+        let rows7200 = tableMaker.table(rows: 7_200, columns: 4)
+        let table7200 = "# Table with 7200 rows and 4 columns\n\n\(tableMaker.paragraph(inline: true))\n\n\(rows7200)\n\n\(tableMaker.paragraph())\n"
+        try writeTraces(mixed: mixed100k, mixedName: "sizes/mixed-100k.md", table: table1500,
+                        tableName: "tables/rows-1500-cols-4.md", tableRow: 750, suffix: "")
+        try writeTraces(mixed: mixed1m, mixedName: "sizes/mixed-1m.md", table: table7200,
+                        tableName: "a 7,200-row, 4-column table (about 1 MiB)", tableRow: 3_600, suffix: "-1m")
 
         let manifest = GeneratedManifest(
             generator: "MarkdownViewBench generate", version: 2, seed: seed, root: ".",
@@ -553,17 +563,19 @@ struct Generator {
         }
     }
 
-    mutating func writeTraces(mixed100k: String, table1500: String) throws {
+    /// The five typing traces on `mixed` and `table`, named with `suffix`.
+    mutating func writeTraces(mixed: String, mixedName: String, table tableText: String, tableName: String,
+                              tableRow: Int, suffix: String) throws {
         var list: [Trace] = []
-        let end = (mixed100k as NSString).length
-        list.append(Trace(name: "append-paragraph", description: "Type a new paragraph at the end of sizes/mixed-100k.md.",
-                          base: mixed100k,
+        let end = (mixed as NSString).length
+        list.append(Trace(name: "append-paragraph" + suffix, description: "Type a new paragraph at the end of \(mixedName).",
+                          base: mixed,
                           edits: Self.typing("\nA new paragraph typed at the end of the document, one key at a time.", at: end)))
 
-        let table = table1500 as NSString
-        let row = table.range(of: "\n| 750 | ")
+        let table = tableText as NSString
+        let row = table.range(of: "\n| \(tableRow) | ")
         let lineEnd = table.range(of: "\n", range: NSRange(location: row.location + 1, length: table.length - row.location - 1)).location
-        // The end of the third cell: skip "| 750 | ", then two unescaped pipes.
+        // The end of the third cell: skip "| <row> | ", then two unescaped pipes.
         var cursor = row.location + 1
         var pipes = 0
         while cursor < lineEnd, pipes < 4 {
@@ -573,36 +585,36 @@ struct Generator {
         let cellEnd = cursor - 2 // before " |"
         var tableEdits = Self.typing(" edited", at: cellEnd)
         for index in 0..<3 { tableEdits.append(TraceEdit(location: cellEnd + 6 - index, length: 1, replacement: "")) }
-        list.append(Trace(name: "table-cell", description: "Type into the third cell of row 750 of tables/rows-1500-cols-4.md, then delete three characters.",
-                          base: table1500, edits: tableEdits))
+        list.append(Trace(name: "table-cell" + suffix, description: "Type into the third cell of row \(tableRow) of \(tableName), then delete three characters.",
+                          base: tableText, edits: tableEdits))
 
-        let fenceAt = Self.middleBlockStart(mixed100k, paragraph: true)
+        let fenceAt = Self.middleBlockStart(mixed, paragraph: true)
         var fence = Self.typing("```\n", at: fenceAt)
         fence += Self.typing("let value = 1\n", at: fenceAt + 4)
         fence += Self.typing("```\n", at: fenceAt + 18)
-        list.append(Trace(name: "fence-open-close", description: "Open a code fence in the middle of sizes/mixed-100k.md, type a line, then close it.",
-                          base: mixed100k, edits: fence))
+        list.append(Trace(name: "fence-open-close" + suffix, description: "Open a code fence in the middle of \(mixedName), type a line, then close it.",
+                          base: mixed, edits: fence))
 
         var deletions: [TraceEdit] = []
-        var current = mixed100k as NSString
-        let blockAt = Self.middleBlockStart(mixed100k)
+        var current = mixed as NSString
+        let blockAt = Self.middleBlockStart(mixed)
         for _ in 0..<3 {
             let next = current.range(of: "\n\n", range: NSRange(location: blockAt, length: current.length - blockAt))
             let length = (next.location == NSNotFound ? current.length : next.location + 2) - blockAt
             deletions.append(TraceEdit(location: blockAt, length: length, replacement: ""))
             current = current.replacingCharacters(in: NSRange(location: blockAt, length: length), with: "") as NSString
         }
-        list.append(Trace(name: "delete-block", description: "Delete three consecutive blocks in the middle of sizes/mixed-100k.md, one edit each.",
-                          base: mixed100k, edits: deletions))
+        list.append(Trace(name: "delete-block" + suffix, description: "Delete three consecutive blocks in the middle of \(mixedName), one edit each.",
+                          base: mixed, edits: deletions))
 
-        var maker = stream("link-reference-definition")
+        var maker = stream("link-reference-definition" + suffix)
         var referenced = ""
-        for (index, block) in mixed100k.components(separatedBy: "\n\n").enumerated() {
+        for (index, block) in mixed.components(separatedBy: "\n\n").enumerated() {
             referenced += (index == 0 ? "" : "\n\n") + block
             if index % 25 == 12 { referenced += "\n\n\(maker.sentence()) See [the bench reference][bench-ref] for details." }
         }
         let referencedEnd = (referenced as NSString).length
-        list.append(Trace(name: "link-reference-definition",
+        list.append(Trace(name: "link-reference-definition" + suffix,
                           description: "Type a link reference definition at the end; earlier [bench-ref] uses become links.",
                           base: referenced, edits: Self.typing("\n[bench-ref]: https://example.com/reference", at: referencedEnd)))
 

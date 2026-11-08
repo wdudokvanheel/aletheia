@@ -50,6 +50,8 @@ final class CustomPreview {
     private var ready: (first: CustomRender, complete: CustomRender)?
     private var first: CustomRender?
     private var finishedGeneration: UInt64 = 0
+    /// Every report, before `nextRender` filters them; the trace replay logs them all.
+    var observer: ((CustomRender) -> Void)?
 
     init(frame: NSRect) {
         view = MarkdownPreviewView(frame: frame)
@@ -60,6 +62,7 @@ final class CustomPreview {
     /// area first (not complete), then everything.
     private func receive(_ timings: Timings) {
         let render = CustomRender(at: now(), timings: timings)
+        observer?(render)
         guard timings.generation > finishedGeneration else { return }
         if first?.timings.generation != timings.generation { first = render }
         guard timings.isComplete else { return }

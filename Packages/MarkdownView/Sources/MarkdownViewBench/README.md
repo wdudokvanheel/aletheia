@@ -1,7 +1,7 @@
 # MarkdownViewBench
 
 Headless corpus generator and preview benchmark for `docs/custom-markdown-view-plan.md`
-(Phases 0 and 1). It measures the app's WebKit preview path or the `MarkdownView` library.
+(Phases 0, 1 and 4). It measures the app's WebKit preview path or the `MarkdownView` library.
 Run it in Release from anywhere inside the repository:
 
 ```sh
@@ -12,6 +12,8 @@ swift run -c release MarkdownViewBench run --set curated --renderer custom
 swift run -c release MarkdownViewBench run --set generated --renderer custom --filter 100k
 swift run -c release MarkdownViewBench run --set smoke --renderer custom --reps 1   # crash and hang check
 swift run -c release MarkdownViewBench run --set own --limit 200 --reps 3 --idle-seconds 0
+swift run -c release MarkdownViewBench trace --renderer custom --trace all --reps 5   # typing traces
+swift run -c release MarkdownViewBench trace --renderer webkit --trace table-cell-1m --interval 50
 ```
 
 Default paths are relative to the repository root:
@@ -31,6 +33,13 @@ Default paths are relative to the repository root:
 | `run --idle-seconds S` | `3` (`0` for smoke); `0` skips the settles, the idle sample and per-view memory |
 | `run --timeout S` | `300` (`30` for smoke) per render, and the watchdog's hang limit |
 | `run --onscreen` | off; shows the window and keeps WebKit's occlusion detection, like the app |
+| `trace --manifest PATH` | `build/markdown-corpus/generated/generated-manifest.json` (its `traces[]`) |
+| `trace --renderer` | `webkit`; `custom` |
+| `trace --trace` | `all`; or names separated by commas |
+| `trace --reps N` | `5`; each repetition replays the whole trace in a new preview |
+| `trace --interval MS` | `0`: each edit once the previous one rendered; above 0, edits fire on that schedule |
+| `trace --out PATH` | `build/markdown-corpus/results/<renderer>-traces.json`, `-traces-<MS>ms.json` with an interval |
+| `trace --preview-resources DIR`, `--timeout S` | as for `run`; the timeout (`60`) is per wait for a render |
 
 ## Generator
 
@@ -77,7 +86,11 @@ Reruns are byte-identical on the same macOS (checked with `diff -r` on two runs)
 the encoders embeds a timestamp. ImageIO output can change between macOS versions.
 
 A trace is `{name, description, base, edits: [{location, length, replacement}]}`. Ranges are
-UTF-16 and apply in order, each to the text left by the previous edit.
+UTF-16 and apply in order, each to the text left by the previous edit. There are five, on
+`sizes/mixed-100k.md` and `tables/rows-1500-cols-4.md` (row 750), and the same five with a
+`-1m` suffix on `sizes/mixed-1m.md` and a 7,200-row, 4-column table of about 1 MiB (row 3,600;
+seeded as `rows-7200-cols-4`, only written as the trace's base) for the Phase 4 exit. The `-1m`
+traces left the 100 KiB traces and every other file byte-identical.
 
 ## What is measured
 
@@ -168,6 +181,57 @@ document as `crashed` (`error` gives the signal) or `hung`, closes the file with
 continues after it. A stack overflow off the main thread cannot run the handler; the
 `running` line still names the document.
 
+## Trace replay (`trace`)
+
+Each repetition opens a new preview on the trace's base document (`open`, as in `run`),
+scrolls so the first edit's position is 30% down the viewport, settles for 300 ms, then
+applies the edits to an `NSMutableString` as an editor would and hands the preview the result:
+
+- **custom:** `setSource(text)` at once, no debounce; the view runs one update at a time,
+  coalesces sources set meanwhile and pauses after slow updates (`UpdatePolicy.standard`,
+  recorded in the header). The scroll target comes from the snapshot's block tops,
+  interpolated within the block, so a table row deep in one block is approximate.
+- **webkit:** the document text changes, then `contentChanged()`, with the app's 200 ms
+  debounce. `workMs` starts after the debounce, as `updateWork` does in `run`. The scroll is
+  a fraction of the page height.
+
+**rendered** is as in `run`: the custom view's `onTimings` for the complete snapshot, or
+WebKit's commit plus the frame script. An edit's `ms` is its keystroke (the call above) to the
+render that shows it. With `--interval 0` the next edit is applied right after that render.
+With an interval, edit k fires at (k - 1) x interval whatever has rendered, and the
+repetition ends when the last edit has rendered.
+
+**Coalescing.** A render can show a later edit than the one that started it: WebKit renders
+the text at the end of the debounce, and the custom view takes the newest source when an
+update starts. Edits between two renders that were never shown are `coalescedInto` the edit
+the next render showed; that edit records `coalesced` (how many) and `sinceOldestMs` (the
+oldest covered edit's keystroke to the render), and its own `ms` runs from its own keystroke.
+`finalMs` is the last edit's `ms`, the latency of the final state. An installed custom
+snapshot that was replaced before it drew never reports `onTimings` and counts as coalesced.
+
+**Which edit a render showed.** WebKit: the bench stamps the document with the edit number
+and the render reports the number it copied. Custom: the view does not say. Because an update
+takes the newest source when it starts, which is inside `setSource` or right after the
+previous install, install r shows one of the edits from the newest at install r - 1 to the
+newest at install r. Each install keeps the blocks (`sourceRange`, `sourceText`) around the
+candidate edits; after the repetition the texts are replayed and the newest candidate those
+blocks match is taken. Texts that differ only outside every block (a trailing newline) render
+alike and count as the newer edit. `verified: false` (and `unverified` per repetition) means
+none matched and the newest candidate was used; sequential runs must show every edit rendered.
+
+Custom records per edit `mainMs` (`Timings.mainThread`, install plus first draw), `wallMs`,
+`pauseMs`, `reusedBlocks`, `laidOutBlocks` and `library` (`LibraryTimings` as in `run`).
+Summaries pool every rendered edit of every repetition (nearest rank): `ms.update`,
+`ms.updateWork` (WebKit), `ms.updateMain`, `ms.updateWall`, `ms.pause` (custom), `ms.open`,
+`ms.final`, `laidOutBlocks`, and the counts `fired`, `rendered`, `coalesced`, `over16ms`,
+`overMain4ms`. The signposts add `trace` per repetition and a `keystroke` event per edit.
+
+Caveats: in sequential mode each keystroke lands just after a draw, so a custom update waits
+nearly a whole display interval for its first draw (16.7 ms at the transparent window's
+60 Hz, see above); `wallMs` is the library's cost without that wait, and burst mode lands
+keystrokes at arbitrary frame phases. An edit outside the visible area, or one the view finds
+invisible, installs without a draw and reports at once.
+
 ## Result schema (`aletheia-markdown-bench/2`)
 
 The file is streamed: the header first, one line per finished document, and the aggregate last.
@@ -205,3 +269,23 @@ became optional.
 `firstPreviewMs` is a warm-up open of a small document, the first preview or view after
 launch. Files the app would refuse (not UTF-8, control characters) are `skipped`. `failed`
 documents keep the samples taken before the failure.
+
+## Trace schema (`aletheia-markdown-bench/3`)
+
+Version 3 is the `trace` file; `run` still writes version 2, unchanged. The file is written
+once at the end. `run` is the version 2 header with `set: "traces"`, `documents` the number
+of traces, `filter` the `--trace` names, `debounceMs` 0 for custom, and the trace definitions.
+
+```
+{ "schema": "aletheia-markdown-bench/3",
+  "run": { ...version 2 header... },
+  "trace": { mode: sequential|burst, intervalMs, updatePolicy? {budgetMs, pauseFactor, maximumPauseMs} },
+  "traces": [ { name, description, path, baseBytes, edits, status: ok|failed, error?,
+                ms? {open|update|updateWork|updateMain|updateWall|pause|final: {n, p50, p95, min, max}},
+                laidOutBlocks?, fired, rendered, coalesced, over16ms, overMain4ms?,
+                repetitions: [ { openMs, scrollY, elapsedMs, rendered, coalesced, unverified?, finalMs?,
+                                 edits: [ { edit, firedAtMs, rendered, ms?, coalescedInto?, coalesced?,
+                                            sinceOldestMs?, workMs?, mainMs?, wallMs?, pauseMs?,
+                                            reusedBlocks?, laidOutBlocks?, verified?,
+                                            library? {blocks, complete, parse, layout, install, draw} } ] } ] } ] }
+```

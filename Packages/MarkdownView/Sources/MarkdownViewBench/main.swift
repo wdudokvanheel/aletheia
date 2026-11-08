@@ -8,13 +8,19 @@ let usage = """
       MarkdownViewBench run [--set curated|own|smoke|generated] [--renderer webkit|custom] [--reps N]
                             [--limit N] [--filter TEXT] [--skip N] [--manifest PATH] [--out PATH]
                             [--preview-resources DIR] [--idle-seconds S] [--timeout S] [--onscreen]
+      MarkdownViewBench trace [--renderer webkit|custom] [--trace NAME[,NAME...]|all] [--reps N] [--interval MS]
+                              [--manifest PATH] [--out PATH] [--preview-resources DIR] [--timeout S]
 
     Paths default to the repository that contains the working directory:
       generated files   build/markdown-corpus/generated/
       manifest          build/markdown-corpus/manifest.json (set "generated" reads generated/generated-manifest.json)
       results           build/markdown-corpus/results/<renderer>-<set>.json
+      trace results     build/markdown-corpus/results/<renderer>-traces.json (-traces-<MS>ms.json with --interval)
+      trace manifest    build/markdown-corpus/generated/generated-manifest.json
       preview resources Sources/Aletheia/Resources/Preview (WebKit only)
     The smoke set defaults to --idle-seconds 0 and --timeout 30 and runs the watchdog.
+    trace replays the generated typing traces, 5 repetitions; --interval 0 (the default) applies each
+    edit once the previous one rendered, a positive interval fires edits on that schedule.
     Run in Release: swift run -c release MarkdownViewBench ...
     """
 
@@ -112,6 +118,42 @@ case "run":
     app.setActivationPolicy(.accessory)
     Task { @MainActor in
         do { try await Runner(options: options).run() } catch { fail(error) }
+        exit(0)
+    }
+    app.run()
+case "trace":
+    let options: RunOptions
+    let trace: TraceOptions
+    do {
+        let arguments = try Arguments(rest, options: ["--renderer", "--trace", "--reps", "--interval", "--manifest", "--out",
+                                                      "--preview-resources", "--timeout"])
+        let renderer = arguments.string("--renderer") ?? "webkit"
+        guard ["webkit", "custom"].contains(renderer) else { throw BenchError.unavailable("unknown renderer \(renderer)") }
+        let interval = max(0, try arguments.number("--interval", default: 0.0))
+        trace = TraceOptions(
+            manifest: arguments.path("--manifest") ?? Paths.corpus.appendingPathComponent("generated/generated-manifest.json"),
+            names: arguments.string("--trace") ?? "all", interval: interval)
+        let name = interval > 0 ? "\(renderer)-traces-\(String(format: "%g", interval))ms.json" : "\(renderer)-traces.json"
+        options = RunOptions(
+            manifest: trace.manifest, set: "traces", renderer: renderer,
+            repetitions: max(1, try arguments.number("--reps", default: 5)),
+            output: arguments.path("--out") ?? Paths.corpus.appendingPathComponent("results/\(name)"),
+            limit: nil, filter: nil, skip: 0,
+            previewResources: arguments.path("--preview-resources")
+                ?? Paths.repository.appendingPathComponent("Sources/Aletheia/Resources/Preview"),
+            idleSeconds: 0, timeout: try arguments.number("--timeout", default: 60.0), onscreen: false, watchdog: false)
+        guard renderer == "custom"
+                || FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
+            throw BenchError.unavailable("no index.html in \(options.previewResources.path); pass --preview-resources")
+        }
+    } catch {
+        fputs("error: \(error.localizedDescription)\n", stderr)
+        exit(2)
+    }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    Task { @MainActor in
+        do { try await Runner(options: options).runTraces(trace) } catch { fail(error) }
         exit(0)
     }
     app.run()

@@ -94,6 +94,8 @@ final class BenchDocument {
     let url: URL
     var text: String
     var previewPosition: CGPoint = .zero
+    /// Bench: the trace edit `text` holds, reported with the render that showed it.
+    var revision = 0
 
     init(url: URL, text: String) {
         self.url = url
@@ -110,6 +112,8 @@ struct RenderTiming {
     /// When the forced layout and the next animation frame finished.
     let rendered: UInt64
     let visibility: String
+    /// The document's `revision` when the render copied its text.
+    var revision = 0
 }
 
 enum BenchError: LocalizedError {
@@ -154,6 +158,8 @@ final class WebKitPreview: NSObject, WKNavigationDelegate {
     private var waiter: CheckedContinuation<RenderTiming, Error>?
     private var waiterID = 0
     private var startup: OSSignpostIntervalState?
+    /// Bench: every render, whether or not anyone waits; the trace replay logs them all.
+    var onRendered: ((RenderTiming) -> Void)?
 
     /// Bench: forces style and layout, then resolves after the next animation frame's
     /// rendering update (requestAnimationFrame, then a zero timeout).
@@ -265,6 +271,7 @@ final class WebKitPreview: NSObject, WKNavigationDelegate {
                 // Copy the unsaved buffer only after the debounce, never on every key.
                 self.renderCount += 1
                 let source = document.text
+                let revision = document.revision // Bench
                 let html = try await interval("renderMarkdown") {
                     try await self.webView.callAsyncJavaScript(
                         "return renderMarkdown(markdown, base)",
@@ -284,7 +291,7 @@ final class WebKitPreview: NSObject, WKNavigationDelegate {
                 if value == self.generation {
                     self.committedGeneration = value
                     self.resetScroll = false
-                    await self.observeRendered(start: start) // Bench
+                    await self.observeRendered(start: start, revision: revision) // Bench
                 }
             } catch {
                 guard value == self.generation else { return }
@@ -340,12 +347,23 @@ final class WebKitPreview: NSObject, WKNavigationDelegate {
 
     // MARK: Bench observation
 
-    private func observeRendered(start: UInt64) async {
+    private func observeRendered(start: UInt64, revision: Int) async {
         let committed = now()
         let state = await interval("frame") {
             (try? await webView.callAsyncJavaScript(Self.frameScript, in: nil, contentWorld: .page)) as? String
         } ?? "error"
-        finish(.success(RenderTiming(start: start, committed: committed, rendered: now(), visibility: state)))
+        let timing = RenderTiming(start: start, committed: committed, rendered: now(), visibility: state, revision: revision)
+        onRendered?(timing)
+        finish(.success(timing))
+    }
+
+    /// Scrolls the page so `fraction` of its height is 30% down the viewport; returns the scroll offset.
+    func scroll(toFraction fraction: Double) async throws -> Double {
+        let y = try await webView.callAsyncJavaScript("""
+            window.scrollTo(0, Math.max(0, fraction * document.documentElement.scrollHeight - innerHeight * 0.3));
+            return window.scrollY;
+            """, arguments: ["fraction": fraction], in: nil, contentWorld: .page)
+        return (y as? Double) ?? 0
     }
 
     /// Waits for the next render of the current generation.

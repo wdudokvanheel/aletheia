@@ -298,7 +298,7 @@ final class Runner {
 
     let options: RunOptions
     let window: NSWindow
-    private var preview: WebKitPreview?
+    var preview: WebKitPreview?
     var customPreview: CustomPreview?
     var timeout: Duration { .milliseconds(Int(options.timeout * 1000)) }
 
@@ -350,14 +350,7 @@ final class Runner {
             idleSeconds: options.idleSeconds, debounceMs: 200,
             previewResources: options.custom ? nil : options.previewResources.path, machine: environment.machine,
             os: environment.os, build: environment.build, git: environment.git, webkit: environment.webkit,
-            window: WindowInfo(width: window.frame.width, height: window.frame.height,
-                               backingScale: window.backingScaleFactor,
-                               screenRefreshHz: window.screen?.maximumFramesPerSecond ?? 0,
-                               displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
-                               placement: options.onscreen ? "onscreen" : "transparent",
-                               occluded: !window.occlusionState.contains(.visible),
-                               occlusionDetection: options.custom ? nil : options.onscreen,
-                               scrollerStyle: options.custom ? (NSScroller.preferredScrollerStyle == .overlay ? "overlay" : "legacy") : nil),
+            window: windowInfo(),
             firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),
             helperAttribution: options.custom ? nil : ProcessMetrics.attribution,
             watchdog: options.watchdog ? WatchdogSettings(limitMs: Self.limitMs, hangSeconds: options.timeout) : nil,
@@ -445,11 +438,21 @@ final class Runner {
         print("wrote \(options.output.path)")
     }
 
-    private func scratchURL() -> URL {
+    func windowInfo() -> WindowInfo {
+        WindowInfo(width: window.frame.width, height: window.frame.height, backingScale: window.backingScaleFactor,
+                   screenRefreshHz: window.screen?.maximumFramesPerSecond ?? 0,
+                   displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+                   placement: options.onscreen ? "onscreen" : "transparent",
+                   occluded: !window.occlusionState.contains(.visible),
+                   occlusionDetection: options.custom ? nil : options.onscreen,
+                   scrollerStyle: options.custom ? (NSScroller.preferredScrollerStyle == .overlay ? "overlay" : "legacy") : nil)
+    }
+
+    func scratchURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("markdown-bench-other.md")
     }
 
-    private func open(_ document: BenchDocument, timeout: Duration? = nil) async throws -> (startup: Double, open: Double) {
+    func open(_ document: BenchDocument, timeout: Duration? = nil) async throws -> (startup: Double, open: Double) {
         dispose()
         return try await interval("open") {
             let start = now()
@@ -549,13 +552,13 @@ final class Runner {
 
     // MARK: Summary table
 
-    private static func pad(_ text: String, _ width: Int, left: Bool = false) -> String {
+    static func pad(_ text: String, _ width: Int, left: Bool = false) -> String {
         let clipped = text.count > width ? "…" + text.suffix(width - 1) : text
         let space = String(repeating: " ", count: max(0, width - clipped.count))
         return left ? clipped + space : space + clipped
     }
 
-    private static func pair(_ summary: Summary?) -> String {
+    static func pair(_ summary: Summary?) -> String {
         summary.map { String(format: "%.1f/%.1f", $0.p50, $0.p95) } ?? "-"
     }
 
