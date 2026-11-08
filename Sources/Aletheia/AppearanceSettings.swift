@@ -151,6 +151,8 @@ final class AppSettings: NSObject {
     static let shared = AppSettings()
     static let didChange = Notification.Name("AletheiaAppearanceDidChange")
     static let colorSchemeKey = "colorScheme"
+    static let revealActiveFileKey = "revealActiveFileInTree"
+    static let revealActiveFileDidChange = Notification.Name("AletheiaRevealActiveFileDidChange")
     static let schemes = AppColorScheme.all
 
     private let defaults: UserDefaults
@@ -159,6 +161,16 @@ final class AppSettings: NSObject {
         Self.schemes.first { $0.id == selectedSchemeID } ?? Self.schemes[0]
     }
     var palette: EditorPalette { selectedScheme.palette }
+    var revealActiveFileInTree: Bool {
+        defaults.object(forKey: Self.revealActiveFileKey) == nil
+            || defaults.bool(forKey: Self.revealActiveFileKey)
+    }
+
+    func setRevealActiveFileInTree(_ enabled: Bool) {
+        guard revealActiveFileInTree != enabled else { return }
+        defaults.set(enabled, forKey: Self.revealActiveFileKey)
+        NotificationCenter.default.post(name: Self.revealActiveFileDidChange, object: self)
+    }
 
     private var settingsWindow: NSWindow?
     private var schemePopup: NSPopUpButton?

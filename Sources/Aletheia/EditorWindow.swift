@@ -149,6 +149,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         buildLayout()
         NotificationCenter.default.addObserver(self, selector: #selector(applyTheme),
             name: AppSettings.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(revealSelectedFile),
+            name: AppSettings.revealActiveFileDidChange, object: AppSettings.shared)
         applyTheme()
         watcher.onChange = { [weak self] paths in
             guard let self, !self.closed else { return }
@@ -241,6 +243,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         if rootURL != url.resolvingSymlinksInPath() { lastMarkdownMode = .split }
         rootURL = url.resolvingSymlinksInPath()
         tree.setRoot(rootURL!)
+        revealSelectedFile()
         updateWatching()
         updateTitle()
     }
@@ -291,12 +294,17 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         selected?.setHighlightingActive(false)
         selected?.detachContent()
         selected = document
+        revealSelectedFile()
         findBar.bind(document?.isEditable == true ? document : nil)
         if document?.isEditable != true { findBar.closeSearch(nil) }
         if let document, document.isMarkdown { lastMarkdownMode = document.markdownMode }
         layoutEditor()
         refreshTabs()
         updateTitle()
+    }
+
+    @objc private func revealSelectedFile() {
+        tree.reveal(AppSettings.shared.revealActiveFileInTree ? selected?.file.requestedURL : nil)
     }
 
     @objc private func changeMarkdownMode(_ sender: NSSegmentedControl) {

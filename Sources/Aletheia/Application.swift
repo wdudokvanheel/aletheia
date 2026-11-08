@@ -95,6 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func save(_ sender: Any?) { if !terminating && !restoring { current?.saveSelected(sender) } }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleRevealActiveFile(_:)) {
+            item.state = AppSettings.shared.revealActiveFileInTree ? .on : .off
+        }
         if item.action == #selector(save(_:)) {
             return !terminating && !restoring && current?.canEditSelected == true
         }
@@ -282,6 +285,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
 
+    @objc private func toggleRevealActiveFile(_ sender: NSMenuItem) {
+        let settings = AppSettings.shared
+        settings.setRevealActiveFileInTree(!settings.revealActiveFileInTree)
+        sender.state = settings.revealActiveFileInTree ? .on : .off
+    }
+
     @objc private func showAbout(_ sender: Any?) {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Aletheia",
@@ -336,6 +345,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(.separator())
         item("Find…", #selector(EditorWindow.showFind(_:)), "f", in: edit)
         item("Replace…", #selector(EditorWindow.showReplace(_:)), "r", in: edit)
+        let view = menu("View")
+        item("Reveal Active File in Tree", #selector(toggleRevealActiveFile(_:)), "", in: view, target: self)
         let window = menu("Window")
         item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", in: window)
         item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), "", in: window)

@@ -34,6 +34,8 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     private var pendingState: FolderTreeState?
     private var failedRestorationPaths = Set<String>()
     private var applyingRestoration = false
+    private var pendingReveal: URL?
+    private var applyingReveal = false
 
     var session: FolderTreeState {
         if let pendingState { return pendingState }
@@ -49,12 +51,59 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func restore(_ state: FolderTreeState) {
+        pendingReveal = nil
         pendingState = state
         failedRestorationPaths.removeAll()
         restoreLoadedBranches()
     }
 
-    @objc private func viewportChanged(_ notification: Notification) { restoreLoadedBranches() }
+    @objc private func viewportChanged(_ notification: Notification) {
+        restoreLoadedBranches()
+        revealLoadedFile()
+    }
+
+    /// Load only the target's ancestors. A newer request (or nil) cancels an unfinished reveal.
+    func reveal(_ url: URL?) {
+        pendingReveal = nil
+        guard let url, let root else { return }
+        let requested = url.standardizedFileURL
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        let rootParts = root.url.standardizedFileURL.pathComponents
+        guard let target = [requested, canonical].first(where: {
+            $0.pathComponents.count > rootParts.count && $0.pathComponents.starts(with: rootParts)
+        }) else { return }
+        pendingReveal = target
+        revealLoadedFile()
+    }
+
+    private func revealLoadedFile() {
+        guard !applyingReveal, pendingState == nil, let target = pendingReveal, let root else { return }
+        applyingReveal = true
+        defer { applyingReveal = false }
+        var node = root
+        for component in target.pathComponents.dropFirst(root.url.standardizedFileURL.pathComponents.count) {
+            guard node.isDirectory else { pendingReveal = nil; return }
+            if node.loading { return }
+            guard let children = node.children else {
+                guard !failedRestorationPaths.contains(node.url.path) else { pendingReveal = nil; return }
+                load(node)
+                return
+            }
+            guard let child = children.first(where: { $0.url.lastPathComponent == component }) else {
+                pendingReveal = nil
+                return
+            }
+            if child.isDirectory { outline.expandItem(child) }
+            node = child
+        }
+        guard scroll.contentSize.width > 0, scroll.contentSize.height > 0 else { return }
+        let row = outline.row(forItem: node)
+        guard row >= 0 else { pendingReveal = nil; return }
+        outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outline.layoutSubtreeIfNeeded()
+        outline.scrollRowToVisible(row)
+        pendingReveal = nil
+    }
 
     private func restoreLoadedBranches() {
         guard !applyingRestoration, let state = pendingState, let root else { return }
@@ -128,6 +177,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func setRoot(_ url: URL) {
+        pendingReveal = nil
         pendingState = nil
         failedRestorationPaths.removeAll()
         root = FolderNode(url: url.resolvingSymlinksInPath(), isDirectory: true)
@@ -256,6 +306,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                     self.load(node, refresh: true)
                 }
                 self.restoreLoadedBranches()
+                self.revealLoadedFile()
             }
         }
     }
@@ -366,7 +417,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
         guard let node = item as? FolderNode else { return true }
-        if !applyingRestoration { pendingState = nil }
+        if !applyingRestoration && !applyingReveal { pendingState = nil }
         node.wantsExpanded = true
         refreshGitStatus()
         updateIcon(node)
@@ -376,13 +427,14 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
         guard let node = item as? FolderNode else { return true }
-        if !applyingRestoration { pendingState = nil }
+        if !applyingRestoration && !applyingReveal { pendingState = nil; pendingReveal = nil }
         node.wantsExpanded = false
         updateIcon(node)
         return true
     }
 
     @objc private func openSelection() {
+        pendingReveal = nil
         pendingState = nil
         guard let node = outline.item(atRow: outline.clickedRow) as? FolderNode else { return }
         if node.isDirectory {

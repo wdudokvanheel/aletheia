@@ -3,6 +3,20 @@ import XCTest
 @testable import Aletheia
 
 final class AppearanceSettingsTests: XCTestCase {
+    @MainActor func testRevealActiveFileDefaultsOnAndPersists() throws {
+        let suite = "AletheiaRevealTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertTrue(settings.revealActiveFileInTree)
+        let changed = expectation(forNotification: AppSettings.revealActiveFileDidChange, object: settings)
+        settings.setRevealActiveFileInTree(false)
+        wait(for: [changed], timeout: 1)
+        XCTAssertFalse(AppSettings(defaults: defaults).revealActiveFileInTree)
+        settings.setRevealActiveFileInTree(true)
+        XCTAssertTrue(AppSettings(defaults: defaults).revealActiveFileInTree)
+    }
+
     @MainActor func testSelectionPersistsAndUnknownValueFallsBackToSystem() throws {
         let suite = "AletheiaAppearanceTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
