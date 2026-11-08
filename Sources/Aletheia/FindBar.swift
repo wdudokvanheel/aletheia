@@ -41,13 +41,14 @@ final class FindBar: NSStackView, NSTextFieldDelegate {
         close.toolTip = "Close search (Escape)"
         replace = button("Replace", #selector(replaceCurrent(_:)))
         replaceAll = button("Replace All", #selector(replaceEveryMatch(_:)))
-        let findRow = NSStackView(views: [query, count, previous, next, close])
+        let findRow = NSStackView()
+        findRow.setViews([query, count, previous, next, close], in: .leading)
         replaceRow.setViews([replacement, replace, replaceAll], in: .leading)
         for row in [findRow, replaceRow] {
             row.orientation = .horizontal
             row.spacing = 6
             addArrangedSubview(row)
-            row.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -16).isActive = true
+            row.widthAnchor.constraint(equalTo: widthAnchor, constant: -16).isActive = true
         }
         for field in [query, replacement] {
             field.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
