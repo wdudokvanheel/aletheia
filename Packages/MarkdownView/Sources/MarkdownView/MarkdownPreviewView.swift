@@ -20,6 +20,10 @@ public final class MarkdownPreviewView: NSScrollView {
     public private(set) var isShown = true
     /// The installed snapshot.
     public var snapshot: MarkdownSnapshot { canvas.snapshot }
+    /// The selected text as positions in the installed snapshot, or nil.
+    public var selection: Range<TextPosition>? { canvas.selection }
+    /// The selection as the plain text Copy writes.
+    public var selectedText: String { canvas.selection.map { canvas.snapshot.text(in: $0) } ?? "" }
 
     let pipeline = RenderPipeline(typography: .standard)
     private let canvas = MarkdownDocumentView(frame: .zero)
@@ -144,7 +148,7 @@ public final class MarkdownPreviewView: NSScrollView {
         let old = canvas.snapshot
         let anchor = sourceGeneration == installedSourceGeneration && old.layouts.count == snapshot.layouts.count
             ? old.anchor(atY: contentView.bounds.minY) : nil
-        canvas.snapshot = snapshot
+        canvas.install(snapshot, sourceChanged: sourceGeneration != installedSourceGeneration)
         installedSourceGeneration = sourceGeneration
         canvas.setFrameSize(NSSize(width: canvas.frame.width, height: snapshot.totalHeight))
         if sourceGeneration == self.sourceGeneration, let fraction = pendingScrollFraction {
@@ -185,20 +189,38 @@ public final class MarkdownPreviewView: NSScrollView {
     }
 }
 
-/// The flipped document view: draws visible blocks and scrolls by keyboard.
+/// The flipped document view: draws visible blocks and the selection, and
+/// handles selection, copy, and keyboard scrolling.
 final class MarkdownDocumentView: NSView {
-    var snapshot = MarkdownSnapshot.empty
+    private(set) var snapshot = MarkdownSnapshot.empty
     var palette = Palette.standard {
         didSet { needsDisplay = true }
     }
     var onDraw: (@MainActor (Duration) -> Void)?
 
+    /// Never empty; nil when nothing is selected.
+    var selection: Range<TextPosition>?
+    /// What the last click selected; drags and shift-clicks extend from it.
+    var selectionAnchor: Range<TextPosition>?
+    var granularity = SelectionGranularity.character
+    /// The pointer during a drag, in window coordinates.
+    var dragLocation = NSPoint.zero
+    var autoscrollTimer: Timer?
+
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+    /// Replaces the snapshot. When the source changed, the selection is
+    /// mapped onto the new blocks; a relayout of the same source keeps it.
+    func install(_ newSnapshot: MarkdownSnapshot, sourceChanged: Bool) {
+        if sourceChanged {
+            let old = snapshot
+            selection = selection.flatMap { newSnapshot.mapRange($0, from: old) }.flatMap { $0.isEmpty ? nil : $0 }
+            selectionAnchor = selectionAnchor.flatMap { newSnapshot.mapRange($0, from: old) }
+                ?? selection.map { $0.lowerBound..<$0.lowerBound }
+        }
+        snapshot = newSnapshot
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -217,14 +239,25 @@ final class MarkdownDocumentView: NSView {
         context.setFillColor(palette.background.cgColor)
         context.fill(dirtyRect)
         let snapshot = snapshot
-        let range = snapshot.blockRange(intersecting: dirtyRect.minY, dirtyRect.maxY)
+        // Lines just outside the dirty area are drawn too, so glyphs that
+        // overhang their line box are not cut off.
+        let clip = dirtyRect.insetBy(dx: 0, dy: -8)
+        let range = snapshot.blockRange(intersecting: clip.minY, clip.maxY)
         guard !range.isEmpty else { return }
+        if let selection {
+            let rects = snapshot.selectionRects(for: selection, minY: dirtyRect.minY, maxY: dirtyRect.maxY)
+            if !rects.isEmpty {
+                context.setFillColor(selectionColor.cgColor)
+                context.addRects(rects)
+                context.fillPath()
+            }
+        }
         let colors = TextRole.allCases.map { palette.color(for: $0).cgColor }
         let codeBackground = palette.codeBackground.cgColor
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         for index in range {
             snapshot.layouts[index].draw(in: context, at: CGPoint(x: snapshot.columnX, y: snapshot.blockTops[index]),
-                                         clip: dirtyRect, colors: colors, codeBackground: codeBackground)
+                                         clip: clip, colors: colors, codeBackground: codeBackground)
         }
     }
 
