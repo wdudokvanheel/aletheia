@@ -83,6 +83,7 @@ enum MarkdownParser {
             spans.append(Span(node: block, kind: Self.kind(of: block), start: start, end: end,
                               lineStart: min(lines.utf8Start(ofLine: startLine) ?? start.utf8, start.utf8)))
         }
+        clampOverlaps(&spans, bytes, lines)
 
         let definitions = Self.definitions(in: bytes, spans: spans)
         var match: BlockMatch?
@@ -123,6 +124,36 @@ enum MarkdownParser {
             document: MarkdownDocument(blocks: blocks, sourceUTF16Count: lines.utf16Count, definitions: definitions),
             match: match,
             edit: sourceEdit(from: previous, to: bytes, lines: lines))
+    }
+
+    /// Ends each block before the next one starts. cmark ends a setext
+    /// heading where it noticed the heading was over, at the end of the
+    /// line after its underline, which may be the first line of the next
+    /// block; such a block is ended at its own last line instead. Blocks
+    /// without a position move to the end of the block before them.
+    private static func clampOverlaps(_ spans: inout [Span], _ bytes: UnsafeBufferPointer<UInt8>, _ lines: LineIndex) {
+        var next = bytes.count
+        for index in spans.indices.reversed() where spans[index].isPositioned {
+            let span = spans[index]
+            if span.end.utf8 > next {
+                var end = max(next, span.start.utf8)
+                while end > span.start.utf8, [0x0A, 0x0D, 0x20, 0x09].contains(bytes[end - 1]) { end -= 1 }
+                spans[index] = Span(node: span.node, kind: span.kind, start: span.start,
+                                    end: (end, lines.utf16Offset(ofUTF8: end)), lineStart: span.lineStart,
+                                    isPositioned: true, isFrontMatter: span.isFrontMatter)
+            }
+            next = min(next, spans[index].start.utf8)
+        }
+        var previousEnd = (utf8: 0, utf16: 0)
+        for index in spans.indices {
+            if !spans[index].isPositioned, spans[index].start.utf8 != previousEnd.utf8 {
+                var span = Span(node: spans[index].node, kind: spans[index].kind, start: previousEnd, end: previousEnd,
+                                lineStart: previousEnd.utf8)
+                span.isPositioned = false
+                spans[index] = span
+            }
+            if spans[index].end.utf8 >= previousEnd.utf8 { previousEnd = spans[index].end }
+        }
     }
 
     /// What building display content needs, shared read-only across

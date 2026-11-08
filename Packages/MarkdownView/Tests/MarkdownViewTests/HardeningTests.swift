@@ -101,4 +101,46 @@ final class HardeningTests: XCTestCase {
         let range = snapshot.unitRange(at: TextPosition(block: 0, offset: 5), granularity: .word)
         XCTAssertEqual(snapshot.text(in: range), "alpha")
     }
+
+    // MARK: Setext headings (F8)
+
+    func testASetextHeadingEndsAtItsUnderline() throws {
+        let markdown = "Title\n-----\nNext line.\n"
+        let blocks = try MarkdownDocument.parse(markdown).blocks
+        XCTAssertEqual(blocks.map(\.kind), [.heading(level: 2), .paragraph])
+        XCTAssertEqual(blocks[0].sourceRange, 0..<11)
+        XCTAssertEqual(blocks[0].sourceText, "Title\n-----")
+        XCTAssertEqual(blocks[1].sourceRange, 12..<22)
+        for markdown in ["Title\n=====\n- item\n- two\n", "A\nB\n===\n  indented para\n", "T\n-\n<div>\n", "T\r\n=\r\nnext\r\n",
+                         "T\n===\n| a |\n|---|\n", "Title\n=====\n\nNext\n"] {
+            let blocks = try MarkdownDocument.parse(markdown).blocks
+            let source = markdown as NSString
+            for index in blocks.indices {
+                let range = blocks[index].sourceRange
+                XCTAssertEqual(source.substring(with: NSRange(location: range.lowerBound, length: range.count)),
+                               blocks[index].sourceText, markdown.debugDescription)
+                if index > 0 {
+                    XCTAssertGreaterThanOrEqual(range.lowerBound, blocks[index - 1].sourceRange.upperBound,
+                                                markdown.debugDescription)
+                }
+            }
+        }
+    }
+
+    func testTypingBelowASetextHeadingKeepsScrollAndSelection() throws {
+        let items = (1...60).map { "- item \($0) with some words" }
+        var edited = items
+        edited[40] += " typed"
+        let base = "Intro para.\n\nTitle\n=====\n" + items.joined(separator: "\n") + "\n"
+        let text = "Intro para.\n\nTitle\n=====\n" + edited.joined(separator: "\n") + "\n"
+        let old = MarkdownSnapshot.layOut(try MarkdownDocument.parse(base), width: 700)
+        let new = try MarkdownSnapshot.updating(old, to: text, width: 700).snapshot
+        let list = try XCTUnwrap(old.document.blocks.firstIndex { $0.kind == .list })
+        let y = old.blockTops[list] + 300
+        let update = try XCTUnwrap(new.update(from: old))
+        XCTAssertEqual(new.anchoredY(y, from: old, through: update), new.blockTops[list] + 300, accuracy: 0.01)
+        let selection = TextPosition(block: list, offset: 2)..<TextPosition(block: list, offset: 6)
+        let mapped = try XCTUnwrap(new.mapRange(selection, from: old))
+        XCTAssertEqual(new.text(in: mapped), old.text(in: selection))
+    }
 }
