@@ -1,0 +1,80 @@
+import CoreText
+import XCTest
+@testable import MarkdownView
+
+/// Regressions found by the Phase 9 robustness sweep.
+final class HardeningTests: XCTestCase {
+    // MARK: U+FEFF (F1)
+
+    /// Blocks whose display text starts with U+FEFF, which Core Foundation
+    /// drops as a byte order mark when it converts UTF-8: from the fuzz
+    /// cases and the two corpus files that start with a line break and one.
+    private let byteOrderMarkFixtures = [
+        "a\n\n\u{FEFF}b",
+        "a\n\n\u{FEFF}bc **d** [link](https://example.com) `code` e",
+        "\n\u{FEFF}# umockstring requirements\n\n# Overview\n\numockstring is a module that provides the functionality of "
+            + "cloning a string (allocating memory and copying the chars).\n\n# Exposed API\n\n```c\n"
+            + "extern char* umockstring_clone(const char* source);\n```\n",
+        "\n\u{FEFF}# umocktypes_bool requirements\n\n# Overview\n\numocktypes_c is a module that exposes out of the box "
+            + "functionality for bool and \\_Bool for umock_c.\n\n# Exposed API\n\n```c\n"
+            + "    extern int umocktypes_bool_register_types(void);\n```\n",
+        "# \u{FEFF}Heading",
+        "- \u{FEFF}item one\n- \u{FEFF}item two",
+        "> \u{FEFF}quoted",
+        "```\n\u{FEFF}code line\nsecond\n```",
+        "| \u{FEFF}x | y |\n|---|---|\n| \u{FEFF}z | w |\n| \u{FEFF}\u{FEFF} | \u{FEFF} |",
+        "\u{FEFF}" + String(repeating: "long words wrap here ", count: 300),
+        "\u{FEFF}\u{FEFF}\u{FEFF}",
+    ]
+
+    func testTextStartingWithAByteOrderMarkKeepsItsLength() throws {
+        for markdown in byteOrderMarkFixtures {
+            let document = try MarkdownDocument.parse(markdown)
+            for block in document.blocks {
+                let length = block.text.utf16.count
+                guard length > 0 else { continue }
+                let text = try XCTUnwrap(BlockLayout.makeText(block))
+                XCTAssertEqual(CFStringGetLength(text), length, markdown.debugDescription)
+            }
+            for width: CGFloat in [120, 700] {
+                let snapshot = MarkdownSnapshot.layOut(document, width: width)
+                assertLinesCoverText(snapshot, markdown)
+            }
+        }
+    }
+
+    func testTheCorpusByteOrderMarkParagraphIsOneLine() throws {
+        let snapshot = MarkdownSnapshot.layOut(try MarkdownDocument.parse(byteOrderMarkFixtures[2]), width: 900)
+        let block = try XCTUnwrap(snapshot.document.blocks.first)
+        XCTAssertEqual(block.text, "\u{FEFF}# umockstring requirements")
+        XCTAssertEqual(snapshot.layouts[0].lines.map(\.range), [0..<27])
+    }
+
+    /// Every display unit but separators is on a line or in a cell, and no
+    /// line reaches past the text.
+    private func assertLinesCoverText(_ snapshot: MarkdownSnapshot, _ context: String,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        for (index, layout) in snapshot.layouts.enumerated() {
+            let text = Array(snapshot.document.blocks[index].text.utf16)
+            var covered = [Bool](repeating: false, count: text.count)
+            for textLine in layout.lines {
+                XCTAssertLessThanOrEqual(textLine.range.upperBound, text.count, context, file: file, line: line)
+                for offset in textLine.range where offset < text.count { covered[offset] = true }
+            }
+            for table in layout.tables {
+                for row in table.rows.indices {
+                    for column in 0..<table.structure.columnCount {
+                        let start = table.textOffset(row: row, column: column)
+                        for cellLine in table.rows[row].lines(ofCell: column) {
+                            for offset in cellLine.range where start + offset < text.count { covered[start + offset] = true }
+                        }
+                    }
+                }
+            }
+            for offset in text.indices where !covered[offset] && text[offset] != 0x0A && text[offset] != 0x09 {
+                XCTFail("block \(index) offset \(offset) is on no line: \(context.debugDescription)", file: file, line: line)
+                break
+            }
+        }
+    }
+}

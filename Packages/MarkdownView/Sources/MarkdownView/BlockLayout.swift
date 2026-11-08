@@ -236,12 +236,28 @@ public final class BlockLayout: @unchecked Sendable {
         drawsImages = builder.drawsImages || builder.tables.contains { $0.drawsImages }
     }
 
-    /// The block's display text as a Core Foundation string.
+    /// The block's display text as a Core Foundation string of the same
+    /// length, so offsets in the display text are offsets in it.
     static func makeText(_ block: MarkdownBlock) -> CFString? {
-        var text = block.text
-        return text.withUTF8 { bytes in
-            CFStringCreateWithBytes(nil, bytes.baseAddress, bytes.count, CFStringBuiltInEncodings.UTF8.rawValue, false)
+        makeText(block.text, length: block.text.utf16.count)
+    }
+
+    /// `text`, `length` UTF-16 units long, as a Core Foundation string of
+    /// that length. Converting UTF-8 is fastest, but Core Foundation reads
+    /// a leading U+FEFF there as a byte order mark and drops it; that text
+    /// is converted from UTF-16 instead.
+    static func makeText(_ text: String, length: Int) -> CFString? {
+        var text = text
+        if !text.utf8.starts(with: [0xEF, 0xBB, 0xBF]),
+           let string = text.withUTF8({ bytes in
+               CFStringCreateWithBytes(nil, bytes.baseAddress, bytes.count, CFStringBuiltInEncodings.UTF8.rawValue, false)
+           }), CFStringGetLength(string) == length {
+            return string
         }
+        let units = Array(text.utf16)
+        let string = CFStringCreateWithCharacters(nil, units, units.count)
+        assert(string.map(CFStringGetLength) == length, "the Core Text string keeps the display length")
+        return string
     }
 
     /// `string` with the fonts of `runs`, which cover it in order, without

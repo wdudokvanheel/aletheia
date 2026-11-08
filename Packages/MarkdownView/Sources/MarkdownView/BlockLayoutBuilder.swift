@@ -75,7 +75,7 @@ struct BlockLayoutBuilder {
         guard !isDropped else { return (0, 0, 0) }
         let segments = block.segments.isEmpty ? Self.segments(of: block, textLength: textLength) : block.segments
         let containers = block.containers
-        if !isEstimate, textLength > 0 { text = BlockLayout.makeText(block) }
+        if !isEstimate, textLength > 0 { text = BlockLayout.makeText(block.text, length: textLength) }
         if !isEstimate, !block.images.isEmpty {
             imageSizes = block.images.map { BlockLayout.size($0.source, in: images) }
             imageWidths = [CGFloat](repeating: 0, count: block.images.count)
