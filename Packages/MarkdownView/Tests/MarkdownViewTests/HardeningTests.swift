@@ -102,6 +102,35 @@ final class HardeningTests: XCTestCase {
         XCTAssertEqual(snapshot.text(in: range), "alpha")
     }
 
+    // MARK: Inline code next to emoji (F6)
+
+    func testEmojiTouchingInlineCodeKeepsItsGlyph() throws {
+        for markdown in ["x `a👍` y", "x 👍`code` y", "x `👩🏽‍💻` y", "x 🇳🇱`c` y", "| `a👍` | 👍`b` |\n|---|---|\n"] {
+            let snapshot = MarkdownSnapshot.layOut(try MarkdownDocument.parse(markdown), width: 700)
+            let layout = snapshot.layouts[0]
+            let lines = layout.lines + layout.tables.flatMap { $0.rows.flatMap(\.lines) }
+            for line in lines {
+                for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
+                    let font = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName as String].map { $0 as! CTFont }
+                    let name = font.map { CTFontCopyPostScriptName($0) as String } ?? ""
+                    XCTAssertFalse(name.contains("LastResort"), markdown)
+                }
+            }
+        }
+    }
+
+    func testInlineCodePaddingBesideAnEmojiIsOnePadding() throws {
+        let padding = Typography.standard.inlineCodePadding
+        let plain = MarkdownSnapshot.layOut(try MarkdownDocument.parse("x 👍"), width: 700).layouts[0].lines[0].line
+        let touching = MarkdownSnapshot.layOut(try MarkdownDocument.parse("x 👍`code` y"), width: 700).layouts[0].lines[0].line
+        let emoji = CTLineGetOffsetForStringIndex(plain, 4, nil) - CTLineGetOffsetForStringIndex(plain, 2, nil)
+        // The emoji spans offsets 2 to 4; the code's glyphs start one padding after it.
+        let code = try XCTUnwrap((CTLineGetGlyphRuns(touching) as? [CTRun])?.first { CTRunGetStringRange($0).location == 4 })
+        var origin = CGPoint.zero
+        CTRunGetPositions(code, CFRange(location: 0, length: 1), &origin)
+        XCTAssertEqual(origin.x - CTLineGetOffsetForStringIndex(touching, 2, nil), emoji + padding, accuracy: 0.5)
+    }
+
     // MARK: Setext headings (F8)
 
     func testASetextHeadingEndsAtItsUnderline() throws {

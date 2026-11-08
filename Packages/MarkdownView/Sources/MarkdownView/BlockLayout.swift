@@ -282,14 +282,17 @@ public final class BlockLayout: @unchecked Sendable {
         }
         images?.apply(to: attributed)
         // Room for the padding beside inline code, as kerning after the
-        // character before it and after its last character.
+        // character before it and after its last character: on the whole
+        // composed character, since an attribute run that splits a
+        // surrogate pair or a cluster leaves Core Text nothing to shape.
         let padding = typography.inlineCodePadding as NSNumber
         for run in runs where run.styles.contains(.code) && run.range.upperBound <= length {
             let before = run.range.lowerBound - 1
             if before >= 0, CFStringGetCharacterAtIndex(string, before) != 0x0A {
-                CFAttributedStringSetAttribute(attributed, CFRange(location: before, length: 1), kCTKernAttributeName, padding)
+                CFAttributedStringSetAttribute(attributed, CFStringGetRangeOfComposedCharactersAtIndex(string, before),
+                                               kCTKernAttributeName, padding)
             }
-            CFAttributedStringSetAttribute(attributed, CFRange(location: run.range.upperBound - 1, length: 1),
+            CFAttributedStringSetAttribute(attributed, CFStringGetRangeOfComposedCharactersAtIndex(string, run.range.upperBound - 1),
                                            kCTKernAttributeName, padding)
         }
         CFAttributedStringEndEditing(attributed)
