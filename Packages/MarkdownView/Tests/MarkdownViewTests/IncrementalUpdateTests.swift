@@ -77,7 +77,9 @@ final class IncrementalUpdateTests: XCTestCase {
             let edits: [Edit]
         }
         let directory = try generatedFile("traces")
-        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasSuffix(".json") }.sorted()
+        // The five traces on 100 KiB documents; their 1 MiB versions are for the bench.
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasSuffix(".json") && !$0.hasSuffix("-1m.json") }.sorted()
         XCTAssertEqual(names.count, 5)
         for name in names {
             let trace = try JSONDecoder().decode(Trace.self, from: Data(contentsOf: directory.appendingPathComponent(name)))
