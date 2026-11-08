@@ -521,6 +521,13 @@ final class MarkdownDocumentView: NSView {
     var autoscrollTimer: Timer?
     /// The link a click started on, until the pointer moves too far to open it.
     var pressedLink: (destination: String, point: CGPoint)?
+    /// Where a click on the selection started, until it drags the selected
+    /// text or ends as a click.
+    var pressedSelection: CGPoint?
+    /// Starts a drag of the selected text; replaced in tests.
+    var beginDragging: (MarkdownDocumentView, [NSDraggingItem], NSEvent) -> Void = { view, items, event in
+        view.beginDraggingSession(with: items, event: event, source: view)
+    }
     /// How far each code block wider than its box is scrolled left.
     var codeOffsets: CodeOffsets = [:]
     /// Which way the current scroll gesture goes: decided by its first

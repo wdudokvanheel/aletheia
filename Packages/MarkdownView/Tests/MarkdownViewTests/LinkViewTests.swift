@@ -90,7 +90,9 @@ final class LinkViewTests: XCTestCase {
         click(at: point(17), clicks: 3)
         XCTAssertEqual(view.selectedText, "Read the linked words here and more text after it.")
         XCTAssertEqual(opened.count, 1)
-        // Shift-click on a link extends the selection without opening.
+        // Shift-click on a link extends the selection without opening. (A drag
+        // inside the selection would drag the selected text out.)
+        view.clearSelection()
         click(at: point(1), dragTo: point(4))
         opened = []
         click(at: point(12), flags: .shift)

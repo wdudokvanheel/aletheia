@@ -1,13 +1,16 @@
 import AppKit
 
-/// Mouse selection, copy, the context menu, and Services for the document
-/// view. Work per event is a binary search plus the lines of the blocks the
-/// selection ends in, and only the lines between the moved ends redraw.
-extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations, @preconcurrency NSServicesMenuRequestor {
+/// Mouse selection, copy, dragging, the context menu, and Services for the
+/// document view. Work per event is a binary search plus the lines of the
+/// blocks the selection ends in, and only the lines between the moved ends
+/// redraw.
+extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations, NSDraggingSource,
+    @preconcurrency NSServicesMenuRequestor {
     // MARK: Mouse
 
     /// How far the pointer may move during a click on a link before the
-    /// click becomes a drag that selects.
+    /// click becomes a drag that selects, or during a click on the
+    /// selection before it becomes a drag of the selected text.
     static let linkDragDistance: CGFloat = 4
 
     override func mouseDown(with event: NSEvent) {
@@ -18,12 +21,25 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
         // Only a plain single click opens; double and triple clicks select.
         pressedLink = event.clickCount == 1 && !extending
             ? snapshot.linkDestination(at: point, codeOffsets: codeOffsets).map { ($0, point) } : nil
+        // On the selected text, a plain click waits to see whether it drags
+        // the text or ends as a click.
+        if event.clickCount == 1, !extending, isOnSelection(point) {
+            pressedSelection = point
+            return
+        }
         beginSelection(at: point, clickCount: event.clickCount, extending: extending)
     }
 
     override func mouseDragged(with event: NSEvent) {
         dragLocation = event.locationInWindow
         let point = convert(event.locationInWindow, from: nil)
+        if let pressed = pressedSelection {
+            guard hypot(point.x - pressed.x, point.y - pressed.y) >= Self.linkDragDistance else { return }
+            pressedSelection = nil
+            pressedLink = nil
+            dragSelection(with: event)
+            return
+        }
         if let pressedLink {
             guard hypot(point.x - pressedLink.point.x, point.y - pressedLink.point.y) >= Self.linkDragDistance else { return }
             self.pressedLink = nil
@@ -34,9 +50,53 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
 
     override func mouseUp(with event: NSEvent) {
         stopAutoscroll()
+        if let pressed = pressedSelection {
+            // A click on the selection that did not drag selects nothing, as anywhere else.
+            pressedSelection = nil
+            beginSelection(at: pressed, clickCount: 1, extending: false)
+        }
         guard let pressedLink else { return }
         self.pressedLink = nil
         onOpenLink?(pressedLink.destination)
+    }
+
+    /// Whether `point` is on the selection's highlight.
+    func isOnSelection(_ point: CGPoint) -> Bool {
+        guard let selection else { return false }
+        return snapshot.selectionRects(for: selection, minY: point.y - 1, maxY: point.y + 1, codeOffsets: codeOffsets)
+            .contains { $0.contains(point) }
+    }
+
+    // MARK: Dragging
+
+    /// Drags the selected text out, with the flavors Copy writes. The image
+    /// is the visible part of the selected lines as drawn.
+    private func dragSelection(with event: NSEvent) {
+        guard let selection else { return }
+        let item = NSDraggingItem(pasteboardWriter: RichTextProvider.item(for: snapshot, range: selection))
+        var frame = snapshot.lineBand(selection.lowerBound, selection.upperBound).intersection(visibleRect)
+        if frame.isNull || frame.isEmpty {
+            let point = convert(event.locationInWindow, from: nil)
+            frame = CGRect(x: point.x - 8, y: point.y - 8, width: 16, height: 16)
+        }
+        item.setDraggingFrame(frame, contents: dragImage(of: frame))
+        beginDragging(self, [item], event)
+    }
+
+    /// The view's drawing of `rect`, without reporting it as a draw.
+    private func dragImage(of rect: CGRect) -> NSImage? {
+        guard let bitmap = bitmapImageRepForCachingDisplay(in: rect) else { return nil }
+        let reportsDraw = onDraw
+        onDraw = nil
+        cacheDisplay(in: rect, to: bitmap)
+        onDraw = reportsDraw
+        let image = NSImage(size: rect.size)
+        image.addRepresentation(bitmap)
+        return image
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
     }
 
     // MARK: Cursor
@@ -194,7 +254,16 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     }
 
     @objc func copy(_ sender: Any?) {
-        _ = writeSelection(to: .general, types: [.string])
+        writeCopy(to: .general)
+    }
+
+    /// Writes the selection as Copy does: plain text at once, RTF and HTML
+    /// when a receiver asks for them.
+    @discardableResult
+    func writeCopy(to pasteboard: NSPasteboard) -> Bool {
+        guard let selection else { return false }
+        pasteboard.clearContents()
+        return pasteboard.writeObjects([RichTextProvider.item(for: snapshot, range: selection)])
     }
 
     @objc func lookUpSelection(_ sender: Any?) {
