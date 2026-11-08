@@ -139,6 +139,50 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         preview.prepareForRelease()
     }
 
+    @MainActor func testShowingADocumentAgainReusesItsLayouts() async throws {
+        _ = NSApplication.shared
+        let urls = try ["First", "Second", "Third"].map { try temporaryMarkdown(longMarkdown($0)) }
+        defer { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let a = EditorDocument(file: try TextFile.read(urls[0]))
+        var b: EditorDocument? = EditorDocument(file: try TextFile.read(urls[1]))
+        let c = EditorDocument(file: try TextFile.read(urls[2]))
+        let preview = CustomMarkdownPreview()
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        func shown(_ title: String) -> Bool {
+            preview.preview.snapshot.isComplete && preview.preview.snapshot.document.blocks.first?.text == title
+        }
+        preview.show(a)
+        try await eventually { shown("First") }
+        let layouts = preview.preview.snapshot.layouts
+        preview.show(b)
+        try await eventually { shown("Second") }
+        XCTAssertEqual(preview.keptSnapshotCount, 1)
+
+        preview.show(a)
+        try await eventually { shown("First") }
+        XCTAssertTrue(zip(preview.preview.snapshot.layouts, layouts).allSatisfy { $0 === $1 }, "every block reused")
+        XCTAssertEqual(preview.keptSnapshotCount, 1, "the second document's")
+
+        // Edited while not shown: only the changed block is laid out again.
+        preview.show(c)
+        try await eventually { shown("Third") }
+        a.editor.insertText(" edited", replacementRange: NSRange(location: 7, length: 0))
+        preview.show(a)
+        try await eventually { shown("First edited") }
+        let reused = zip(preview.preview.snapshot.layouts, layouts).count(where: { $0 === $1 })
+        XCTAssertEqual(reused, layouts.count - 1)
+
+        // A closed document's snapshot goes with it.
+        weak var closed = b
+        b = nil
+        XCTAssertNil(closed)
+        preview.show(c)
+        try await eventually { shown("Third") }
+        XCTAssertEqual(preview.keptSnapshotCount, 1, "only the first document's")
+        preview.prepareForRelease()
+        XCTAssertEqual(preview.keptSnapshotCount, 0)
+    }
+
     @MainActor func testLinkClicksFollowTheWebKitRules() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let folder = root.appendingPathComponent("docs")

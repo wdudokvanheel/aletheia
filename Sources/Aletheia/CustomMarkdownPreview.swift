@@ -3,6 +3,10 @@ import MarkdownView
 
 /// The experimental Core Text renderer from the MarkdownView package. Unlike
 /// WebKit it stays alive in hidden windows: it keeps its snapshot and pauses.
+///
+/// It also keeps each document's last snapshot while another document is
+/// shown and hands it back when that document is shown again, so its
+/// unchanged blocks keep their layouts instead of starting cold.
 @MainActor
 final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     let preview = MarkdownPreviewView(frame: .zero)
@@ -21,6 +25,20 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     private var restoring = false
     /// The diagnostics overlay: the last update's phase times.
     let timingsLabel = NSTextField(labelWithString: "")
+    /// The last snapshot of each document not shown, weakly keyed by the
+    /// document: entries of documents that are gone are dropped on the next
+    /// `show(_:)`.
+    private var kept: [ObjectIdentifier: KeptSnapshot] = [:]
+    /// The document the installed snapshot shows.
+    private weak var installedDocument: EditorDocument?
+
+    private struct KeptSnapshot {
+        weak var document: EditorDocument?
+        let snapshot: MarkdownSnapshot
+    }
+
+    /// Documents with a kept snapshot; for tests.
+    var keptSnapshotCount: Int { kept.count }
 
     override init() {
         super.init()
@@ -48,6 +66,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
 
     func show(_ document: EditorDocument?) {
         let changed = self.document !== document || document == nil
+        if changed { keepSnapshot() }
         self.document = document
         guard let document else {
             nextFraction = nil
@@ -59,8 +78,14 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
         }
         guard changed || stale else { return }
         stale = false
-        preview.setSource(document.editor.string)
-        guard changed else { return }
+        guard changed else {
+            preview.setSource(document.editor.string)
+            return
+        }
+        let reusable = kept.removeValue(forKey: ObjectIdentifier(document)).flatMap {
+            $0.document === document ? $0.snapshot : nil
+        }
+        preview.setSource(document.editor.string, reusing: reusable)
         preview.clearSelection()
         restoring = true
         // Set after the source, so it applies to that source's snapshot.
@@ -110,6 +135,25 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     func prepareForRelease() {
         document = nil
         preview.setSource("")
+        release(kept.values.map(\.snapshot))
+        kept.removeAll()
+    }
+
+    /// Keeps the snapshot of the document being replaced, if the installed
+    /// snapshot shows it, and drops those of documents that are gone.
+    private func keepSnapshot() {
+        let gone = kept.filter { $0.value.document == nil }
+        for key in gone.keys { kept[key] = nil }
+        release(gone.values.map(\.snapshot))
+        guard let outgoing = document, installedDocument === outgoing else { return }
+        kept[ObjectIdentifier(outgoing)] = KeptSnapshot(document: outgoing, snapshot: preview.snapshot)
+    }
+
+    /// Frees snapshots on a background queue, so their layouts never cost
+    /// main-thread time.
+    private func release(_ snapshots: [MarkdownSnapshot]) {
+        guard !snapshots.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async { withExtendedLifetime(snapshots) {} }
     }
 
     func scrollFraction() async -> Double? {
@@ -122,6 +166,8 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     /// The library applies the position set in `show(_:)` on the shown
     /// document's complete snapshot, before this runs and before it draws.
     private func didInstall(_ snapshot: MarkdownSnapshot) {
+        // After `show(_:)`, only the shown document's sources install.
+        installedDocument = document
         guard restoring, snapshot.isComplete else { return }
         restoring = false
         recordPosition()
