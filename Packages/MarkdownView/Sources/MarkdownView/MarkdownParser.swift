@@ -143,6 +143,7 @@ enum MarkdownParser {
         }
         block.segments = display.segments
         block.containers = display.containers
+        block.tables = display.tables
         return block
     }
 
@@ -249,7 +250,7 @@ private enum ExtensionNode {
         guard let name = cmark_node_get_type_string(node) else { return nil }
         if strcmp(name, "table_cell") == 0 { self = .cell }
         else if strcmp(name, "strikethrough") == 0 { self = .strikethrough }
-        else if strcmp(name, "table_row") == 0 { self = .row }
+        else if strcmp(name, "table_row") == 0 || strcmp(name, "table_header") == 0 { self = .row }
         else if strcmp(name, "table") == 0 { self = .table }
         else { return nil }
     }
@@ -349,6 +350,7 @@ private struct DisplayText {
     var anchors: [SourceMap.Anchor] = []
     private(set) var segments: [BlockSegment] = []
     private(set) var containers: [BlockContainer] = []
+    private(set) var tables: [TableStructure] = []
     private(set) var utf16Count = 0
     private var role = TextRole.body
     private var styles: InlineStyle = []
@@ -376,6 +378,13 @@ private struct DisplayText {
     private var segmentStart: Int?
     /// The newline owed before the next text, in the role of the text before it.
     private var pendingSeparator: (role: TextRole, styles: InlineStyle)?
+    /// The table being walked, and the 1-based source line of each of its rows.
+    private var table: TableStructure?
+    private var tableRowLines: [Int32] = []
+    private var cellStart = 0
+    /// In a table body row, the end of its source line, which its text
+    /// never passes.
+    private var rowEnd: Int?
 
     /// The whole document and the block's UTF-8 range in it.
     private let source: UnsafeBufferPointer<UInt8>
@@ -489,15 +498,72 @@ private struct DisplayText {
                     if entering {
                         beginSegment()
                         role = quoteDepth > 0 ? .quote : .body
+                        // Cells record where their text starts, so the newline
+                        // owed before the table comes first.
+                        flushSeparator()
+                        beginTable(node)
                     } else {
+                        endTable(node)
                         endSegment(.table)
                     }
-                case .row where entering: if cmark_node_previous(node) != nil { appendByte(0x0A) }
-                case .cell where entering: if cmark_node_previous(node) != nil { appendByte(0x09) }
+                case .row where entering:
+                    if cmark_node_previous(node) != nil { appendByte(0x0A) }
+                    let line = cmark_node_get_start_line(node)
+                    tableRowLines.append(line)
+                    // cmark gives the header row another line; see `endTable`.
+                    rowEnd = cmark_node_previous(node) == nil ? nil : min(lines.utf8Start(ofLine: line + 1) ?? blockEnd, blockEnd)
+                case .cell:
+                    if entering {
+                        if cmark_node_previous(node) != nil { appendByte(0x09) }
+                        cellStart = utf16Count
+                    } else {
+                        table?.cells.append(Int32(clamping: cellStart)..<Int32(clamping: utf16Count))
+                    }
                 default: break
                 }
             }
         }
+    }
+
+    // MARK: Tables
+
+    private mutating func beginTable(_ node: UnsafeMutablePointer<cmark_node>) {
+        let columns = Int(cmark_gfm_extensions_get_table_columns(node))
+        let alignments = cmark_gfm_extensions_get_table_alignments(node)
+        table = TableStructure(alignments: (0..<columns).map { column in
+            switch alignments?[column] {
+            case UInt8(ascii: "l"): .left
+            case UInt8(ascii: "c"): .center
+            case UInt8(ascii: "r"): .right
+            default: .none
+            }
+        }, hasHeader: true, isQuoted: quoteDepth > 0)
+        tableRowLines.removeAll(keepingCapacity: true)
+    }
+
+    /// Records each row's source line. cmark gives the header row the line
+    /// where the table's paragraph started, so it is taken as the line
+    /// before the delimiter row instead, which precedes the first body row
+    /// or ends the table.
+    private mutating func endTable(_ node: UnsafeMutablePointer<cmark_node>) {
+        rowEnd = nil
+        guard var table else { return }
+        self.table = nil
+        let rows = table.cells.count / max(table.columnCount, 1)
+        guard rows > 0, rows == tableRowLines.count, table.cells.count == rows * table.columnCount else { return }
+        let delimiter = rows > 1 ? tableRowLines[1] - 1 : cmark_node_get_end_line(node)
+        tableRowLines[0] = max(delimiter - 1, 1)
+        table.rowLines.reserveCapacity(rows)
+        table.rowSourceStarts.reserveCapacity(rows)
+        for line in tableRowLines {
+            let start = lines.offsets(source, line: line, byteInLine: 0)
+            var end = min(lines.utf8Start(ofLine: line + 1) ?? blockEnd, blockEnd)
+            while end > start.utf8, source[end - 1] == 0x0A || source[end - 1] == 0x0D { end -= 1 }
+            let first = max(start.utf8, blockStart.utf8)
+            table.rowLines.append(Int32(clamping: first - blockStart.utf8)..<Int32(clamping: max(end, first) - blockStart.utf8))
+            table.rowSourceStarts.append(Int32(clamping: max(start.utf16, blockStart.utf16) - blockStart.utf16))
+        }
+        tables.append(table)
     }
 
     // MARK: Structure
@@ -671,7 +737,12 @@ private struct DisplayText {
     /// one after it. False, with nothing anchored, when the source does not
     /// hold the text there, as when cmark's position is off in some
     /// containers and for autolinks.
+    ///
+    /// In a table row the text may run on past cmark's end, to the line's
+    /// end: cmark positions cell text after unescaping `\|`, one byte short
+    /// for each.
     private mutating func align(_ text: UnsafeBufferPointer<UInt8>, from start: Int, to end: Int) -> Bool {
+        let end = max(end, rowEnd ?? end)
         var pieces = [(display: 0, utf8: start)]
         var index = 0
         var position = start
@@ -727,7 +798,7 @@ private struct DisplayText {
     /// or at that point when it is not found nearby.
     private mutating func mapBySearch(_ text: UnsafeBufferPointer<UInt8>) {
         var location = cursor
-        if let found = find(text, in: cursor..<min(blockEnd, cursor + 4096)) {
+        if let found = find(text, in: cursor..<max(min(blockEnd, cursor + 4096, rowEnd ?? .max), cursor)) {
             location = found
             cursor = found + text.count
         }

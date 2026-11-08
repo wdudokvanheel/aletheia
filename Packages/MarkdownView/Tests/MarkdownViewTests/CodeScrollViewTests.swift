@@ -130,6 +130,24 @@ final class CodeScrollViewTests: XCTestCase {
         XCTAssertTrue(view.selectedText.hasPrefix("token"), view.selectedText)
     }
 
+    func testAWideTableScrollsAndKeepsItsOffsetWhileItsCellsAreEdited() throws {
+        func table(_ cell: String) -> String {
+            "Intro paragraph.\n\n| " + (0..<16).map { "Column \($0)" }.joined(separator: " | ") + " |\n|"
+                + String(repeating: " --- |", count: 16) + "\n| " + cell + " | "
+                + (1..<16).map { "value \($0)" }.joined(separator: " | ") + " |"
+        }
+        load(table("first"))
+        let id = CodeBlockID(block: 1, code: 0)
+        let box = try XCTUnwrap(view.snapshot.codeBlockRect(id))
+        XCTAssertTrue(try XCTUnwrap(view.snapshot.codeBlockLayout(id)).isTable)
+        scroll(at: CGPoint(x: box.midX, y: box.midY), dx: -300)
+        XCTAssertEqual(canvas.codeOffsets[id], 300)
+        load(table("edited"))
+        XCTAssertEqual(canvas.codeOffsets[id], 300, "typing in a cell keeps the table where it was")
+        load("New paragraph.\n\n" + table("edited"))
+        XCTAssertEqual(canvas.codeOffsets, [CodeBlockID(block: 2, code: 0): 300])
+    }
+
     func testAnEditElsewhereKeepsTheOffsetAndAnEditToTheBlockResetsIt() {
         load(source)
         scroll(at: codeCenter, dx: -150)

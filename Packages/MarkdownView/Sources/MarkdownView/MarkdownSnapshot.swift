@@ -123,18 +123,34 @@ public struct MarkdownSnapshot: Sendable {
     /// A scroll position as a block index plus a fraction of that block's
     /// height, so it survives the block changing height. Above the block's top
     /// (in a margin), it keeps the distance in points instead.
+    /// In a table, it is a row and the distance into it instead, so rows
+    /// above changing height, as when they are laid out after estimates,
+    /// do not move what is shown.
     func anchor(atY y: CGFloat) -> ScrollAnchor? {
         let index = firstBlock(endingBelow: y)
         guard index < layouts.count else { return nil }
         let offset = y - blockTops[index]
         let height = layouts[index].height
         if offset < 0 || height <= 0 { return ScrollAnchor(block: index, fraction: 0, offset: min(offset, 0)) }
+        if let tableIndex = layouts[index].tables.firstIndex(where: { $0.rect.minY <= offset && offset < $0.rect.maxY }) {
+            let table = layouts[index].tables[tableIndex]
+            if !table.rows.isEmpty {
+                let row = table.row(atY: offset - table.rect.minY)
+                return ScrollAnchor(block: index, fraction: 0, offset: offset - table.rect.minY - table.rowTops[row],
+                                    table: tableIndex, row: row)
+            }
+        }
         return ScrollAnchor(block: index, fraction: offset / height, offset: 0)
     }
 
     func y(for anchor: ScrollAnchor) -> CGFloat {
         guard anchor.block < layouts.count else { return 0 }
-        return blockTops[anchor.block] + anchor.offset + anchor.fraction * layouts[anchor.block].height
+        let layout = layouts[anchor.block]
+        if anchor.table >= 0, anchor.table < layout.tables.count, anchor.row < layout.tables[anchor.table].rows.count {
+            let table = layout.tables[anchor.table]
+            return blockTops[anchor.block] + table.rect.minY + table.rowTops[anchor.row] + anchor.offset
+        }
+        return blockTops[anchor.block] + anchor.offset + anchor.fraction * layout.height
     }
 }
 
@@ -142,4 +158,7 @@ struct ScrollAnchor: Equatable {
     var block: Int
     var fraction: CGFloat
     var offset: CGFloat
+    /// A table of the block and a row of it that `offset` counts from, or -1.
+    var table = -1
+    var row = 0
 }

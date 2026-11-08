@@ -153,7 +153,9 @@ final class RenderWorker: @unchecked Sendable {
 
     /// Produces one or two snapshots for `request`: a visible-area snapshot
     /// first when that helps, then the complete one. Gives up as soon as a
-    /// newer request exists.
+    /// newer request exists. A long table in the visible area is laid out
+    /// only down to its bottom at first, with estimated heights for the rest
+    /// of its rows until the complete snapshot.
     func process(_ request: RenderRequest, post: (RenderOutcome) -> Void) {
         let generation = request.generation
         guard !isSuperseded(generation) else { return }
@@ -164,6 +166,9 @@ final class RenderWorker: @unchecked Sendable {
         let base: MarkdownSnapshot
         /// Nil for a relayout, which starts at the current position.
         var firstStep: RenderPlan.FirstStep?
+        /// For blocks whose layout in `base` is an estimate, earlier layouts
+        /// whose tables lend rows and natural widths.
+        var lent: [BlockLayout?]?
 
         if let current, currentSourceGeneration == request.sourceGeneration {
             if current.width == request.width, current.isComplete {
@@ -190,9 +195,9 @@ final class RenderWorker: @unchecked Sendable {
             timings.parse = ContinuousClock.now - start
             let document = parsed.document
             let update = BlockUpdate(baseID: request.base.id, match: parsed.match, edit: parsed.edit)
-            let reused = MarkdownSnapshot.reusableLayouts(from: request.base, match: parsed.match,
-                                                          newCount: document.blocks.count,
-                                                          columnWidth: columnWidth, typography: typography)
+            let (reused, hints) = MarkdownSnapshot.reusableLayouts(from: request.base, match: parsed.match,
+                                                                   blocks: document.blocks, columnWidth: columnWidth,
+                                                                   typography: typography)
             timings.blockCount = document.blocks.count
             timings.reusedBlocks = reused.count(where: { $0 != nil })
             firstStep = request.plan.read()
@@ -203,10 +208,11 @@ final class RenderWorker: @unchecked Sendable {
                 }
                 base = MarkdownSnapshot(document: document, layouts: layouts, width: request.width,
                                         typography: typography, generation: generation, update: update)
+                lent = hints
             } else {
                 let start = ContinuousClock.now
                 let layouts = signposter.withIntervalSignpost("layout") {
-                    BlockLayout.layOut(document.blocks, filling: reused, columnWidth: columnWidth,
+                    BlockLayout.layOut(document.blocks, filling: reused, hints: hints, columnWidth: columnWidth,
                                        typography: typography, isCancelled: isCancelled)
                 }
                 guard let layouts else { return }
@@ -228,15 +234,28 @@ final class RenderWorker: @unchecked Sendable {
         var layouts = base.layouts
         let blocks = base.document.blocks
         let target = max(request.viewportHeight, 400) * 1.5
+        /// What a block's next layout can reuse: its own layout, unless that
+        /// is an estimate.
+        func hint(_ index: Int) -> BlockLayout? { layouts[index].isEstimate ? lent?[index] : layouts[index] }
         signposter.withIntervalSignpost("layout") {
             guard let firstStep else {
                 // A relayout: from the top of the visible area down, enough
-                // to fill it, serially.
-                var index = base.firstBlock(endingBelow: request.scrollFraction * base.totalHeight)
+                // to fill it, serially. A table there starts at the row at
+                // the top; the scroll anchor holds that row in place.
+                let top = request.scrollFraction * base.totalHeight
+                var index = base.firstBlock(endingBelow: top)
                 var covered: CGFloat = 0
                 while index < layouts.count, covered < target {
                     if !layouts[index].isFinal(for: columnWidth) {
-                        layouts[index] = BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography)
+                        var rows = TableRows.all
+                        if blocks[index].kind == .table, let table = layouts[index].tables.first {
+                            let y = top - base.blockTops[index] - table.rect.minY
+                            rows = .covering(first: y > 0 ? table.row(atY: y) : 0, height: target - covered)
+                        }
+                        guard let layout = BlockLayout.make(blocks[index], columnWidth: columnWidth, typography: typography,
+                                                            hint: hint(index), tableRows: rows, isCancelled: isCancelled)
+                        else { return }
+                        layouts[index] = layout
                         timings.laidOutBlocks += 1
                     }
                     covered += layouts[index].height + layouts[index].marginBottom
@@ -247,10 +266,11 @@ final class RenderWorker: @unchecked Sendable {
             // A new source: every block down to the bottom of the area at the
             // position, in parallel, so everything above the area is laid
             // out. Estimates decide how far that is, so repeat until the laid
-            // out blocks reach it.
+            // out blocks reach it. The last block goes after the others, from
+            // its exact top: a table there stops at the area's bottom.
             var done = 0
             while done < layouts.count, !isCancelled() {
-                let partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
+                var partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
                                                typography: typography, generation: generation)
                 let top: CGFloat = switch firstStep {
                 case .offset(let y): y
@@ -259,12 +279,26 @@ final class RenderWorker: @unchecked Sendable {
                 }
                 let end = min(partial.firstBlock(endingBelow: top + target) + 1, layouts.count)
                 guard end > done else { break }
-                let range = done..<end
-                let kept = layouts[range].map { $0.isFinal(for: columnWidth) ? $0 : nil }
-                guard let laidOut = BlockLayout.layOut(Array(blocks[range]), filling: kept, columnWidth: columnWidth,
-                                                       typography: typography, isCancelled: isCancelled) else { return }
-                layouts.replaceSubrange(range, with: laidOut)
-                timings.laidOutBlocks += kept.count(where: { $0 == nil })
+                let last = end - 1
+                if last > done {
+                    let range = done..<last
+                    let kept = layouts[range].map { $0.isFinal(for: columnWidth) ? $0 : nil }
+                    guard let laidOut = BlockLayout.layOut(Array(blocks[range]), filling: kept, hints: range.map(hint),
+                                                           columnWidth: columnWidth, typography: typography,
+                                                           isCancelled: isCancelled) else { return }
+                    layouts.replaceSubrange(range, with: laidOut)
+                    timings.laidOutBlocks += kept.count(where: { $0 == nil })
+                    partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
+                                               typography: typography, generation: generation)
+                }
+                if !layouts[last].isFinal(for: columnWidth) {
+                    let rows = TableRows.covering(first: 0, height: top + target - partial.blockTops[last])
+                    guard let layout = BlockLayout.make(blocks[last], columnWidth: columnWidth, typography: typography,
+                                                        hint: hint(last), tableRows: rows, isCancelled: isCancelled)
+                    else { return }
+                    layouts[last] = layout
+                    timings.laidOutBlocks += 1
+                }
                 done = end
             }
         }
@@ -275,11 +309,13 @@ final class RenderWorker: @unchecked Sendable {
         commit(visible, request, timings, post: post)
         guard !visible.isComplete, request.complete, !isCancelled() else { return }
 
-        // Step 2: everything else, in parallel.
+        // Step 2: everything else, in parallel, including the rest of a
+        // partly laid out table.
         start = ContinuousClock.now
         let kept = layouts.map { $0.isFinal(for: columnWidth) ? $0 : nil }
+        let hints = layouts.indices.map(hint)
         let all = signposter.withIntervalSignpost("layout") {
-            BlockLayout.layOut(blocks, filling: kept, columnWidth: columnWidth, typography: typography,
+            BlockLayout.layOut(blocks, filling: kept, hints: hints, columnWidth: columnWidth, typography: typography,
                                isCancelled: isCancelled)
         }
         guard let all else { return }

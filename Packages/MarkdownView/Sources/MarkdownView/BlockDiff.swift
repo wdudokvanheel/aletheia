@@ -163,20 +163,38 @@ func commonSuffixLength(_ a: UnsafeBufferPointer<UInt8>, _ b: UnsafeBufferPointe
 }
 
 extension MarkdownSnapshot {
-    /// The layouts of `base` that still fit the blocks of a new parse: those
-    /// of blocks the diff matched, when `base` was laid out at the same
-    /// column width with the same typography. Nil entries need a layout.
-    static func reusableLayouts(from base: MarkdownSnapshot, match: BlockMatch?, newCount: Int,
-                                columnWidth: CGFloat, typography: Typography) -> [BlockLayout?] {
+    /// The layouts of `base` that still fit the blocks of a new parse:
+    /// those of blocks the diff matched, when laid out at the same column
+    /// width with the same typography. Nil entries need a layout. For those,
+    /// `hints` holds an earlier layout whose tables lend what still applies:
+    /// a matched block's layout at another width or partly laid out, and
+    /// for an edited table, the old table at its place among the changed
+    /// blocks, so only its edited rows are measured again.
+    static func reusableLayouts(from base: MarkdownSnapshot, match: BlockMatch?, blocks: [MarkdownBlock],
+                                columnWidth: CGFloat, typography: Typography)
+        -> (layouts: [BlockLayout?], hints: [BlockLayout?]) {
+        let newCount = blocks.count
         var layouts = [BlockLayout?](repeating: nil, count: newCount)
-        guard let match, base.typography === typography, base.columnWidth == columnWidth,
-              match.oldCount == base.layouts.count else { return layouts }
+        var hints = [BlockLayout?](repeating: nil, count: newCount)
+        guard let match, base.typography === typography, match.oldCount == base.layouts.count else { return (layouts, hints) }
         for index in 0..<newCount {
-            if let old = match.oldIndex(ofNew: index), base.layouts[old].isFinal(for: columnWidth) {
-                layouts[index] = base.layouts[old]
+            guard let old = match.oldIndex(ofNew: index) else { continue }
+            let layout = base.layouts[old]
+            if layout.isFinal(for: columnWidth) {
+                layouts[index] = layout
+            } else if !layout.isEstimate, !layout.tables.isEmpty {
+                hints[index] = layout
             }
         }
-        return layouts
+        if match.prefix < match.oldCount - match.suffix {
+            for old in match.prefix..<(match.oldCount - match.suffix) where match.newIndex(ofOld: old) == nil {
+                let layout = base.layouts[old]
+                guard !layout.isEstimate, !layout.tables.isEmpty, let new = match.pairedNewIndex(ofOld: old),
+                      layouts[new] == nil, hints[new] == nil, !blocks[new].tables.isEmpty else { continue }
+                hints[new] = layout
+            }
+        }
+        return (layouts, hints)
     }
 
     /// Parses `source` and lays it out at `width`, rebuilding and laying out
@@ -187,9 +205,9 @@ extension MarkdownSnapshot {
         -> (snapshot: MarkdownSnapshot, reused: Int, laidOut: Int) {
         let parsed = try MarkdownDocument.parse(source, reusing: base.document)
         let columnWidth = typography.column(forWidth: width).width
-        let reused = reusableLayouts(from: base, match: parsed.match, newCount: parsed.document.blocks.count,
-                                     columnWidth: columnWidth, typography: typography)
-        let layouts = BlockLayout.layOut(parsed.document.blocks, filling: reused, columnWidth: columnWidth,
+        let (reused, hints) = reusableLayouts(from: base, match: parsed.match, blocks: parsed.document.blocks,
+                                              columnWidth: columnWidth, typography: typography)
+        let layouts = BlockLayout.layOut(parsed.document.blocks, filling: reused, hints: hints, columnWidth: columnWidth,
                                          typography: typography) ?? []
         let reusedCount = reused.count(where: { $0 != nil })
         let snapshot = MarkdownSnapshot(document: parsed.document, layouts: layouts, width: width,
@@ -234,8 +252,9 @@ extension MarkdownSnapshot {
         guard index < old.layouts.count else { return y }
         let offset = y - old.blockTops[index]
         if let new = update.match?.newIndex(ofOld: index) { return blockTops[new] + offset }
-        let start = old.document.blocks[index].sourceRange.lowerBound
         let edit = update.edit
+        if let row = tableRowY(offset, inBlock: index, from: old, through: edit) { return row }
+        let start = old.document.blocks[index].sourceRange.lowerBound
         if start <= edit.old.lowerBound || start >= edit.old.upperBound {
             let new = firstBlock(endingAtOrAfterSource: edit.map(start, upstream: true))
             return new < layouts.count ? blockTops[new] + offset : y
@@ -245,6 +264,27 @@ extension MarkdownSnapshot {
             return blockTops[new] + y - old.blockTops[above]
         }
         return y
+    }
+
+    /// For a point `offset` into an edited table block of `old`, the same
+    /// point in the row that now holds that row's source line, so a table
+    /// row stays put when rows above it change height.
+    private func tableRowY(_ offset: CGFloat, inBlock index: Int, from old: MarkdownSnapshot,
+                           through edit: SourceEdit) -> CGFloat? {
+        guard let table = old.table(inBlock: index, atY: offset), !table.rows.isEmpty else { return nil }
+        let row = table.row(atY: offset - table.rect.minY)
+        let start = old.document.blocks[index].sourceRange.lowerBound + Int(table.structure.rowSourceStarts[row])
+        guard start <= edit.old.lowerBound || start >= edit.old.upperBound else { return nil }
+        let mapped = edit.map(start, upstream: true)
+        let new = firstBlock(endingAtOrAfterSource: mapped)
+        guard new < layouts.count else { return nil }
+        let local = mapped - document.blocks[new].sourceRange.lowerBound
+        for candidate in layouts[new].tables where candidate.rows.count == candidate.structure.rowCount {
+            guard let newRow = candidate.structure.row(startingAtSource: local) else { continue }
+            return blockTops[new] + candidate.rect.minY + candidate.rowTops[newRow]
+                + offset - table.rect.minY - table.rowTops[row]
+        }
+        return nil
     }
 
     // MARK: Invalidation

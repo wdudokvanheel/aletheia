@@ -13,10 +13,22 @@ struct BlockLayoutBuilder {
     let typography: Typography
     /// Estimates measure heights from text lengths and build no lines.
     let isEstimate: Bool
+    /// Raw HTML takes no space.
+    let isDropped: Bool
+    /// An earlier layout whose tables lend rows and natural widths.
+    var hint: BlockLayout?
+    /// How much of a table block's table to lay out.
+    var tableRows = TableRows.all
+    private(set) var isCancelled = false
     private(set) var lines: [LineLayout] = []
     private(set) var boxes: [BlockBox] = []
     private(set) var markers: [MarkerLayout] = []
     private(set) var codeBlocks: [CodeBlockLayout] = []
+    private(set) var tables: [TableLayout] = []
+    /// The display text, then its attributed string and typesetter, made
+    /// when a segment first needs them: tables lay out cell by cell, so a
+    /// table block never shapes its whole text at once.
+    private var text: CFString?
     private var string: CFAttributedString?
     private var typesetter: CTTypesetter?
     /// The style run the next line starts in.
@@ -30,6 +42,7 @@ struct BlockLayoutBuilder {
         self.columnWidth = columnWidth
         self.typography = typography
         self.isEstimate = isEstimate
+        isDropped = block.kind == .htmlBlock
     }
 
     /// A list or quote that contains the segment being laid out.
@@ -46,14 +59,13 @@ struct BlockLayoutBuilder {
         let isQuoted: Bool
     }
 
-    /// The block's height and its top and bottom margins.
-    mutating func build() -> (height: CGFloat, top: CGFloat, bottom: CGFloat) {
+    /// The block's height and its top and bottom margins. Stops early, with
+    /// `isCancelled` set, when `isCancelled` reports true during a table.
+    mutating func build(isCancelled: () -> Bool) -> (height: CGFloat, top: CGFloat, bottom: CGFloat) {
+        guard !isDropped else { return (0, 0, 0) }
         let segments = block.segments.isEmpty ? Self.segments(of: block, textLength: textLength) : block.segments
         let containers = block.containers
-        if !isEstimate, textLength > 0, let string = BlockLayout.makeString(block, typography: typography) {
-            self.string = string
-            typesetter = CTTypesetterCreateWithAttributedString(string)
-        }
+        if !isEstimate, textLength > 0 { text = BlockLayout.makeText(block) }
         // A segment's lines run to where the next text starts, so the newline
         // separating them ends its last line.
         var lineEnds = [Int](repeating: textLength, count: segments.count)
@@ -108,8 +120,11 @@ struct BlockLayoutBuilder {
             let firstLine = lines.count
             let height: CGFloat
             switch segment.kind {
-            case .paragraph, .heading, .table:
+            case .paragraph, .heading:
                 height = layOutText(range, x: left, width: width, top: y)
+            case .table:
+                height = layOutTable(range, x: left, width: width, top: y, isCancelled: isCancelled)
+                if self.isCancelled { return (0, 0, 0) }
             case .code:
                 height = layOutCode(range, x: left, width: width, top: y)
             case .rule:
@@ -183,9 +198,18 @@ struct BlockLayoutBuilder {
 
     // MARK: Lines
 
+    /// Makes the attributed display text and its typesetter, once.
+    private mutating func prepareTypesetter() {
+        guard typesetter == nil, let text,
+              let string = BlockLayout.makeString(text, runs: block.styleRuns, typography: typography) else { return }
+        self.string = string
+        typesetter = CTTypesetterCreateWithAttributedString(string)
+    }
+
     /// Wraps text with `CTTypesetter` at `width`, one line box per line.
     private mutating func layOutText(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat) -> CGFloat {
         guard !range.isEmpty else { return 0 }
+        prepareTypesetter()
         guard let typesetter else { return estimatedHeight(of: range, width: width) }
         var y = top
         var start = range.lowerBound
@@ -204,6 +228,7 @@ struct BlockLayoutBuilder {
         let padding = typography.codeBlockPadding
         var y = top + padding
         var widest: CGFloat = 0
+        if !range.isEmpty { prepareTypesetter() }
         if !range.isEmpty, let string {
             var characters = [UniChar](repeating: 0, count: range.count)
             CFStringGetCharacters(CFAttributedStringGetString(string), CFRange(location: range.lowerBound, length: range.count),
@@ -230,44 +255,42 @@ struct BlockLayoutBuilder {
         return y - top
     }
 
-    /// Adds the line for `range` with its line box: the tallest line height
-    /// of the roles in it, with the glyphs centered in it as CSS does.
-    /// Returns its height and, for code lines, the width of its text without
-    /// trailing whitespace.
+    /// Adds the line for `range` with its line box. Returns its height and,
+    /// for code lines, the width of its text without trailing whitespace.
     private mutating func appendLine(_ range: Range<Int>, x: CGFloat, maxX: CGFloat, top: CGFloat,
                                      codeBlock: Int32) -> (height: CGFloat, width: CGFloat) {
         guard let typesetter, let string else { return (0, 0) }
         let line = CTTypesetterCreateLine(typesetter, CFRange(location: range.lowerBound, length: range.count))
-        var ascent: CGFloat = 0
-        var descent: CGFloat = 0
-        var leading: CGFloat = 0
-        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
-
-        // Roles and styles in this line, from the style runs (which are in order).
-        let runs = block.styleRuns
-        while runIndex < runs.count - 1, runs[runIndex].range.upperBound <= range.lowerBound { runIndex += 1 }
-        let first = runs.isEmpty ? StyleRun(range: 0..<textLength, role: .body) : runs[runIndex]
-        var color: UInt8? = ColorIndex.of(first.role, first.styles)
-        var lineHeight = typography.lineHeight(first.role)
-        var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
-        var index = runIndex + 1
-        while index < runs.count, runs[index].range.lowerBound < range.upperBound {
-            let run = runs[index]
-            if ColorIndex.of(run.role, run.styles) != color { color = nil }
-            lineHeight = max(lineHeight, typography.lineHeight(run.role))
-            isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
-            index += 1
-        }
-
-        let halfLeading = (lineHeight - (ascent + descent)) / 2
-        let baseline = top + halfLeading + ascent
-        let endsWithNewline = CFStringGetCharacterAtIndex(CFAttributedStringGetString(string), range.upperBound - 1) == 0x0A
-        let layout = LineLayout(line: line, range: range, x: x, maxX: maxX, top: top, height: lineHeight, baseline: baseline,
-                                color: color, endsWithNewline: endsWithNewline, codeBlock: codeBlock,
-                                decorations: isDecorated ? BlockLayout.decorations(of: line, baseline: baseline, block: block,
-                                                                                  typography: typography) : [])
+        let (layout, width) = BlockLayout.lineLayout(line, range: range, string: CFAttributedStringGetString(string),
+                                                     runs: block.styleRuns, runIndex: &runIndex, links: block.links[...],
+                                                     linkOffset: 0, x: x, maxX: maxX, top: top, codeBlock: codeBlock,
+                                                     typography: typography)
         lines.append(layout)
-        return (lineHeight, codeBlock >= 0 ? width - CGFloat(CTLineGetTrailingWhitespaceWidth(line)) : 0)
+        return (layout.height, codeBlock >= 0 ? width : 0)
+    }
+
+    // MARK: Tables
+
+    /// A table laid out per cell, in a box as wide as the content around
+    /// it, which scrolls horizontally when the table is wider. Without its
+    /// grid (never expected) it falls back to plain text.
+    private mutating func layOutTable(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat,
+                                      isCancelled: () -> Bool) -> CGFloat {
+        let index = tables.count
+        guard index < block.tables.count else { return layOutText(range, x: x, width: width, top: top) }
+        let structure = block.tables[index]
+        if isEstimate { return TableLayout.estimatedHeight(of: structure, typography: typography) }
+        guard let text else { return 0 }
+        let hintTable = hint.flatMap { index < $0.tables.count ? $0.tables[index] : nil }
+        guard let table = TableLayout.build(structure, block: block, text: text, x: x, top: top, width: width,
+                                            scrollIndex: codeBlocks.count, typography: typography, hint: hintTable,
+                                            rows: tableRows, isCancelled: isCancelled) else {
+            self.isCancelled = true
+            return 0
+        }
+        tables.append(table)
+        codeBlocks.append(CodeBlockLayout(rect: table.rect, contentWidth: table.width, isTable: true))
+        return table.rect.height
     }
 
     // MARK: Markers

@@ -455,9 +455,12 @@ final class MarkdownDocumentView: NSView {
         // Backgrounds, bars, and rules, then the selection over them, then
         // text, markers, and task boxes.
         let style = DrawStyle(palette, snapshot.typography)
+        let offsets = codeOffsets
         for index in range {
             snapshot.layouts[index].drawBackgrounds(in: context, at: origin(of: index, in: snapshot), clip: clip,
-                                                    style: style)
+                                                    style: style) {
+                offsets.isEmpty ? 0 : offsets[CodeBlockID(block: index, code: $0)] ?? 0
+            }
         }
         if let selection {
             let rects = snapshot.selectionRects(for: selection, minY: dirtyRect.minY, maxY: dirtyRect.maxY,
@@ -469,7 +472,6 @@ final class MarkdownDocumentView: NSView {
             }
         }
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
-        let offsets = codeOffsets
         for index in range {
             snapshot.layouts[index].drawText(in: context, at: origin(of: index, in: snapshot), clip: clip, style: style) {
                 offsets.isEmpty ? 0 : offsets[CodeBlockID(block: index, code: $0)] ?? 0
@@ -553,9 +555,10 @@ struct DrawStyle {
 }
 
 extension BlockLayout {
-    /// Fills code block backgrounds, quote bars, rules, and the inline code
-    /// backgrounds on the lines that intersect `clip`.
-    func drawBackgrounds(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle) {
+    /// Fills code block backgrounds, quote bars, rules, table borders, and
+    /// the inline code backgrounds on the lines that intersect `clip`.
+    func drawBackgrounds(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle,
+                         codeOffset: (Int) -> CGFloat) {
         for box in boxes {
             let rect = box.rect.offsetBy(dx: origin.x, dy: origin.y)
             guard rect.intersects(clip) else { continue }
@@ -570,13 +573,38 @@ extension BlockLayout {
                 context.fill(rect)
             }
         }
-        forEachLine(intersecting: clip, at: origin) { line in
+        func fillCodeBackgrounds(of line: LineLayout, x: CGFloat, top: CGFloat) {
             for decoration in line.decorations where decoration.kind == .codeBackground {
-                let rect = decoration.rect.offsetBy(dx: origin.x + line.x, dy: origin.y)
+                let rect = decoration.rect.offsetBy(dx: x, dy: top)
                 context.setFillColor(style.codeBackground)
                 context.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
                 context.fillPath()
             }
+        }
+        forEachLine(intersecting: clip, at: origin) { fillCodeBackgrounds(of: $0, x: origin.x + $0.x, top: origin.y) }
+        forEachTable(intersecting: clip, at: origin, in: context, codeOffset: codeOffset) { table, tableOrigin in
+            table.drawBorders(in: context, origin: tableOrigin, clip: clip, color: style.muted)
+            table.forEachLine(intersecting: clip, origin: tableOrigin) { line, x, top, _ in
+                fillCodeBackgrounds(of: line, x: x, top: top)
+            }
+        }
+    }
+
+    /// Calls `body` with each table whose box intersects `clip` and the
+    /// table's top-left, scrolled by `codeOffset` of its box; a table wider
+    /// than its box is clipped to it meanwhile.
+    private func forEachTable(intersecting clip: CGRect, at origin: CGPoint, in context: CGContext,
+                              codeOffset: (Int) -> CGFloat, _ body: (TableLayout, CGPoint) -> Void) {
+        for table in tables {
+            let box = table.rect.offsetBy(dx: origin.x, dy: origin.y)
+            guard box.intersects(clip) else { continue }
+            let isClipped = codeBlocks[table.scrollIndex].maxOffset > 0
+            if isClipped {
+                context.saveGState()
+                context.clip(to: box)
+            }
+            body(table, CGPoint(x: box.minX - (isClipped ? codeOffset(table.scrollIndex) : 0), y: box.minY))
+            if isClipped { context.restoreGState() }
         }
     }
 
@@ -597,26 +625,39 @@ extension BlockLayout {
                 context.saveGState()
                 context.clip(to: codeBlocks[Int(line.codeBlock)].rect.offsetBy(dx: origin.x, dy: origin.y))
             }
-            let position = CGPoint(x: x, y: origin.y + line.baseline)
-            if let color = line.color {
-                context.setFillColor(style.text[Int(color)])
-                context.textPosition = position
-                CTLineDraw(line.line, context)
-            } else {
-                for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
-                    let runStyle = styleRun(at: CTRunGetStringRange(run).location)
-                    context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles))])
-                    context.textPosition = position
-                    CTRunDraw(run, context, CFRange())
-                }
-            }
-            for decoration in line.decorations where decoration.kind != .codeBackground {
-                context.setFillColor(style.text[Int(decoration.color)])
-                context.fill(decoration.rect.offsetBy(dx: x, dy: origin.y))
-            }
+            draw(line, x: x, top: origin.y, textOffset: 0, in: context, style: style)
             if isClipped { context.restoreGState() }
         }
+        forEachTable(intersecting: clip, at: origin, in: context, codeOffset: codeOffset) { table, tableOrigin in
+            table.forEachLine(intersecting: clip, origin: tableOrigin) { line, x, top, textOffset in
+                draw(line, x: x, top: top, textOffset: textOffset, in: context, style: style)
+            }
+        }
         drawMarkers(in: context, at: origin, clip: clip, style: style)
+    }
+
+    /// Draws one line starting at `x`, with its tops counted from `top`,
+    /// coloring runs by role, then its underlines and strikethroughs. The
+    /// line's string indices are display offsets less `textOffset`.
+    private func draw(_ line: LineLayout, x: CGFloat, top: CGFloat, textOffset: Int, in context: CGContext,
+                      style: DrawStyle) {
+        let position = CGPoint(x: x, y: top + line.baseline)
+        if let color = line.color {
+            context.setFillColor(style.text[Int(color)])
+            context.textPosition = position
+            CTLineDraw(line.line, context)
+        } else {
+            for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
+                let runStyle = styleRun(at: textOffset + CTRunGetStringRange(run).location)
+                context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles))])
+                context.textPosition = position
+                CTRunDraw(run, context, CFRange())
+            }
+        }
+        for decoration in line.decorations where decoration.kind != .codeBackground {
+            context.setFillColor(style.text[Int(decoration.color)])
+            context.fill(decoration.rect.offsetBy(dx: x, dy: top))
+        }
     }
 
     /// Bullets, numbers, and task boxes beside the lines that intersect `clip`.

@@ -130,7 +130,7 @@ final class SelectionTests: XCTestCase {
         XCTAssertEqual(paragraph(1, 5), "two")
         XCTAssertEqual(paragraph(1, 3), "one", "before the newline")
         XCTAssertEqual(paragraph(1, 4), "two", "after the newline")
-        XCTAssertEqual(paragraph(2, 4), "c\td")
+        XCTAssertEqual(paragraph(2, 4), "c", "a table cell")
         let character = snapshot.unitRange(at: position(0, 3), granularity: .character)
         XCTAssertTrue(character.isEmpty)
     }

@@ -86,6 +86,33 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertTrue(visible.layouts[0] === complete.layouts[0], "visible layouts are reused")
     }
 
+    func testALongTableInstallsPartlyThenRefinesToAOneShotLayout() throws {
+        let rows = (0..<400).map { "| \($0) | " + String(repeating: "words that wrap ", count: 5 + $0 % 6) + "|" }
+        let source = "Intro.\n\n| ID | Text |\n| - | - |\n" + rows.joined(separator: "\n")
+        let pipeline = RenderPipeline(typography: .standard)
+        let received = outcomes(of: pipeline, after: {
+            _ = submit(pipeline, source, sourceGeneration: 1, visibleFirst: true)
+        }, until: isComplete)
+        XCTAssertEqual(received.count, 2)
+        guard case .snapshot(let visible, _, _) = received[0], case .snapshot(let complete, _, let timings) = received[1]
+        else { return XCTFail() }
+        XCTAssertFalse(visible.isComplete)
+        XCTAssertTrue(visible.layouts[1].isPartial, "the table installs partly laid out")
+        let partial = try XCTUnwrap(visible.layouts[1].tables.first)
+        XCTAssertGreaterThan(partial.estimatedRows, 300)
+        XCTAssertGreaterThanOrEqual(visible.blockTops[1] + partial.rowTops[partial.rows.prefix { !$0.isEstimate }.count], 450,
+                                    "laid out past the visible area")
+        XCTAssertTrue(complete.isComplete)
+        XCTAssertEqual(timings.blockCount, 2)
+        let table = try XCTUnwrap(complete.layouts[1].tables.first)
+        XCTAssertEqual(table.measuredRows, 0, "the rest reuses the natural widths")
+        let oneShot = MarkdownSnapshot.layOut(try MarkdownDocument.parse(source), width: 500)
+        XCTAssertEqual(complete.blockTops, oneShot.blockTops)
+        XCTAssertEqual(complete.layouts.map(\.height), oneShot.layouts.map(\.height))
+        XCTAssertEqual(table.rowTops, oneShot.layouts[1].tables[0].rowTops)
+        XCTAssertEqual(complete.totalHeight, oneShot.totalHeight)
+    }
+
     func testResizeRelaysOutWithoutParsing() {
         let pipeline = RenderPipeline(typography: .standard)
         _ = outcomes(of: pipeline, after: { _ = submit(pipeline, longSource, sourceGeneration: 1) }, until: isComplete)

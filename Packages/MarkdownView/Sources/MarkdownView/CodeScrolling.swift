@@ -47,17 +47,24 @@ extension MarkdownSnapshot {
         codeBlockLayout(id)?.rect.offsetBy(dx: columnX, dy: blockTops[id.block])
     }
 
-    /// Carries code block offsets from `old` into this snapshot: the same
-    /// blocks after a relayout of the same source, and blocks the diff kept
-    /// after an edit. Offsets are clamped to the new widths; blocks that
-    /// changed, or a snapshot of another document, start unscrolled.
+    /// Carries code block and table offsets from `old` into this snapshot:
+    /// the same blocks after a relayout of the same source, and blocks the
+    /// diff kept after an edit. A table also keeps its offset when its own
+    /// block was edited, as when typing in one of its cells. Offsets are
+    /// clamped to the new widths; code blocks that changed, or a snapshot of
+    /// another document, start unscrolled.
     func mapCodeOffsets(_ offsets: CodeOffsets, from old: MarkdownSnapshot, sourceChanged: Bool) -> CodeOffsets {
         let match = sourceChanged ? update(from: old)?.match : nil
         guard !sourceChanged || match != nil else { return [:] }
         var mapped: CodeOffsets = [:]
         for (id, offset) in offsets {
-            guard let block = sourceChanged ? match?.newIndex(ofOld: id.block) : id.block,
-                  block < layouts.count else { continue }
+            var block = sourceChanged ? match?.newIndex(ofOld: id.block) : id.block
+            if block == nil, let match, old.codeBlockLayout(id)?.isTable == true,
+               let paired = match.pairedNewIndex(ofOld: id.block), paired < layouts.count,
+               layouts[paired].isEstimate || codeBlockLayout(CodeBlockID(block: paired, code: id.code))?.isTable == true {
+                block = paired
+            }
+            guard let block, block < layouts.count else { continue }
             let target = CodeBlockID(block: block, code: id.code)
             if layouts[block].isEstimate {
                 // Not laid out yet: keep the offset until it is.

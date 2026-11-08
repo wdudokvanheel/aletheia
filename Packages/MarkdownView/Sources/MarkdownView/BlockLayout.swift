@@ -79,13 +79,15 @@ struct MarkerLayout {
     let color: UInt8
 }
 
-/// A code block's background box, relative to the block's top and the
-/// column's left edge. Its lines never wrap; when the widest is wider than
-/// the box, the view scrolls the block horizontally on its own.
+/// A box that scrolls horizontally on its own when its content is wider:
+/// a code block's background, whose lines never wrap, or a table's box.
+/// Relative to the block's top and the column's left edge.
 struct CodeBlockLayout {
     let rect: CGRect
-    /// The widest line plus the padding on both sides.
+    /// The widest line plus the padding on both sides, or the table's width.
     let contentWidth: CGFloat
+    /// The box of one of the block's `tables`.
+    var isTable = false
 
     /// How far the lines can scroll left.
     var maxOffset: CGFloat { max((contentWidth - rect.width).rounded(.up), 0) }
@@ -109,8 +111,10 @@ public final class BlockLayout: @unchecked Sendable {
     let boxes: [BlockBox]
     /// In display order, so their baselines never decrease.
     let markers: [MarkerLayout]
-    /// In display order, top to bottom.
+    /// In display order, top to bottom: code blocks and tables.
     let codeBlocks: [CodeBlockLayout]
+    /// The block's tables, laid out per cell, in display order.
+    let tables: [TableLayout]
     /// The length of the block's display text in UTF-16 units.
     let textLength: Int
     let styleRuns: [StyleRun]
@@ -119,35 +123,61 @@ public final class BlockLayout: @unchecked Sendable {
     /// A placeholder with an estimated height and no lines, used for blocks
     /// that are not laid out yet during a visible-first open.
     let isEstimate: Bool
+    /// A table with rows that are not laid out yet, whose heights are
+    /// estimated; the rest follows in the background.
+    let isPartial: Bool
 
-    public var lineCount: Int { lines.count }
+    /// Lines of text, counting each line in table cells.
+    public var lineCount: Int {
+        lines.count + tables.reduce(0) { $0 + $1.rows.reduce(0) { $0 + $1.lines.count } }
+    }
 
     /// Whether this layout can be drawn and reused at `columnWidth`.
-    func isFinal(for columnWidth: CGFloat) -> Bool { !isEstimate && self.columnWidth == columnWidth }
+    func isFinal(for columnWidth: CGFloat) -> Bool { !isEstimate && !isPartial && self.columnWidth == columnWidth }
 
     /// Lays out `block`: paragraphs and headings with `CTTypesetter` line
     /// breaking and CSS-style line boxes, code blocks one line per source
-    /// line, inside the indents of their lists and quotes and with collapsed
-    /// margins between them. Cost is proportional to the block's text.
+    /// line, tables per cell, inside the indents of their lists and quotes
+    /// and with collapsed margins between them. Cost is proportional to the
+    /// block's text.
     public convenience init(block: MarkdownBlock, columnWidth: CGFloat, typography: Typography) {
-        self.init(block: block, columnWidth: columnWidth, typography: typography, isEstimate: false)
+        var builder = BlockLayoutBuilder(block: block, textLength: block.text.utf16.count, columnWidth: columnWidth,
+                                         typography: typography, isEstimate: false)
+        let metrics = builder.build(isCancelled: { false })
+        self.init(block: block, builder: builder, metrics: metrics)
+    }
+
+    /// Lays out `block` like the public initializer. `hint`, an earlier
+    /// layout of the same or an edited block at any width, lends tables the
+    /// rows and natural cell widths that still apply. A table block lays out
+    /// only `tableRows` and estimates the rest. Nil when `isCancelled`
+    /// reports true during a table.
+    static func make(_ block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, hint: BlockLayout? = nil,
+                     tableRows: TableRows = .all, isCancelled: () -> Bool = { false }) -> BlockLayout? {
+        var builder = BlockLayoutBuilder(block: block, textLength: block.text.utf16.count, columnWidth: columnWidth,
+                                         typography: typography, isEstimate: false)
+        builder.hint = hint.flatMap { $0.isEstimate || $0.tables.isEmpty ? nil : $0 }
+        builder.tableRows = block.kind == .table ? tableRows : .all
+        let metrics = builder.build(isCancelled: isCancelled)
+        guard !builder.isCancelled else { return nil }
+        return BlockLayout(block: block, builder: builder, metrics: metrics)
     }
 
     /// A placeholder whose height is estimated from the text length, at a
     /// small fraction of the cost of a real layout.
     static func estimate(for block: MarkdownBlock, columnWidth: CGFloat, typography: Typography) -> BlockLayout {
-        BlockLayout(block: block, columnWidth: columnWidth, typography: typography, isEstimate: true)
+        var builder = BlockLayoutBuilder(block: block, textLength: block.text.utf16.count, columnWidth: columnWidth,
+                                         typography: typography, isEstimate: true)
+        let metrics = builder.build(isCancelled: { false })
+        return BlockLayout(block: block, builder: builder, metrics: metrics)
     }
 
-    private init(block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, isEstimate: Bool) {
-        self.columnWidth = columnWidth
+    private init(block: MarkdownBlock, builder: BlockLayoutBuilder, metrics: (height: CGFloat, top: CGFloat, bottom: CGFloat)) {
+        columnWidth = builder.columnWidth
         styleRuns = block.styleRuns
-        isDropped = block.kind == .htmlBlock
-        textLength = block.text.utf16.count
-        self.isEstimate = isEstimate
-        var builder = BlockLayoutBuilder(block: block, textLength: textLength, columnWidth: columnWidth,
-                                         typography: typography, isEstimate: isEstimate)
-        let metrics = isDropped ? (height: 0, top: 0, bottom: 0) : builder.build()
+        isDropped = builder.isDropped
+        textLength = builder.textLength
+        isEstimate = builder.isEstimate
         height = metrics.height
         marginTop = metrics.top
         marginBottom = metrics.bottom
@@ -155,18 +185,26 @@ public final class BlockLayout: @unchecked Sendable {
         boxes = builder.boxes
         markers = builder.markers
         codeBlocks = builder.codeBlocks
+        tables = builder.tables
+        isPartial = builder.tables.contains { $0.isPartial }
     }
 
-    static func makeString(_ block: MarkdownBlock, typography: Typography) -> CFAttributedString? {
+    /// The block's display text as a Core Foundation string.
+    static func makeText(_ block: MarkdownBlock) -> CFString? {
         var text = block.text
-        let string: CFString? = text.withUTF8 { bytes in
+        return text.withUTF8 { bytes in
             CFStringCreateWithBytes(nil, bytes.baseAddress, bytes.count, CFStringBuiltInEncodings.UTF8.rawValue, false)
         }
-        guard let string else { return nil }
-        let runs = block.styleRuns
+    }
+
+    /// `string` with the fonts of `runs`, which cover it in order, and
+    /// without kerning unless `kerned`.
+    static func makeString(_ string: CFString, runs: [StyleRun], typography: Typography,
+                           kerned: Bool = true) -> CFAttributedString? {
         if runs.count <= 1, runs.first?.styles.contains(.code) != true {
             let run = runs.first
-            return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? []))
+            return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? [],
+                                                                               kerned: kerned))
         }
         guard let attributed = CFAttributedStringCreateMutable(nil, 0) else { return nil }
         CFAttributedStringReplaceString(attributed, CFRange(location: 0, length: 0), string)
@@ -174,7 +212,7 @@ public final class BlockLayout: @unchecked Sendable {
         let length = CFStringGetLength(string)
         for run in runs where run.range.lowerBound < length {
             let range = CFRange(location: run.range.lowerBound, length: min(run.range.upperBound, length) - run.range.lowerBound)
-            CFAttributedStringSetAttributes(attributed, range, typography.attributes(run.role, run.styles), true)
+            CFAttributedStringSetAttributes(attributed, range, typography.attributes(run.role, run.styles, kerned: kerned), true)
         }
         // Room for the padding beside inline code, as kerning after the
         // character before it and after its last character.
@@ -191,18 +229,58 @@ public final class BlockLayout: @unchecked Sendable {
         return attributed
     }
 
+    /// A laid-out line for `range` of a string covered by `runs`, with its
+    /// line box: the tallest line height of the roles in it, with the glyphs
+    /// centered in it as CSS does. `runIndex` is the run the line starts in
+    /// or one before it, and moves forward. Without `maxX`, the line's
+    /// right edge is its visible width. Also returns that visible width.
+    static func lineLayout(_ line: CTLine, range: Range<Int>, string: CFString, runs: [StyleRun], runIndex: inout Int,
+                           links: ArraySlice<MarkdownLink>, linkOffset: Int, x: CGFloat, maxX: CGFloat?, top: CGFloat,
+                           codeBlock: Int32, typography: Typography) -> (layout: LineLayout, width: CGFloat) {
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let visibleWidth = width - CGFloat(CTLineGetTrailingWhitespaceWidth(line))
+
+        // Roles and styles in this line, from the style runs (which are in order).
+        while runIndex < runs.count - 1, runs[runIndex].range.upperBound <= range.lowerBound { runIndex += 1 }
+        let first = runs.isEmpty ? StyleRun(range: range, role: .body) : runs[runIndex]
+        var color: UInt8? = ColorIndex.of(first.role, first.styles)
+        var lineHeight = typography.lineHeight(first.role)
+        var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
+        var index = runIndex + 1
+        while index < runs.count, runs[index].range.lowerBound < range.upperBound {
+            let run = runs[index]
+            if ColorIndex.of(run.role, run.styles) != color { color = nil }
+            lineHeight = max(lineHeight, typography.lineHeight(run.role))
+            isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
+            index += 1
+        }
+
+        let halfLeading = (lineHeight - (ascent + descent)) / 2
+        let baseline = top + halfLeading + ascent
+        let endsWithNewline = !range.isEmpty && CFStringGetCharacterAtIndex(string, range.upperBound - 1) == 0x0A
+        let layout = LineLayout(line: line, range: range, x: x, maxX: maxX ?? visibleWidth, top: top, height: lineHeight,
+                                baseline: baseline, color: color, endsWithNewline: endsWithNewline, codeBlock: codeBlock,
+                                decorations: isDecorated ? decorations(of: line, baseline: baseline, runs: runs, links: links,
+                                                                       linkOffset: linkOffset, typography: typography) : [])
+        return (layout, codeBlock >= 0 ? visibleWidth : width)
+    }
+
     /// The decorations of one line, from its glyph runs, so they follow the
     /// glyphs' visual positions. Nothing is decorated under the trailing
-    /// whitespace of a wrapped line.
-    static func decorations(of line: CTLine, baseline: CGFloat, block: MarkdownBlock,
-                            typography: Typography) -> [Decoration] {
+    /// whitespace of a wrapped line. `runs` and `links` index the line's
+    /// string; an underline's tag is its link's index plus `linkOffset`.
+    static func decorations(of line: CTLine, baseline: CGFloat, runs: [StyleRun], links: ArraySlice<MarkdownLink>,
+                            linkOffset: Int, typography: Typography) -> [Decoration] {
         let visibleWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line))
         var decorations: [Decoration] = []
         for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] where CTRunGetGlyphCount(run) > 0 {
             let location = CTRunGetStringRange(run).location
-            let styleIndex = styleRunIndex(in: block.styleRuns, at: location)
-            guard styleIndex < block.styleRuns.count else { continue }
-            let style = block.styleRuns[styleIndex]
+            let styleIndex = styleRunIndex(in: runs, at: location)
+            guard styleIndex < runs.count else { continue }
+            let style = runs[styleIndex]
             guard !style.styles.isDisjoint(with: Decoration.styles) else { continue }
             var origin = CGPoint.zero
             CTRunGetPositions(run, CFRange(location: 0, length: 1), &origin)
@@ -226,10 +304,11 @@ public final class BlockLayout: @unchecked Sendable {
                     decorations.append(Decoration(kind: .codeBackground, rect: rect, color: 0, tag: Int32(styleIndex)))
                 }
             }
-            if style.styles.contains(.link), let link = linkIndex(in: block.links, at: location) {
+            if style.styles.contains(.link), let link = linkIndex(in: links, at: location) {
                 let y = baseline - CTFontGetUnderlinePosition(base) - thickness / 2
-                decorations.append(Decoration(kind: .underline, rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),
-                                              color: ColorIndex.link, tag: Int32(link)))
+                decorations.append(Decoration(kind: .underline,
+                                              rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),
+                                              color: ColorIndex.link, tag: Int32(link - links.startIndex + linkOffset)))
             }
             if style.styles.contains(.strikethrough) {
                 let y = baseline - CTFontGetXHeight(typography.font(style.role, style.styles)) / 2 - thickness / 2
@@ -251,14 +330,21 @@ public final class BlockLayout: @unchecked Sendable {
         return low
     }
 
-    private static func linkIndex(in links: [MarkdownLink], at offset: Int) -> Int? {
-        var low = 0
-        var high = links.count
+    /// The index in `links` of the link holding a UTF-16 offset.
+    static func linkIndex(in links: ArraySlice<MarkdownLink>, at offset: Int) -> Int? {
+        let index = firstLink(in: links, endingAfter: offset)
+        return index < links.endIndex && links[index].range.contains(offset) ? index : nil
+    }
+
+    /// The index of the first link that ends after `offset`, or the end index.
+    static func firstLink(in links: ArraySlice<MarkdownLink>, endingAfter offset: Int) -> Int {
+        var low = links.startIndex
+        var high = links.endIndex
         while low < high {
             let mid = (low + high) / 2
             if links[mid].range.upperBound <= offset { low = mid + 1 } else { high = mid }
         }
-        return low < links.count && links[low].range.contains(offset) ? low : nil
+        return low
     }
 
     /// The style run at a UTF-16 offset of the display text.
@@ -314,26 +400,34 @@ extension BlockLayout {
                        isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
         let kept = existing?.map { $0.isFinal(for: columnWidth) ? $0 : nil }
             ?? [BlockLayout?](repeating: nil, count: blocks.count)
-        return layOut(blocks, filling: kept, columnWidth: columnWidth, typography: typography, isCancelled: isCancelled)
+        return layOut(blocks, filling: kept, hints: existing, columnWidth: columnWidth, typography: typography,
+                      isCancelled: isCancelled)
     }
 
     /// Lays out the blocks whose entry in `layouts` is nil, in parallel when
     /// there are several, and keeps the others. Work is proportional to the
-    /// blocks laid out, plus one pass over `layouts`.
-    static func layOut(_ blocks: [MarkdownBlock], filling layouts: [BlockLayout?], columnWidth: CGFloat,
-                       typography: Typography, isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
+    /// blocks laid out, plus one pass over `layouts`. `hints` (one per block)
+    /// lend tables what still applies of an earlier layout.
+    static func layOut(_ blocks: [MarkdownBlock], filling layouts: [BlockLayout?], hints: [BlockLayout?]? = nil,
+                       columnWidth: CGFloat, typography: Typography,
+                       isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
         precondition(layouts.count == blocks.count, "one layout per block")
         let missing = layouts.indices.filter { layouts[$0] == nil }
         var layouts = layouts
         if missing.count == 1, !isCancelled() {
-            layouts[missing[0]] = BlockLayout(block: blocks[missing[0]], columnWidth: columnWidth, typography: typography)
+            let index = missing[0]
+            layouts[index] = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
+                                  isCancelled: isCancelled)
         } else if missing.count > 1 {
             let results = ResultBuffer(count: missing.count)
             defer { results.free() }
             DispatchQueue.concurrentPerform(iterations: missing.count) { slot in
                 guard !isCancelled() else { return }
                 let index = missing[slot]
-                results.store(BlockLayout(block: blocks[index], columnWidth: columnWidth, typography: typography), at: slot)
+                if let layout = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
+                                     isCancelled: isCancelled) {
+                    results.store(layout, at: slot)
+                }
             }
             guard let laidOut = results.collect() else { return nil }
             for (slot, index) in missing.enumerated() { layouts[index] = laidOut[slot] }

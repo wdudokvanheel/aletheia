@@ -5,8 +5,10 @@ import Foundation
 
 /// A caret position: a block index plus a UTF-16 offset in that block's
 /// display text, from 0 to its length. Positions order by block, then offset,
-/// which is document order. When tables lay out per cell, a cell index will
-/// order between the two.
+/// which is document order. In a table the offset also names the cell: the
+/// display text lists cells in row-major order, separated by tabs within a
+/// row and newlines between rows, so the cell index is the one whose range
+/// holds the offset and table positions order row-major.
 public struct TextPosition: Sendable, Hashable, Comparable {
     public var block: Int
     public var offset: Int
@@ -71,16 +73,25 @@ extension MarkdownSnapshot {
 
     private func position(inBlock index: Int, at point: CGPoint, codeOffsets: CodeOffsets) -> TextPosition {
         let layout = layouts[index]
-        guard !layout.lines.isEmpty else {
-            // An estimate that is not laid out yet.
-            return point.y < blockTops[index] + layout.height / 2 ? start(of: index) : end(of: index)
-        }
         let y = point.y - blockTops[index]
-        var lineIndex = min(layout.firstLine(endingBelow: y), layout.lines.count - 1)
+        var lineIndex = layout.lines.isEmpty ? -1 : min(layout.firstLine(endingBelow: y), layout.lines.count - 1)
         // Between two lines, as between list items or paragraphs in a quote.
         if lineIndex > 0, y < layout.lines[lineIndex].top {
             let above = layout.lines[lineIndex - 1]
             if y - (above.top + above.height) < layout.lines[lineIndex].top - y { lineIndex -= 1 }
+        }
+        // In a table, or nearer to one than to the nearest line.
+        if let (table, distance) = nearestTable(inBlock: index, toY: y) {
+            let lineDistance = lineIndex < 0 ? .greatestFiniteMagnitude
+                : max(layout.lines[lineIndex].top - y, y - layout.lines[lineIndex].top - layout.lines[lineIndex].height, 0)
+            if distance == 0 || distance < lineDistance {
+                let origin = tableOrigin(table, inBlock: index, codeOffsets)
+                return TextPosition(block: index, offset: table.offset(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)))
+            }
+        }
+        guard lineIndex >= 0 else {
+            // An estimate that is not laid out yet.
+            return point.y < blockTops[index] + layout.height / 2 ? start(of: index) : end(of: index)
         }
         let line = layout.lines[lineIndex]
         let x = point.x - columnX - line.x + codeOffset(of: line, inBlock: index, codeOffsets)
@@ -93,13 +104,51 @@ extension MarkdownSnapshot {
         return codeOffsets[CodeBlockID(block: index, code: Int(line.codeBlock))] ?? 0
     }
 
+    // MARK: Tables
+
+    /// The table of block `index` nearest to `y` (block coordinates), and
+    /// how far `y` is outside it.
+    func nearestTable(inBlock index: Int, toY y: CGFloat) -> (table: TableLayout, distance: CGFloat)? {
+        var best: (table: TableLayout, distance: CGFloat)?
+        for table in layouts[index].tables {
+            let distance = max(table.rect.minY - y, y - table.rect.maxY, 0)
+            if best.map({ distance < $0.distance }) ?? true { best = (table, distance) }
+        }
+        return best
+    }
+
+    /// The table of block `index` whose box holds `y` (block coordinates).
+    func table(inBlock index: Int, atY y: CGFloat) -> TableLayout? {
+        layouts[index].tables.first { $0.rect.minY <= y && y < $0.rect.maxY }
+    }
+
+    /// The table of block `index` whose cells hold display offset `offset`,
+    /// counting the end of its last cell.
+    func table(inBlock index: Int, containing offset: Int) -> TableLayout? {
+        layouts[index].tables.first {
+            let range = $0.structure.displayRange
+            return range.lowerBound <= offset && offset <= range.upperBound
+        }
+    }
+
+    /// The top-left of a table of block `index` in view coordinates, moved
+    /// left by how far it is scrolled.
+    func tableOrigin(_ table: TableLayout, inBlock index: Int, _ codeOffsets: CodeOffsets) -> CGPoint {
+        let offset = codeOffsets.isEmpty ? 0 : codeOffsets[CodeBlockID(block: index, code: table.scrollIndex)] ?? 0
+        return CGPoint(x: columnX + table.rect.minX - offset, y: blockTops[index] + table.rect.minY)
+    }
+
     /// Whether `point` is over a line of selectable text rather than a margin
     /// or a list marker.
-    func isOverText(_ point: CGPoint) -> Bool {
+    func isOverText(_ point: CGPoint, codeOffsets: CodeOffsets = [:]) -> Bool {
         let index = firstBlock(endingBelow: point.y)
         guard index < layouts.count, blockTops[index] <= point.y, isSelectable(index) else { return false }
         let layout = layouts[index]
         let y = point.y - blockTops[index]
+        if let table = table(inBlock: index, atY: y) {
+            let origin = tableOrigin(table, inBlock: index, codeOffsets)
+            return table.line(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)) != nil
+        }
         let lineIndex = layout.firstLine(endingBelow: y)
         guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return false }
         let line = layout.lines[lineIndex]
@@ -111,8 +160,9 @@ extension MarkdownSnapshot {
     /// The range a click at `position` selects at `granularity`: nothing for
     /// characters, the word under it by system word boundaries, or its
     /// paragraph, which is the block's text between line separators: a whole
-    /// paragraph or heading, a list item, a code line, or a table row.
-    /// `forward` takes the word before the caret, for drags past the anchor.
+    /// paragraph or heading, a list item, or a code line; in a table, the
+    /// cell. `forward` takes the word before the caret, for drags past the
+    /// anchor.
     func unitRange(at position: TextPosition, granularity: SelectionGranularity,
                    forward: Bool = false) -> Range<TextPosition> {
         guard granularity != .character, position.block < layouts.count, isSelectable(position.block) else {
@@ -124,6 +174,11 @@ extension MarkdownSnapshot {
         var contentsEnd = 0
         text.getParagraphStart(&start, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: offset, length: 0))
         var range = start..<contentsEnd
+        if let table = document.blocks[position.block].tables.first(where: {
+            $0.displayRange.lowerBound <= offset && offset <= $0.displayRange.upperBound
+        }), let cell = table.cell(containing: offset) {
+            range = table.cell(cell.row, cell.column)
+        }
         if granularity == .word, !range.isEmpty {
             let index = min(max(forward ? offset - 1 : offset, start), contentsEnd - 1)
             range = Self.wordRange(in: text, at: index, within: range)
@@ -166,6 +221,16 @@ extension MarkdownSnapshot {
             let start = index == range.lowerBound.block ? range.lowerBound.offset : 0
             let end = index == range.upperBound.block ? range.upperBound.offset : Int.max
             let continuesToNextBlock = index < range.upperBound.block
+            for table in layout.tables where top + table.rect.maxY > minY && top + table.rect.minY < maxY {
+                let origin = tableOrigin(table, inBlock: index, codeOffsets)
+                let box = table.rect.offsetBy(dx: columnX, dy: top)
+                let isScrollable = table.width > table.rect.width
+                for rect in table.selectionRects(start, end, minY: minY - origin.y, maxY: maxY - origin.y) {
+                    var rect = rect.offsetBy(dx: origin.x, dy: origin.y)
+                    if isScrollable { rect = rect.intersection(box) }
+                    if !rect.isNull, !rect.isEmpty { rects.append(rect) }
+                }
+            }
             var lineIndex = layout.firstLine(endingBelow: minY - top)
             while lineIndex < layout.lines.count, top + layout.lines[lineIndex].top < maxY {
                 let line = layout.lines[lineIndex]
@@ -224,6 +289,11 @@ extension MarkdownSnapshot {
         guard position.block < layouts.count else { return .null }
         let layout = layouts[position.block]
         let top = blockTops[position.block]
+        if let table = table(inBlock: position.block, containing: position.offset), !table.rows.isEmpty,
+           let cell = table.structure.cell(containing: position.offset), cell.row < table.rows.count {
+            let band = table.rowBand(cell.row)
+            return CGRect(x: columnX, y: top + table.rect.minY + band.top, width: columnWidth, height: band.height)
+        }
         guard !layout.lines.isEmpty else { return CGRect(x: columnX, y: top, width: columnWidth, height: layout.height) }
         let line = layout.lines[layout.lineIndex(containing: position.offset, upstream: upstream)]
         return CGRect(x: columnX, y: top + line.top, width: columnWidth, height: line.height)
@@ -234,6 +304,11 @@ extension MarkdownSnapshot {
     func baselineOrigin(of position: TextPosition, codeOffsets: CodeOffsets = [:]) -> (point: CGPoint, style: StyleRun)? {
         guard position.block < layouts.count else { return nil }
         let layout = layouts[position.block]
+        if let table = table(inBlock: position.block, containing: position.offset),
+           let caret = table.caretOrigin(of: position.offset) {
+            let origin = tableOrigin(table, inBlock: position.block, codeOffsets)
+            return (CGPoint(x: origin.x + caret.x, y: origin.y + caret.y), layout.styleRun(at: position.offset))
+        }
         guard !layout.lines.isEmpty else { return nil }
         let line = layout.lines[layout.lineIndex(containing: position.offset, upstream: false)]
         let x = CTLineGetOffsetForStringIndex(line.line, position.offset, nil)
@@ -246,13 +321,24 @@ extension MarkdownSnapshot {
 
     /// The destination of the link whose text is under `point`, in view
     /// coordinates: within a line box, between the link's glyph edges.
-    func linkDestination(at point: CGPoint) -> String? {
+    func linkDestination(at point: CGPoint, codeOffsets: CodeOffsets = [:]) -> String? {
         let index = firstBlock(endingBelow: point.y)
         guard index < layouts.count, blockTops[index] <= point.y else { return nil }
         let layout = layouts[index]
         let links = document.blocks[index].links
         guard !links.isEmpty else { return nil }
         let y = point.y - blockTops[index]
+        if let table = table(inBlock: index, atY: y) {
+            let origin = tableOrigin(table, inBlock: index, codeOffsets)
+            guard let hit = table.line(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)) else { return nil }
+            let x = point.x - origin.x - hit.origin.x
+            for decoration in hit.line.decorations where decoration.kind == .underline {
+                if decoration.rect.minX <= x, x < decoration.rect.maxX, links.indices.contains(Int(decoration.tag)) {
+                    return links[Int(decoration.tag)].destination
+                }
+            }
+            return nil
+        }
         let lineIndex = layout.firstLine(endingBelow: y)
         guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
         // Code blocks have no links, so scrolling never moves one.

@@ -21,6 +21,10 @@ import CoreText
 /// | Code blocks | monospaced 0.9 em (13.5 pt) at line height 1.6, 12 pt padding, 4 pt radius, 13.5 pt margins (1 em of 0.9 em), tabs every 8 spaces, no wrapping | stylesheet `pre`, default `pre` margins and `tab-size` |
 /// | Inline code | 0.9 em, 4 pt beside it | stylesheet `code` |
 /// | Thematic breaks | 1 pt rule, 7.5 pt (0.5 em) margins | stylesheet `hr`, default margins |
+/// | Tables | 1 pt borders in the muted color, cells padded 6 pt above and below and 12 pt beside, text vertically centered, no margins or backgrounds | stylesheet `table`, `th, td`; default `vertical-align: middle` |
+/// | Table header cells | bold, centered unless the column is aligned | default `th` |
+/// | Table cells | not kerned: kerning costs about ten times the rest of shaping, which tables with thousands of cells cannot afford, and Core Text already drops it for any text over about 10,000 characters | — |
+/// | Table columns | as wide as their widest cell; when the table is wider than the column, the space is shared in proportion to those widths, columns no wider than an equal share keep their width, none gets under 60 pt, and cells wrap; when even that does not fit, it scrolls on its own, with columns at their natural width up to half the space | stylesheet `overflow-x: auto` |
 ///
 /// The stylesheet sets code block text to 0.9 em twice (`pre` and `pre code`),
 /// so WebKit shows it at 12.15 pt in 21.6 pt lines; here it is 13.5 pt in the
@@ -60,6 +64,14 @@ public final class Typography: @unchecked Sendable {
     public let ruleThickness: CGFloat = 1
     public let ruleMargin: CGFloat = 7.5
 
+    /// Table borders, collapsed between cells.
+    public let tableBorderWidth: CGFloat = 1
+    public let tableCellVerticalPadding: CGFloat = 6
+    public let tableCellHorizontalPadding: CGFloat = 12
+    /// The narrowest a column's text gets when its table is wider than the
+    /// space it has; a column that is narrower by nature keeps its width.
+    public let tableMinimumColumnWidth: CGFloat = 60
+
     /// How far each list level indents its items' text.
     public let listIndent: CGFloat = 40
     /// The gap between a list marker or task box and the item's text.
@@ -84,12 +96,15 @@ public final class Typography: @unchecked Sendable {
     /// Indexed by `Self.index(role, styles)`.
     private let styledFonts: [CTFont]
     private let styledAttributes: [CFDictionary]
+    /// The same without kerning, for table cells.
+    private let unkernedAttributes: [CFDictionary]
 
     private init() {
         var fonts: [CTFont] = []
         var lineHeights: [CGFloat] = []
         var styledFonts: [CTFont] = []
         var styledAttributes: [CFDictionary] = []
+        var unkernedAttributes: [CFDictionary] = []
         // Keeps runs with the same font but different inline styles apart, so
         // each can be colored and decorated.
         let styleAttribute = "MarkdownViewInlineStyle" as CFString
@@ -130,12 +145,15 @@ public final class Typography: @unchecked Sendable {
                 if !styles.isEmpty { attributes[styleAttribute] = NSNumber(value: styles.rawValue) }
                 if let tabs { attributes[kCTParagraphStyleAttributeName] = tabs }
                 styledAttributes.append(attributes as CFDictionary)
+                attributes[kCTKernAttributeName] = 0 as NSNumber
+                unkernedAttributes.append(attributes as CFDictionary)
             }
         }
         self.fonts = fonts
         self.lineHeights = lineHeights
         self.styledFonts = styledFonts
         self.styledAttributes = styledAttributes
+        self.unkernedAttributes = unkernedAttributes
     }
 
     private static func makeFont(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> CTFont {
@@ -179,8 +197,8 @@ public final class Typography: @unchecked Sendable {
 
     /// Core Text attributes for a role with inline styles. Glyphs take their
     /// color from the context, which the view sets per run at draw time.
-    func attributes(_ role: TextRole, _ styles: InlineStyle) -> CFDictionary {
-        styledAttributes[Self.index(role, styles)]
+    func attributes(_ role: TextRole, _ styles: InlineStyle, kerned: Bool = true) -> CFDictionary {
+        (kerned ? styledAttributes : unkernedAttributes)[Self.index(role, styles)]
     }
 
     func lineHeight(_ role: TextRole) -> CGFloat { lineHeights[Int(role.rawValue)] }

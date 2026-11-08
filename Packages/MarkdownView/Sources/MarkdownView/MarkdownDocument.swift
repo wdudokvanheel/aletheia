@@ -147,6 +147,73 @@ struct BlockSegment: Sendable, Equatable {
     var range: Range<Int> { Int(start)..<Int(end) }
 }
 
+/// How a table column aligns its cells, from the table's delimiter row.
+enum TableAlignment: UInt8, Sendable {
+    case none, left, center, right
+}
+
+/// A table's grid inside its block: where each cell's text is in the
+/// block's display text, and each row's source line. The display text
+/// lists the cells in row-major order, separated by tabs within a row and
+/// by newlines between rows, so a display offset names its cell and display
+/// order is row-major.
+struct TableStructure: Sendable, Equatable {
+    var alignments: [TableAlignment]
+    /// Whether the first row is a header row; front matter tables have none.
+    var hasHeader: Bool
+    /// Inside a block quote, where the text takes the quote's role.
+    var isQuoted: Bool
+    /// UTF-16 ranges in the block's display text, `columnCount` per row.
+    var cells: [Range<Int32>] = []
+    /// Each row's source line, without its line break, as UTF-8 offsets
+    /// into the block's source text. Rows with equal lines (and the same
+    /// column count, header flag, and quoting) display the same cells.
+    var rowLines: [Range<Int32>] = []
+    /// Each row's start as a UTF-16 offset into the block's source text.
+    var rowSourceStarts: [Int32] = []
+
+    var columnCount: Int { alignments.count }
+    var rowCount: Int { rowLines.count }
+
+    func cell(_ row: Int, _ column: Int) -> Range<Int> {
+        let range = cells[row * columnCount + column]
+        return Int(range.lowerBound)..<Int(range.upperBound)
+    }
+
+    /// From the first cell's start to the last cell's end.
+    var displayRange: Range<Int> {
+        guard let first = cells.first, let last = cells.last else { return 0..<0 }
+        return Int(first.lowerBound)..<Int(last.upperBound)
+    }
+
+    /// The row and column of the cell holding a display offset: the last
+    /// cell starting at or before it, so an offset between two cells (at a
+    /// tab or newline) belongs to the cell it ends.
+    func cell(containing offset: Int) -> (row: Int, column: Int)? {
+        guard !cells.isEmpty, columnCount > 0 else { return nil }
+        var low = 0
+        var high = cells.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Int(cells[mid].lowerBound) <= offset { low = mid + 1 } else { high = mid }
+        }
+        let index = max(low - 1, 0)
+        return (index / columnCount, index % columnCount)
+    }
+
+    /// The row whose source line starts at `offset` (UTF-16, relative to the
+    /// block's source), or nil.
+    func row(startingAtSource offset: Int) -> Int? {
+        var low = 0
+        var high = rowSourceStarts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if Int(rowSourceStarts[mid]) < offset { low = mid + 1 } else { high = mid }
+        }
+        return low < rowSourceStarts.count && Int(rowSourceStarts[low]) == offset ? low : nil
+    }
+}
+
 /// A block quote, list, or list item around a run of segments. Containers are
 /// listed parents first, in document order.
 struct BlockContainer: Sendable, Equatable {
@@ -217,6 +284,9 @@ public struct MarkdownBlock: Sendable, Equatable {
     /// other blocks, which are one segment of their kind.
     var segments: [BlockSegment] = []
     var containers: [BlockContainer] = []
+    /// The grid of each table in the block, in display order: one for a
+    /// table block, any number in a list or quote.
+    var tables: [TableStructure] = []
 
     /// Without a source map, display offsets map to the same source offsets.
     public init(kind: Kind, sourceRange: Range<Int>, sourceText: String, text: String, styleRuns: [StyleRun],

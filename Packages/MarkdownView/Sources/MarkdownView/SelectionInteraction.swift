@@ -17,7 +17,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
         let extending = event.modifierFlags.contains(.shift)
         // Only a plain single click opens; double and triple clicks select.
         pressedLink = event.clickCount == 1 && !extending
-            ? snapshot.linkDestination(at: point).map { ($0, point) } : nil
+            ? snapshot.linkDestination(at: point, codeOffsets: codeOffsets).map { ($0, point) } : nil
         beginSelection(at: point, clickCount: event.clickCount, extending: extending)
     }
 
@@ -60,7 +60,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
 
     private func updateCursor(for event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        (snapshot.linkDestination(at: point) != nil ? NSCursor.pointingHand : NSCursor.iBeam).set()
+        (snapshot.linkDestination(at: point, codeOffsets: codeOffsets) != nil ? NSCursor.pointingHand : NSCursor.iBeam).set()
     }
 
     /// Starts a selection at `point`: a click selects nothing, a double-click
@@ -228,7 +228,8 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
         if let position = snapshot.position(at: point, codeOffsets: codeOffsets),
            !(selection.map { $0.lowerBound <= position && position <= $0.upperBound } ?? false) {
             let word = snapshot.unitRange(at: position, granularity: .word)
-            let isWord = snapshot.isOverText(point) && snapshot.text(in: word).contains { !$0.isWhitespace }
+            let isWord = snapshot.isOverText(point, codeOffsets: codeOffsets)
+                && snapshot.text(in: word).contains { !$0.isWhitespace }
             selectionAnchor = isWord ? word : nil
             setSelection(isWord ? word : nil)
         }
