@@ -590,6 +590,14 @@ final class MarkdownDocumentView: NSView {
                                              visible.maxY + 2 * visible.height))
     }
 
+    /// On a display with another scale, images may need more pixels and
+    /// everything redraws; layout is in points and stays.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+        images.schedulePass()
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true

@@ -96,6 +96,9 @@ final class ImageStore {
         self.view = view
     }
 
+    /// The backing scale to load images for instead of the window's; for tests.
+    var scaleOverride: CGFloat?
+
     var retainedCount: Int { retained.count }
     var requestsInFlight: Int { requests.count }
     var isAnimating: Bool { timer != nil }
@@ -163,7 +166,7 @@ final class ImageStore {
             return updateAnimation()
         }
         clock += 1
-        let scale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let scale = scaleOverride ?? view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         let margin = max(visible.height, 200)
         let blocks = snapshot.document.blocks
         // What is wanted, in order: the visible lines, then a screen below and above.

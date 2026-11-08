@@ -161,6 +161,31 @@ final class ImageLoadingTests: XCTestCase {
         XCTAssertEqual(stub.requests.count, 1)
     }
 
+    func testADisplayWithAnotherScaleGetsSharperImagesWithoutALayout() throws {
+        stub.sizes = ["a.png": CGSize(width: 64, height: 48)]
+        store.scaleOverride = 1
+        load("![a](a.png)\n\nAfter.")
+        waitUntil { stub.requests.count == 1 }
+        XCTAssertEqual(stub.requests[0].scale, 1)
+        stub.answer(0)
+        waitUntil { view.snapshot.layouts[0].drawsImages }
+        let layouts = view.snapshot.layouts
+        window.display()
+        // Moved to a 2x display: the image is asked for again with more
+        // pixels, and the same layouts redraw.
+        store.scaleOverride = 2
+        canvas.viewDidChangeBackingProperties()
+        waitUntil { stub.requests.count == 2 }
+        XCTAssertEqual(stub.requests[1].scale, 2)
+        stub.answer(1)
+        settle(0.2)
+        XCTAssertEqual(view.snapshot.layouts.count, layouts.count)
+        XCTAssertTrue(zip(view.snapshot.layouts, layouts).allSatisfy { $0 === $1 }, "no layout depends on the scale")
+        canvas.viewDidChangeBackingProperties()
+        settle()
+        XCTAssertEqual(stub.requests.count, 2, "sharp enough now")
+    }
+
     func testALoadRelaysOutOnlyItsBlockAndKeepsTheTopVisibleBlockInPlace() throws {
         stub.sizes = ["a.png": CGSize(width: 200, height: 150)]
         load(paragraphs(60, images: [10: "a"]))
