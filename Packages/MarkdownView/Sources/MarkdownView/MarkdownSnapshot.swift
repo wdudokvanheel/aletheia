@@ -28,6 +28,8 @@ public struct MarkdownSnapshot: Sendable {
     /// How `document` relates to the snapshot it was diffed against, kept by
     /// every relayout of the same document.
     let update: BlockUpdate?
+    /// The natural sizes of the loaded images it was laid out with.
+    let images: ImageSizes
 
     private static let ids = Atomic<UInt64>(0)
     #if DEBUG
@@ -47,7 +49,7 @@ public struct MarkdownSnapshot: Sendable {
     /// Computes the y offsets as prefix sums, in one pass over the layouts.
     /// Snapshots are built off the main thread; installing one only reads them.
     init(document: MarkdownDocument, layouts: [BlockLayout], width: CGFloat, typography: Typography,
-         generation: UInt64, update: BlockUpdate?) {
+         generation: UInt64, update: BlockUpdate?, images: ImageSizes = .none) {
         precondition(layouts.count == document.blocks.count, "one layout per block")
         #if DEBUG
         Self.prefixSumPasses.add(1, ordering: .relaxed)
@@ -58,8 +60,8 @@ public struct MarkdownSnapshot: Sendable {
         var y = typography.topInset
         var pendingMargin: CGFloat = 0
         var complete = true
-        for layout in layouts {
-            complete = complete && layout.isFinal(for: column.width)
+        for (index, layout) in layouts.enumerated() {
+            complete = complete && layout.isFinal(for: column.width, images: images, block: document.blocks[index])
             if layout.isDropped {
                 tops.append(y)
                 continue
@@ -81,15 +83,23 @@ public struct MarkdownSnapshot: Sendable {
         self.typography = typography
         id = Self.ids.add(1, ordering: .relaxed).newValue
         self.update = update
+        self.images = images
     }
 
     /// Lays out every block of `document` for a view `width`, in parallel.
     public static func layOut(_ document: MarkdownDocument, width: CGFloat, typography: Typography = .standard,
                               generation: UInt64 = 0) -> MarkdownSnapshot {
+        layOut(document, width: width, typography: typography, generation: generation, images: .none)
+    }
+
+    /// The same, with the images loaded in `images`.
+    static func layOut(_ document: MarkdownDocument, width: CGFloat, typography: Typography = .standard,
+                       generation: UInt64 = 0, images: ImageSizes) -> MarkdownSnapshot {
         let columnWidth = typography.column(forWidth: width).width
-        let layouts = BlockLayout.layOut(document.blocks, columnWidth: columnWidth, typography: typography) ?? []
+        let layouts = BlockLayout.layOut(document.blocks, columnWidth: columnWidth, typography: typography,
+                                         images: images) ?? []
         return MarkdownSnapshot(document: document, layouts: layouts, width: width, typography: typography,
-                                generation: generation)
+                                generation: generation, update: nil, images: images)
     }
 
     /// The blocks whose boxes intersect `minY..<maxY`, found by binary search.
@@ -117,7 +127,7 @@ public struct MarkdownSnapshot: Sendable {
 
     func with(generation: UInt64) -> MarkdownSnapshot {
         MarkdownSnapshot(document: document, layouts: layouts, width: width, typography: typography,
-                         generation: generation, update: update)
+                         generation: generation, update: update, images: images)
     }
 
     /// A scroll position as a block index plus a fraction of that block's

@@ -31,6 +31,9 @@ import CoreText
 /// same lines.
 public final class Typography: @unchecked Sendable {
     public static let standard = Typography()
+    /// Marks alt text, whose attributes are otherwise those of the text
+    /// around it, so Core Text keeps it in runs of its own to color.
+    nonisolated(unsafe) static let imageAttribute = "MarkdownViewImage" as CFString
 
     public let bodyFontSize: CGFloat = 15
     /// Line height as a multiple of the font size: body, quote, and code text.

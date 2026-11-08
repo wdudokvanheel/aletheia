@@ -19,18 +19,28 @@ struct BlockLayoutBuilder {
     var hint: BlockLayout?
     /// How much of a table block's table to lay out.
     var tableRows = TableRows.all
+    /// The natural sizes of the images loaded so far.
+    var images = ImageSizes.none
     private(set) var isCancelled = false
     private(set) var lines: [LineLayout] = []
     private(set) var boxes: [BlockBox] = []
     private(set) var markers: [MarkerLayout] = []
     private(set) var codeBlocks: [CodeBlockLayout] = []
     private(set) var tables: [TableLayout] = []
+    /// See `BlockLayout`.
+    private(set) var imageSizes: [CGSize?] = []
+    private(set) var imageWidths: [CGFloat] = []
+    private(set) var drawsImages = false
     /// The display text, then its attributed string and typesetter, made
     /// when a segment first needs them: tables lay out cell by cell, so a
     /// table block never shapes its whole text at once.
     private var text: CFString?
     private var string: CFAttributedString?
     private var typesetter: CTTypesetter?
+    /// The images of the typesetter's string, fitted to `imageWidth`. A
+    /// block with loaded images gets a typesetter per text width.
+    private var imageText: ImageText?
+    private var imageWidth: CGFloat = 0
     /// The style run the next line starts in.
     private var runIndex = 0
     /// UTF-16 offsets of the display text's newlines, for estimates.
@@ -66,6 +76,10 @@ struct BlockLayoutBuilder {
         let segments = block.segments.isEmpty ? Self.segments(of: block, textLength: textLength) : block.segments
         let containers = block.containers
         if !isEstimate, textLength > 0 { text = BlockLayout.makeText(block) }
+        if !isEstimate, !block.images.isEmpty {
+            imageSizes = block.images.map { BlockLayout.size($0.source, in: images) }
+            imageWidths = [CGFloat](repeating: 0, count: block.images.count)
+        }
         // A segment's lines run to where the next text starts, so the newline
         // separating them ends its last line.
         var lineEnds = [Int](repeating: textLength, count: segments.count)
@@ -198,28 +212,53 @@ struct BlockLayoutBuilder {
 
     // MARK: Lines
 
-    /// Makes the attributed display text and its typesetter, once.
-    private mutating func prepareTypesetter() {
-        guard typesetter == nil, let text,
-              let string = BlockLayout.makeString(text, runs: block.styleRuns, typography: typography) else { return }
+    /// Makes the attributed display text and its typesetter, once, with
+    /// images fitted to `width`; again for another width when images are
+    /// loaded.
+    private mutating func prepareTypesetter(width: CGFloat) {
+        if typesetter != nil, imageText?.hasLoaded != true || imageWidth == width { return }
+        guard let text else { return }
+        let images = imageSizes.isEmpty ? nil : ImageText(block: block, sizes: imageSizes, width: width)
+        guard let string = BlockLayout.makeString(text, runs: block.styleRuns, typography: typography,
+                                                  images: images) else { return }
         self.string = string
+        imageText = images
+        imageWidth = width
         typesetter = CTTypesetterCreateWithAttributedString(string)
     }
 
     /// Wraps text with `CTTypesetter` at `width`, one line box per line.
     private mutating func layOutText(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat) -> CGFloat {
         guard !range.isEmpty else { return 0 }
-        prepareTypesetter()
+        prepareTypesetter(width: width)
         guard let typesetter else { return estimatedHeight(of: range, width: width) }
         var y = top
         var start = range.lowerBound
         while start < range.upperBound {
             let count = max(CTTypesetterSuggestLineBreak(typesetter, start, Double(width)), 1)
-            let end = min(start + count, range.upperBound)
+            var end = min(start + count, range.upperBound)
+            if let imageText { end = min(imageText.lineEnd(end), range.upperBound) }
             y += appendLine(start..<end, x: x, maxX: x + width, top: y, codeBlock: -1).height
             start = end
         }
+        recordImageWidths(in: range, width)
         return y - top
+    }
+
+    /// Notes `width` as the widest the images in `range` may be.
+    private mutating func recordImageWidths(in range: Range<Int>, _ width: CGFloat) {
+        guard !imageWidths.isEmpty else { return }
+        let images = block.images
+        var low = 0
+        var high = images.count
+        while low < high {
+            let mid = (low + high) / 2
+            if images[mid].range.lowerBound < range.lowerBound { low = mid + 1 } else { high = mid }
+        }
+        while low < images.count, images[low].range.upperBound <= range.upperBound {
+            imageWidths[low] = width
+            low += 1
+        }
     }
 
     /// A code block: its padded background box and one line per source
@@ -228,7 +267,8 @@ struct BlockLayoutBuilder {
         let padding = typography.codeBlockPadding
         var y = top + padding
         var widest: CGFloat = 0
-        if !range.isEmpty { prepareTypesetter() }
+        // Code has no images, so any typesetter will do.
+        if !range.isEmpty { prepareTypesetter(width: typesetter == nil ? width : imageWidth) }
         if !range.isEmpty, let string {
             var characters = [UniChar](repeating: 0, count: range.count)
             CFStringGetCharacters(CFAttributedStringGetString(string), CFRange(location: range.lowerBound, length: range.count),
@@ -261,10 +301,14 @@ struct BlockLayoutBuilder {
                                      codeBlock: Int32) -> (height: CGFloat, width: CGFloat) {
         guard let typesetter, let string else { return (0, 0) }
         let line = CTTypesetterCreateLine(typesetter, CFRange(location: range.lowerBound, length: range.count))
+        // Lines of blocks with images may hold run delegates, of loaded images
+        // or of placeholders.
+        let hasImages = imageText != nil
         let (layout, width) = BlockLayout.lineLayout(line, range: range, string: CFAttributedStringGetString(string),
                                                      runs: block.styleRuns, runIndex: &runIndex, links: block.links[...],
                                                      linkOffset: 0, x: x, maxX: maxX, top: top, codeBlock: codeBlock,
-                                                     typography: typography)
+                                                     typography: typography, hasImages: hasImages)
+        if hasImages, !drawsImages { drawsImages = layout.decorations.contains { $0.kind == .image } }
         lines.append(layout)
         return (layout.height, codeBlock >= 0 ? width : 0)
     }
@@ -282,9 +326,16 @@ struct BlockLayoutBuilder {
         if isEstimate { return TableLayout.estimatedHeight(of: structure, typography: typography) }
         guard let text else { return 0 }
         let hintTable = hint.flatMap { index < $0.tables.count ? $0.tables[index] : nil }
+        // Images in cells may take the widest text a cell gets: the table's
+        // whole width less its borders and padding.
+        let border = typography.tableBorderWidth
+        let cellWidth = max(width - CGFloat(structure.columnCount) * (border + 2 * typography.tableCellHorizontalPadding)
+                            - border, 1)
+        let images = imageSizes.isEmpty ? nil : ImageText(block: block, sizes: imageSizes, width: cellWidth)
+        recordImageWidths(in: structure.displayRange, cellWidth)
         guard let table = TableLayout.build(structure, block: block, text: text, x: x, top: top, width: width,
                                             scrollIndex: codeBlocks.count, typography: typography, hint: hintTable,
-                                            rows: tableRows, isCancelled: isCancelled) else {
+                                            rows: tableRows, images: images, isCancelled: isCancelled) else {
             self.isCancelled = true
             return 0
         }

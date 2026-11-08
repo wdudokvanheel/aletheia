@@ -165,6 +165,7 @@ enum MarkdownParser {
         block.segments = display.segments
         block.containers = display.containers
         block.tables = display.tables
+        block.images = display.images
         return block
     }
 
@@ -541,6 +542,7 @@ private struct DisplayText {
     private(set) var segments: [BlockSegment] = []
     private(set) var containers: [BlockContainer] = []
     private(set) var tables: [TableStructure] = []
+    private(set) var images: [InlineImage] = []
     private(set) var utf16Count = 0
     private var role = TextRole.body
     private var styles: InlineStyle = []
@@ -552,6 +554,12 @@ private struct DisplayText {
     private var linkDepth = 0
     private var linkStart = 0
     private var linkDestination = ""
+    /// Images nest only in image descriptions; the outermost one counts.
+    private var imageDepth = 0
+    private var imageStart = 0
+    private var imageSource = ""
+    /// The image's UTF-8 range in the source, from `!` to `)`.
+    private var imageSpan: Range<Int>?
 
     private let tracksStructure: Bool
     /// Indices in `containers` of the containers around the current node.
@@ -638,6 +646,15 @@ private struct DisplayText {
                     links.append(MarkdownLink(range: linkStart..<utf16Count, destination: linkDestination))
                 }
                 updateStyles()
+            case CMARK_NODE_IMAGE:
+                if entering {
+                    imageDepth += 1
+                    if imageDepth == 1 { beginImage(node) }
+                } else {
+                    if imageDepth == 1 { endImage() }
+                    imageDepth -= 1
+                }
+                updateStyles()
             case CMARK_NODE_PARAGRAPH:
                 if entering {
                     beginSegment()
@@ -674,10 +691,9 @@ private struct DisplayText {
                 appendByte(0x20)
             case CMARK_NODE_LINEBREAK:
                 appendByte(0x0A)
-            case CMARK_NODE_DOCUMENT, CMARK_NODE_HTML_BLOCK, CMARK_NODE_HTML_INLINE, CMARK_NODE_IMAGE:
+            case CMARK_NODE_DOCUMENT, CMARK_NODE_HTML_BLOCK, CMARK_NODE_HTML_INLINE:
                 // Raw HTML is dropped, blocks entirely and inline tags with
-                // the text between them kept; images contribute their alt
-                // text, which is their children.
+                // the text between them kept.
                 break
             default:
                 switch ExtensionNode(node) {
@@ -829,12 +845,38 @@ private struct DisplayText {
                                      end: Int32(clamping: utf16Count)))
     }
 
+    // MARK: Images
+
+    /// Starts an image, whose alt text is its children. The newline owed
+    /// before it comes first, so its range starts at its own text.
+    private mutating func beginImage(_ node: UnsafeMutablePointer<cmark_node>) {
+        flushSeparator()
+        imageStart = utf16Count
+        imageSource = cmark_node_get_url(node).map { String(cString: $0) } ?? ""
+        imageSpan = span(of: node)
+    }
+
+    /// Records the image just walked. One without alt text gets U+FFFC in
+    /// its place, mapped to where the image starts in the source, so it still
+    /// has a place in the text.
+    private mutating func endImage() {
+        if utf16Count == imageStart {
+            let start = imageSpan?.lowerBound ?? cursor
+            addAnchor(display: utf16Count, source: utf16Offset(ofUTF8: start) - blockStart.utf16)
+            bytes.append(contentsOf: [0xEF, 0xBF, 0xBC])
+            extendRun(by: 1, styles: styles)
+            if let imageSpan { cursor = max(cursor, imageSpan.upperBound) }
+        }
+        images.append(InlineImage(range: imageStart..<utf16Count, source: imageSource))
+    }
+
     private mutating func updateStyles() {
         var styles: InlineStyle = []
         if emphasisDepth > 0 { styles.insert(.emphasis) }
         if strongDepth > 0 { styles.insert(.strong) }
         if strikethroughDepth > 0 { styles.insert(.strikethrough) }
         if linkDepth > 0 { styles.insert(.link) }
+        if imageDepth > 0 { styles.insert(.image) }
         self.styles = styles
     }
 

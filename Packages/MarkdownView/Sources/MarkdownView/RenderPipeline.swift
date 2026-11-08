@@ -119,6 +119,9 @@ struct RenderRequest: Sendable {
     var complete: Bool
     /// The installed snapshot, which a new source is diffed against.
     var base: MarkdownSnapshot
+    /// The natural sizes of the images loaded so far. A relayout of the same
+    /// source with new sizes lays out only the blocks whose images changed.
+    var images: ImageSizes = .none
 }
 
 enum RenderOutcome: Sendable {
@@ -161,6 +164,7 @@ final class RenderWorker: @unchecked Sendable {
         guard !isSuperseded(generation) else { return }
         runs.add(1, ordering: .relaxed)
         let columnWidth = typography.column(forWidth: request.width).width
+        let images = request.images
         let isCancelled: @Sendable () -> Bool = { [self] in isSuperseded(generation) }
         var timings = Timings(generation: generation)
         let base: MarkdownSnapshot
@@ -171,7 +175,7 @@ final class RenderWorker: @unchecked Sendable {
         var lent: [BlockLayout?]?
 
         if let current, currentSourceGeneration == request.sourceGeneration {
-            if current.width == request.width, current.isComplete {
+            if current.width == request.width, current.isComplete, current.images === images {
                 timings.blockCount = current.layouts.count
                 timings.reusedBlocks = current.layouts.count
                 post(.snapshot(current.with(generation: generation), sourceGeneration: request.sourceGeneration,
@@ -197,7 +201,7 @@ final class RenderWorker: @unchecked Sendable {
             let update = BlockUpdate(baseID: request.base.id, match: parsed.match, edit: parsed.edit)
             let (reused, hints) = MarkdownSnapshot.reusableLayouts(from: request.base, match: parsed.match,
                                                                    blocks: document.blocks, columnWidth: columnWidth,
-                                                                   typography: typography)
+                                                                   typography: typography, images: images)
             timings.blockCount = document.blocks.count
             timings.reusedBlocks = reused.count(where: { $0 != nil })
             firstStep = request.plan.read()
@@ -207,32 +211,36 @@ final class RenderWorker: @unchecked Sendable {
                                                        typography: typography)
                 }
                 base = MarkdownSnapshot(document: document, layouts: layouts, width: request.width,
-                                        typography: typography, generation: generation, update: update)
+                                        typography: typography, generation: generation, update: update, images: images)
                 lent = hints
             } else {
                 let start = ContinuousClock.now
                 let layouts = signposter.withIntervalSignpost("layout") {
                     BlockLayout.layOut(document.blocks, filling: reused, hints: hints, columnWidth: columnWidth,
-                                       typography: typography, isCancelled: isCancelled)
+                                       typography: typography, images: images, isCancelled: isCancelled)
                 }
                 guard let layouts else { return }
                 timings.layout = ContinuousClock.now - start
                 timings.laidOutBlocks = layouts.count - timings.reusedBlocks
                 commit(MarkdownSnapshot(document: document, layouts: layouts, width: request.width,
-                                        typography: typography, generation: generation, update: update),
+                                        typography: typography, generation: generation, update: update, images: images),
                        request, timings, post: post)
                 return
             }
         }
         timings.blockCount = base.layouts.count
+        let blocks = base.document.blocks
+        /// Whether a layout of block `index` can stay.
+        func isFinal(_ layout: BlockLayout, _ index: Int) -> Bool {
+            layout.isFinal(for: columnWidth, images: images, block: blocks[index])
+        }
         if base.generation != generation {
-            timings.reusedBlocks = base.layouts.count(where: { $0.isFinal(for: columnWidth) })
+            timings.reusedBlocks = base.layouts.indices.count(where: { isFinal(base.layouts[$0], $0) })
         }
 
         // Step 1: the visible area before the rest.
         var start = ContinuousClock.now
         var layouts = base.layouts
-        let blocks = base.document.blocks
         let target = max(request.viewportHeight, 400) * 1.5
         /// What a block's next layout can reuse: its own layout, unless that
         /// is an estimate.
@@ -246,14 +254,15 @@ final class RenderWorker: @unchecked Sendable {
                 var index = base.firstBlock(endingBelow: top)
                 var covered: CGFloat = 0
                 while index < layouts.count, covered < target {
-                    if !layouts[index].isFinal(for: columnWidth) {
+                    if !isFinal(layouts[index], index) {
                         var rows = TableRows.all
                         if blocks[index].kind == .table, let table = layouts[index].tables.first {
                             let y = top - base.blockTops[index] - table.rect.minY
                             rows = .covering(first: y > 0 ? table.row(atY: y) : 0, height: target - covered)
                         }
                         guard let layout = BlockLayout.make(blocks[index], columnWidth: columnWidth, typography: typography,
-                                                            hint: hint(index), tableRows: rows, isCancelled: isCancelled)
+                                                            hint: hint(index), tableRows: rows, images: images,
+                                                            isCancelled: isCancelled)
                         else { return }
                         layouts[index] = layout
                         timings.laidOutBlocks += 1
@@ -271,7 +280,8 @@ final class RenderWorker: @unchecked Sendable {
             var done = 0
             while done < layouts.count, !isCancelled() {
                 var partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
-                                               typography: typography, generation: generation)
+                                               typography: typography, generation: generation, update: nil,
+                                               images: images)
                 let top: CGFloat = switch firstStep {
                 case .offset(let y): y
                 case .fraction(let fraction): fraction * partial.totalHeight
@@ -282,19 +292,21 @@ final class RenderWorker: @unchecked Sendable {
                 let last = end - 1
                 if last > done {
                     let range = done..<last
-                    let kept = layouts[range].map { $0.isFinal(for: columnWidth) ? $0 : nil }
+                    let kept = range.map { isFinal(layouts[$0], $0) ? layouts[$0] : nil }
                     guard let laidOut = BlockLayout.layOut(Array(blocks[range]), filling: kept, hints: range.map(hint),
                                                            columnWidth: columnWidth, typography: typography,
-                                                           isCancelled: isCancelled) else { return }
+                                                           images: images, isCancelled: isCancelled) else { return }
                     layouts.replaceSubrange(range, with: laidOut)
                     timings.laidOutBlocks += kept.count(where: { $0 == nil })
                     partial = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
-                                               typography: typography, generation: generation)
+                                               typography: typography, generation: generation, update: nil,
+                                               images: images)
                 }
-                if !layouts[last].isFinal(for: columnWidth) {
+                if !isFinal(layouts[last], last) {
                     let rows = TableRows.covering(first: 0, height: top + target - partial.blockTops[last])
                     guard let layout = BlockLayout.make(blocks[last], columnWidth: columnWidth, typography: typography,
-                                                        hint: hint(last), tableRows: rows, isCancelled: isCancelled)
+                                                        hint: hint(last), tableRows: rows, images: images,
+                                                        isCancelled: isCancelled)
                     else { return }
                     layouts[last] = layout
                     timings.laidOutBlocks += 1
@@ -304,7 +316,8 @@ final class RenderWorker: @unchecked Sendable {
         }
         guard !isCancelled() else { return }
         let visible = MarkdownSnapshot(document: base.document, layouts: layouts, width: request.width,
-                                       typography: typography, generation: generation, update: base.update)
+                                       typography: typography, generation: generation, update: base.update,
+                                       images: images)
         timings.layout = ContinuousClock.now - start
         commit(visible, request, timings, post: post)
         guard !visible.isComplete, request.complete, !isCancelled() else { return }
@@ -312,17 +325,17 @@ final class RenderWorker: @unchecked Sendable {
         // Step 2: everything else, in parallel, including the rest of a
         // partly laid out table.
         start = ContinuousClock.now
-        let kept = layouts.map { $0.isFinal(for: columnWidth) ? $0 : nil }
+        let kept = layouts.indices.map { isFinal(layouts[$0], $0) ? layouts[$0] : nil }
         let hints = layouts.indices.map(hint)
         let all = signposter.withIntervalSignpost("layout") {
             BlockLayout.layOut(blocks, filling: kept, hints: hints, columnWidth: columnWidth, typography: typography,
-                               isCancelled: isCancelled)
+                               images: images, isCancelled: isCancelled)
         }
         guard let all else { return }
         timings.layout += ContinuousClock.now - start
         timings.laidOutBlocks += kept.count(where: { $0 == nil })
         commit(MarkdownSnapshot(document: base.document, layouts: all, width: request.width, typography: typography,
-                                generation: generation, update: base.update),
+                                generation: generation, update: base.update, images: images),
                request, timings, post: post)
     }
 
@@ -362,14 +375,14 @@ final class RenderPipeline {
     @discardableResult
     func submit(sourceGeneration: UInt64, source: String, width: CGFloat, scrollFraction: CGFloat,
                 viewportHeight: CGFloat, visibleFirst: Bool, complete: Bool,
-                base: MarkdownSnapshot = .empty, plan: RenderPlan? = nil) -> UInt64 {
+                base: MarkdownSnapshot = .empty, plan: RenderPlan? = nil, images: ImageSizes = .none) -> UInt64 {
         generation += 1
         isCancelled = false
         worker.latestGeneration.store(generation, ordering: .relaxed)
         let request = RenderRequest(generation: generation, sourceGeneration: sourceGeneration, source: source,
                                     width: width, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
                                     plan: plan ?? RenderPlan(visibleFirst ? .offset(0) : .everything),
-                                    complete: complete, base: base)
+                                    complete: complete, base: base, images: images)
         let post: @Sendable (RenderOutcome) -> Void = { [weak self] outcome in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.receive(outcome) }

@@ -109,12 +109,14 @@ final class TableLayout: @unchecked Sendable {
     /// its hint; for tests.
     let measuredRows: Int
     let builtRows: Int
+    /// Whether a cell places an image.
+    let drawsImages: Bool
 
     var isPartial: Bool { estimatedRows > 0 }
 
     private init(rect: CGRect, columnEdges: [CGFloat], columnWidths: [CGFloat], structure: TableStructure,
                  rows: [TableRowLayout], rowTops: [CGFloat], width: CGFloat, estimatedRows: Int, scrollIndex: Int,
-                 sourceText: String, typography: Typography, measuredRows: Int, builtRows: Int) {
+                 sourceText: String, typography: Typography, measuredRows: Int, builtRows: Int, drawsImages: Bool) {
         self.rect = rect
         self.columnEdges = columnEdges
         self.columnWidths = columnWidths
@@ -130,6 +132,7 @@ final class TableLayout: @unchecked Sendable {
         self.typography = typography
         self.measuredRows = measuredRows
         self.builtRows = builtRows
+        self.drawsImages = drawsImages
     }
 
     /// The height of a table whose rows are one line each, for estimates.
@@ -144,14 +147,15 @@ final class TableLayout: @unchecked Sendable {
 
     // MARK: Building
 
-    /// Lays out the table at `top` in a box `width` wide at `x`. Nil when
-    /// `isCancelled` reports true; work is checked between chunks of rows.
+    /// Lays out the table at `top` in a box `width` wide at `x`, with the
+    /// block's `images` in their cells. Nil when `isCancelled` reports true;
+    /// work is checked between chunks of rows.
     static func build(_ structure: TableStructure, block: MarkdownBlock, text: CFString, x: CGFloat, top: CGFloat,
                       width available: CGFloat, scrollIndex: Int, typography: Typography, hint: TableLayout?,
-                      rows request: TableRows, isCancelled: () -> Bool) -> TableLayout? {
+                      rows request: TableRows, images: ImageText? = nil, isCancelled: () -> Bool) -> TableLayout? {
         let rowCount = structure.rowCount
         let columns = structure.columnCount
-        let source = RowsSource(structure: structure, block: block, text: text, typography: typography)
+        let source = RowsSource(structure: structure, block: block, text: text, typography: typography, images: images)
         let kept = hint.map { matchRows(of: $0, to: structure, sourceText: block.sourceText, typography: typography) }
         func keptRow(_ row: Int) -> TableRowLayout? {
             guard let kept, let hint, kept[row] >= 0 else { return nil }
@@ -334,10 +338,13 @@ final class TableLayout: @unchecked Sendable {
             edge += border + 2 * typography.tableCellHorizontalPadding + width
         }
         edges.append(edge)
+        let drawsImages = images?.hasLoaded == true
+            && rows.contains { $0.lines.contains { $0.decorations.contains { $0.kind == .image } } }
         return TableLayout(rect: CGRect(x: x, y: top, width: available, height: y + border), columnEdges: edges,
                            columnWidths: widths, structure: structure, rows: rows, rowTops: rowTops, width: edge + border,
                            estimatedRows: estimated, scrollIndex: scrollIndex, sourceText: block.sourceText,
-                           typography: typography, measuredRows: measure.count, builtRows: rowCount - keptCount)
+                           typography: typography, measuredRows: measure.count, builtRows: rowCount - keptCount,
+                           drawsImages: drawsImages)
     }
 
     /// Column text widths: the natural widths when they fit `available`;
@@ -659,6 +666,7 @@ private struct RowsSource {
     let block: MarkdownBlock
     let text: CFString
     let typography: Typography
+    let images: ImageText?
 
     /// About this many UTF-16 units of rows go into one string: enough to
     /// save most of the cost of a typesetter per row, and few enough to
@@ -687,7 +695,7 @@ private struct RowsSource {
     }
 
     func text(of rows: Range<Int>) -> RowsText? {
-        RowsText(rows: rows, structure: structure, block: block, text: text, typography: typography)
+        RowsText(rows: rows, structure: structure, block: block, text: text, typography: typography, images: images)
     }
 }
 
@@ -699,13 +707,18 @@ private final class RowsText: @unchecked Sendable {
     /// The display offset of the string's start.
     let start: Int
     let plain: CFString
+    /// The text as typeset, with loaded images replaced.
+    let typeset: CFString
     let runs: [StyleRun]
     let links: [MarkdownLink]
     /// The index in the block's links of the first link here.
     let linkOffset: Int
     let typesetter: CTTypesetter
+    /// The images in the string, relative to its start.
+    let images: ImageText?
 
-    init?(rows: Range<Int>, structure: TableStructure, block: MarkdownBlock, text: CFString, typography: Typography) {
+    init?(rows: Range<Int>, structure: TableStructure, block: MarkdownBlock, text: CFString, typography: Typography,
+          images blockImages: ImageText?) {
         let columns = structure.columnCount
         let start = structure.cell(rows.lowerBound, 0).lowerBound
         let end = structure.cell(rows.upperBound - 1, columns - 1).upperBound
@@ -738,18 +751,26 @@ private final class RowsText: @unchecked Sendable {
                                       destination: link.destination))
             next += 1
         }
-        guard let string = BlockLayout.makeString(plain, runs: runs, typography: typography, kerned: false) else { return nil }
+        let images = blockImages.map { $0.slice(start..<end) }
+        guard let string = BlockLayout.makeString(plain, runs: runs, typography: typography, kerned: false,
+                                                  images: images) else { return nil }
+        self.images = images
         self.structure = structure
         self.start = start
         self.plain = plain
+        typeset = CFAttributedStringGetString(string)
         self.runs = runs
         self.links = links
         linkOffset = first
-        // Shaped in full however long, as a short string is: past about
-        // 10,000 characters Core Text otherwise shapes line by line and
-        // ignores kerning attributes, which pad inline code.
+        typesetter = Self.typesetter(string)
+    }
+
+    /// Shaped in full however long, as a short string is: past about
+    /// 10,000 characters Core Text otherwise shapes line by line and
+    /// ignores kerning attributes, which pad inline code.
+    private static func typesetter(_ string: CFAttributedString) -> CTTypesetter {
         let options = [kCTTypesetterOptionAllowUnboundedLayout: kCFBooleanTrue!] as CFDictionary
-        typesetter = CTTypesetterCreateWithAttributedStringAndOptions(string, options)
+        return CTTypesetterCreateWithAttributedStringAndOptions(string, options)
             ?? CTTypesetterCreateWithAttributedString(string)
     }
 
@@ -761,12 +782,15 @@ private final class RowsText: @unchecked Sendable {
         return (cell.lowerBound - start)..<(cell.upperBound - start)
     }
 
-    private func line(_ range: Range<Int>, top: CGFloat, typography: Typography) -> LineLayout {
-        let line = CTTypesetterCreateLine(typesetter, CFRange(location: range.lowerBound, length: range.count))
+    private func line(_ range: Range<Int>, top: CGFloat, typography: Typography,
+                      shaped: (typesetter: CTTypesetter, typeset: CFString)? = nil) -> LineLayout {
+        let line = CTTypesetterCreateLine(shaped?.typesetter ?? typesetter,
+                                          CFRange(location: range.lowerBound, length: range.count))
         var runIndex = BlockLayout.styleRunIndex(in: runs, at: range.lowerBound)
-        return BlockLayout.lineLayout(line, range: range, string: plain, runs: runs, runIndex: &runIndex, links: links[...],
-                                      linkOffset: linkOffset, x: 0, maxX: nil, top: top, codeBlock: -1,
-                                      typography: typography).layout
+        return BlockLayout.lineLayout(line, range: range, string: shaped?.typeset ?? typeset, runs: runs,
+                                      runIndex: &runIndex, links: links[...], linkOffset: linkOffset, x: 0, maxX: nil,
+                                      top: top, codeBlock: -1, typography: typography,
+                                      hasImages: images?.items.isEmpty == false).layout
     }
 
     /// A cell on one line, however wide; nil for an empty cell.
@@ -782,9 +806,17 @@ private final class RowsText: @unchecked Sendable {
         var lines: [LineLayout] = []
         var start = cell.lowerBound
         var top: CGFloat = 0
+        // Images wider than the column shrink to it, as `max-width: 100%`
+        // fits them to their cell: the run is shaped again for this cell.
+        var shaped: (typesetter: CTTypesetter, typeset: CFString)?
+        if let fitted = images?.fitting(cell, to: width),
+           let string = BlockLayout.makeString(plain, runs: runs, typography: typography, kerned: false, images: fitted) {
+            shaped = (Self.typesetter(string), CFAttributedStringGetString(string))
+        }
         while start < cell.upperBound {
-            let count = max(CTTypesetterSuggestLineBreak(typesetter, start, Double(width)), 1)
-            let layout = line(start..<min(start + count, cell.upperBound), top: top, typography: typography)
+            let count = max(CTTypesetterSuggestLineBreak(shaped?.typesetter ?? typesetter, start, Double(width)), 1)
+            let end = images.map { $0.lineEnd(start + count) } ?? start + count
+            let layout = line(start..<min(end, cell.upperBound), top: top, typography: typography, shaped: shaped)
             lines.append(layout)
             top += layout.height
             start = layout.range.upperBound

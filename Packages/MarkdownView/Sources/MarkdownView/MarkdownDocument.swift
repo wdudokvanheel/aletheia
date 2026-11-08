@@ -33,8 +33,12 @@ public struct InlineStyle: OptionSet, Sendable, Hashable {
     /// Heading or code text inside a block quote, which takes the quote's
     /// color as in the WebKit stylesheet. Body text there has the `quote` role.
     public static let quoted = InlineStyle(rawValue: 1 << 5)
+    /// An image's alt text: muted while the image is not shown, and the place
+    /// the image takes in the text once it is.
+    public static let image = InlineStyle(rawValue: 1 << 6)
 
-    /// One past the largest raw value, for tables indexed by style.
+    /// One past the largest raw value of the styles that pick fonts and
+    /// attributes, for tables indexed by style; `image` is applied on top.
     static let combinations = 64
 }
 
@@ -125,6 +129,19 @@ public struct SourceMap: Sendable, Equatable {
         }
         return low > 0 ? low - 1 : nil
     }
+}
+
+/// An image in a block's display text. Its alt text stands in the text, so
+/// the source map, links, selection, and copy treat the image as its alt text
+/// whether it is shown or not; only layout puts the image in its place.
+struct InlineImage: Sendable, Equatable {
+    /// The UTF-16 range of the alt text in the block's display text, or of
+    /// one U+FFFC (object replacement character) for an image without alt
+    /// text, which copy leaves out.
+    var range: Range<Int>
+    /// The destination as written, with entities and escapes decoded and
+    /// relative paths left unresolved.
+    var source: String
 }
 
 /// A leaf block inside a top-level list or block quote, in display order: a
@@ -290,6 +307,9 @@ public struct MarkdownBlock: Sendable, Equatable {
     /// Front matter at the top of the file: a key/value `table`, or a
     /// `codeBlock` when its lines are not all simple `key: value` pairs.
     var isFrontMatter = false
+    /// The images in `text`, in order and not overlapping; an image inside
+    /// another's alt text counts as part of it.
+    var images: [InlineImage] = []
 
     /// Without a source map, display offsets map to the same source offsets.
     public init(kind: Kind, sourceRange: Range<Int>, sourceText: String, text: String, styleRuns: [StyleRun],

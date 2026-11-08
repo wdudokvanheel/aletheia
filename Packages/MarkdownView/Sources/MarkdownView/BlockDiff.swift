@@ -165,13 +165,14 @@ func commonSuffixLength(_ a: UnsafeBufferPointer<UInt8>, _ b: UnsafeBufferPointe
 extension MarkdownSnapshot {
     /// The layouts of `base` that still fit the blocks of a new parse:
     /// those of blocks the diff matched, when laid out at the same column
-    /// width with the same typography. Nil entries need a layout. For those,
+    /// width with the same typography and image sizes in `images`. Nil
+    /// entries need a layout. For those,
     /// `hints` holds an earlier layout whose tables lend what still applies:
     /// a matched block's layout at another width or partly laid out, and
     /// for an edited table, the old table at its place among the changed
     /// blocks, so only its edited rows are measured again.
     static func reusableLayouts(from base: MarkdownSnapshot, match: BlockMatch?, blocks: [MarkdownBlock],
-                                columnWidth: CGFloat, typography: Typography)
+                                columnWidth: CGFloat, typography: Typography, images: ImageSizes = .none)
         -> (layouts: [BlockLayout?], hints: [BlockLayout?]) {
         let newCount = blocks.count
         var layouts = [BlockLayout?](repeating: nil, count: newCount)
@@ -180,7 +181,7 @@ extension MarkdownSnapshot {
         for index in 0..<newCount {
             guard let old = match.oldIndex(ofNew: index) else { continue }
             let layout = base.layouts[old]
-            if layout.isFinal(for: columnWidth) {
+            if layout.isFinal(for: columnWidth, images: images, block: blocks[index]) {
                 layouts[index] = layout
             } else if !layout.isEstimate, !layout.tables.isEmpty {
                 hints[index] = layout
@@ -201,18 +202,19 @@ extension MarkdownSnapshot {
     /// only the blocks that changed since `base`. Equivalent to laying out
     /// `MarkdownDocument.parse(source)` from scratch.
     static func updating(_ base: MarkdownSnapshot, to source: String, width: CGFloat,
-                         typography: Typography = .standard, generation: UInt64 = 0) throws
-        -> (snapshot: MarkdownSnapshot, reused: Int, laidOut: Int) {
+                         typography: Typography = .standard, generation: UInt64 = 0,
+                         images: ImageSizes = .none) throws -> (snapshot: MarkdownSnapshot, reused: Int, laidOut: Int) {
         let parsed = try MarkdownDocument.parse(source, reusing: base.document)
         let columnWidth = typography.column(forWidth: width).width
         let (reused, hints) = reusableLayouts(from: base, match: parsed.match, blocks: parsed.document.blocks,
-                                              columnWidth: columnWidth, typography: typography)
+                                              columnWidth: columnWidth, typography: typography, images: images)
         let layouts = BlockLayout.layOut(parsed.document.blocks, filling: reused, hints: hints, columnWidth: columnWidth,
-                                         typography: typography) ?? []
+                                         typography: typography, images: images) ?? []
         let reusedCount = reused.count(where: { $0 != nil })
         let snapshot = MarkdownSnapshot(document: parsed.document, layouts: layouts, width: width,
                                         typography: typography, generation: generation,
-                                        update: BlockUpdate(baseID: base.id, match: parsed.match, edit: parsed.edit))
+                                        update: BlockUpdate(baseID: base.id, match: parsed.match, edit: parsed.edit),
+                                        images: images)
         return (snapshot, reusedCount, layouts.count - reusedCount)
     }
 
@@ -266,6 +268,21 @@ extension MarkdownSnapshot {
         return y
     }
 
+    /// Where to scroll after `old`, scrolled to `y` with `height` of it
+    /// visible, is replaced by a relayout of the same blocks, as when images
+    /// load: the first block in view whose layout did not change stays at the
+    /// same screen position, so images above it growing do not move what is
+    /// being read. Without one, the block at the top keeps its top in place.
+    /// At the very top the view stays at the top.
+    func sameBlocksAnchoredY(_ y: CGFloat, height: CGFloat, from old: MarkdownSnapshot) -> CGFloat {
+        guard y > 0, old.layouts.count == layouts.count else { return y }
+        for index in old.blockRange(intersecting: y, y + max(height, 1)) where old.layouts[index] === layouts[index] {
+            return blockTops[index] + y - old.blockTops[index]
+        }
+        let index = old.firstBlock(endingBelow: y)
+        return index < layouts.count ? blockTops[index] + y - old.blockTops[index] : y
+    }
+
     /// For a point `offset` into an edited table block of `old`, the same
     /// point in the row that now holds that row's source line, so a table
     /// row stays put when rows above it change height.
@@ -294,9 +311,12 @@ extension MarkdownSnapshot {
     /// is new, with the gaps around it, and everything from the first block
     /// that moved down to the bottom of `visible`. Unchanged blocks above the
     /// first height change keep their pixels. Nil when everything must redraw:
-    /// `old` is not the base, or the column moved.
-    func changedRects(from old: MarkdownSnapshot, in visible: CGRect) -> [CGRect]? {
-        guard let update = update(from: old), columnX == old.columnX, columnWidth == old.columnWidth else { return nil }
+    /// `old` is not the base, or the column moved. With `sameBlocks`, `old`
+    /// holds the same blocks instead, relaid out, as when images load.
+    func changedRects(from old: MarkdownSnapshot, in visible: CGRect, sameBlocks: Bool = false) -> [CGRect]? {
+        let update = update(from: old)
+        guard update != nil || (sameBlocks && old.layouts.count == layouts.count), columnX == old.columnX,
+              columnWidth == old.columnWidth else { return nil }
         // Glyphs overhang their line boxes a little; draw clips 8 pt wider too.
         let overhang: CGFloat = 8
         var rects: [CGRect] = []
@@ -315,7 +335,7 @@ extension MarkdownSnapshot {
         }
         var lastOld: Int?
         for index in range {
-            let oldIndex = update.match?.oldIndex(ofNew: index)
+            let oldIndex = sameBlocks ? index : update?.match?.oldIndex(ofNew: index)
             guard let oldIndex, old.layouts[oldIndex] === layouts[index] else {
                 band(bottom(ofBlockAbove: index), index + 1 < layouts.count ? blockTops[index + 1] : totalHeight)
                 lastOld = nil

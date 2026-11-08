@@ -36,6 +36,8 @@ struct LineLayout {
 struct Decoration {
     enum Kind: UInt8 {
         case codeBackground, underline, strikethrough
+        /// A loaded image, in the place its run delegate reserved.
+        case image
     }
 
     static let styles: InlineStyle = [.code, .link, .strikethrough]
@@ -45,7 +47,8 @@ struct Decoration {
     /// The `ColorIndex` of an underline or strikethrough.
     let color: UInt8
     /// For an underline, the link's index in the block's links; for a code
-    /// background, its style run's index.
+    /// background, its style run's index; for an image, its index in the
+    /// block's images.
     let tag: Int32
 }
 
@@ -127,6 +130,15 @@ public final class BlockLayout: @unchecked Sendable {
     /// A table with rows that are not laid out yet, whose heights are
     /// estimated; the rest follows in the background.
     let isPartial: Bool
+    /// The natural size each of the block's images was laid out with, nil
+    /// for one not loaded, whose alt text shows; empty without images.
+    let imageSizes: [CGSize?]
+    /// The widest each image may be shown where it is: the text width of
+    /// its paragraph, or the widest a cell of its table gets. Zero for
+    /// images not laid out.
+    let imageWidths: [CGFloat]
+    /// Whether any line places an image.
+    let drawsImages: Bool
 
     /// Lines of text, counting each line in table cells.
     public var lineCount: Int {
@@ -135,6 +147,28 @@ public final class BlockLayout: @unchecked Sendable {
 
     /// Whether this layout can be drawn and reused at `columnWidth`.
     func isFinal(for columnWidth: CGFloat) -> Bool { !isEstimate && !isPartial && self.columnWidth == columnWidth }
+
+    /// Whether this layout of `block` can be drawn and reused at
+    /// `columnWidth` with the images loaded in `images`.
+    func isFinal(for columnWidth: CGFloat, images: ImageSizes, block: MarkdownBlock) -> Bool {
+        isFinal(for: columnWidth) && hasImageSizes(images, of: block)
+    }
+
+    /// Whether `block`'s images have the sizes in `images` that this layout
+    /// used. Constant for blocks without images.
+    func hasImageSizes(_ images: ImageSizes, of block: MarkdownBlock) -> Bool {
+        guard !block.images.isEmpty else { return imageSizes.isEmpty }
+        guard imageSizes.count == block.images.count else { return false }
+        for index in imageSizes.indices where Self.size(block.images[index].source, in: images) != imageSizes[index] {
+            return false
+        }
+        return true
+    }
+
+    /// The size layout uses for an image: its loaded size, if valid.
+    static func size(_ source: String, in images: ImageSizes) -> CGSize? {
+        images[source].flatMap { ImageSizes.isValid($0) ? $0 : nil }
+    }
 
     /// Lays out `block`: paragraphs and headings with `CTTypesetter` line
     /// breaking and CSS-style line boxes, code blocks one line per source
@@ -148,16 +182,25 @@ public final class BlockLayout: @unchecked Sendable {
         self.init(block: block, builder: builder, metrics: metrics)
     }
 
-    /// Lays out `block` like the public initializer. `hint`, an earlier
-    /// layout of the same or an edited block at any width, lends tables the
-    /// rows and natural cell widths that still apply. A table block lays out
-    /// only `tableRows` and estimates the rest. Nil when `isCancelled`
-    /// reports true during a table.
+    /// Lays out `block` like the public initializer, with the images loaded
+    /// in `images`. `hint`, an earlier layout of the same or an edited block
+    /// at any width, lends tables the rows and natural cell widths that still
+    /// apply; one whose images were sized differently lends nothing. A table
+    /// block lays out only `tableRows` and estimates the rest. Nil when
+    /// `isCancelled` reports true during a table.
     static func make(_ block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, hint: BlockLayout? = nil,
-                     tableRows: TableRows = .all, isCancelled: () -> Bool = { false }) -> BlockLayout? {
+                     tableRows: TableRows = .all, images: ImageSizes = .none,
+                     isCancelled: () -> Bool = { false }) -> BlockLayout? {
         var builder = BlockLayoutBuilder(block: block, textLength: block.text.utf16.count, columnWidth: columnWidth,
                                          typography: typography, isEstimate: false)
-        builder.hint = hint.flatMap { $0.isEstimate || $0.tables.isEmpty ? nil : $0 }
+        builder.images = images
+        builder.hint = hint.flatMap {
+            guard !$0.isEstimate, !$0.tables.isEmpty else { return nil }
+            // Rows keep their images' sizes, which depend on the width too.
+            let placesImages = $0.imageSizes.contains { $0 != nil }
+                || block.images.contains { size($0.source, in: images) != nil }
+            return !placesImages || ($0.columnWidth == columnWidth && $0.hasImageSizes(images, of: block)) ? $0 : nil
+        }
         builder.tableRows = block.kind == .table ? tableRows : .all
         let metrics = builder.build(isCancelled: isCancelled)
         guard !builder.isCancelled else { return nil }
@@ -188,6 +231,9 @@ public final class BlockLayout: @unchecked Sendable {
         codeBlocks = builder.codeBlocks
         tables = builder.tables
         isPartial = builder.tables.contains { $0.isPartial }
+        imageSizes = builder.imageSizes
+        imageWidths = builder.imageWidths
+        drawsImages = builder.drawsImages || builder.tables.contains { $0.drawsImages }
     }
 
     /// The block's display text as a Core Foundation string.
@@ -198,11 +244,11 @@ public final class BlockLayout: @unchecked Sendable {
         }
     }
 
-    /// `string` with the fonts of `runs`, which cover it in order, and
-    /// without kerning unless `kerned`.
+    /// `string` with the fonts of `runs`, which cover it in order, without
+    /// kerning unless `kerned`, and with `images` in their places.
     static func makeString(_ string: CFString, runs: [StyleRun], typography: Typography,
-                           kerned: Bool = true) -> CFAttributedString? {
-        if runs.count <= 1, runs.first?.styles.contains(.code) != true {
+                           kerned: Bool = true, images: ImageText? = nil) -> CFAttributedString? {
+        if runs.count <= 1, runs.first?.styles.contains(.code) != true, runs.first?.styles.contains(.image) != true {
             let run = runs.first
             return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? [],
                                                                                kerned: kerned))
@@ -214,7 +260,11 @@ public final class BlockLayout: @unchecked Sendable {
         for run in runs where run.range.lowerBound < length {
             let range = CFRange(location: run.range.lowerBound, length: min(run.range.upperBound, length) - run.range.lowerBound)
             CFAttributedStringSetAttributes(attributed, range, typography.attributes(run.role, run.styles, kerned: kerned), true)
+            if run.styles.contains(.image) {
+                CFAttributedStringSetAttribute(attributed, range, Typography.imageAttribute, kCFBooleanTrue)
+            }
         }
+        images?.apply(to: attributed)
         // Room for the padding beside inline code, as kerning after the
         // character before it and after its last character.
         let padding = typography.inlineCodePadding as NSNumber
@@ -235,9 +285,11 @@ public final class BlockLayout: @unchecked Sendable {
     /// centered in it as CSS does. `runIndex` is the run the line starts in
     /// or one before it, and moves forward. Without `maxX`, the line's
     /// right edge is its visible width. Also returns that visible width.
+    /// With `hasImages`, images on the line are placed; see `imageBox`.
     static func lineLayout(_ line: CTLine, range: Range<Int>, string: CFString, runs: [StyleRun], runIndex: inout Int,
                            links: ArraySlice<MarkdownLink>, linkOffset: Int, x: CGFloat, maxX: CGFloat?, top: CGFloat,
-                           codeBlock: Int32, typography: Typography) -> (layout: LineLayout, width: CGFloat) {
+                           codeBlock: Int32, typography: Typography,
+                           hasImages: Bool = false) -> (layout: LineLayout, width: CGFloat) {
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         var leading: CGFloat = 0
@@ -259,14 +311,75 @@ public final class BlockLayout: @unchecked Sendable {
             index += 1
         }
 
-        let halfLeading = (lineHeight - (ascent + descent)) / 2
-        let baseline = top + halfLeading + ascent
+        var height = lineHeight
+        var baseline = top + (lineHeight - (ascent + descent)) / 2 + ascent
+        var images: [Decoration] = []
+        if hasImages, let box = imageBox(of: line, string: string, lineHeight: lineHeight) {
+            // Drawn run by run, past the images' runs.
+            color = nil
+            if !box.images.isEmpty {
+                height = box.height
+                baseline = top + box.above
+                images = box.images.map {
+                    Decoration(kind: .image, rect: CGRect(x: $0.x, y: baseline - $0.size.height, width: $0.size.width,
+                                                          height: $0.size.height), color: 0, tag: $0.index)
+                }
+            }
+        }
         let endsWithNewline = !range.isEmpty && CFStringGetCharacterAtIndex(string, range.upperBound - 1) == 0x0A
-        let layout = LineLayout(line: line, range: range, x: x, maxX: maxX ?? visibleWidth, top: top, height: lineHeight,
+        var lineDecorations = isDecorated ? decorations(of: line, baseline: baseline, runs: runs, links: links,
+                                                        linkOffset: linkOffset, typography: typography) : []
+        lineDecorations.append(contentsOf: images)
+        let layout = LineLayout(line: line, range: range, x: x, maxX: maxX ?? visibleWidth, top: top, height: height,
                                 baseline: baseline, color: color, endsWithNewline: endsWithNewline, codeBlock: codeBlock,
-                                decorations: isDecorated ? decorations(of: line, baseline: baseline, runs: runs, links: links,
-                                                                       linkOffset: linkOffset, typography: typography) : [])
+                                decorations: lineDecorations)
         return (layout, codeBlock >= 0 ? visibleWidth : width)
+    }
+
+    /// The line box of a line with images, as CSS builds it: images sit on
+    /// the baseline and the text keeps its line height (the strut), so the
+    /// box reaches from the higher of the images' tops and the strut's top
+    /// down to the strut's bottom. A line with nothing but images, such as
+    /// an image alone in its paragraph, has no strut and is exactly as tall
+    /// as its tallest image. Nil without run delegates on the line; without
+    /// images, as with only the placeholder of an image without alt text.
+    private static func imageBox(of line: CTLine, string: CFString, lineHeight: CGFloat)
+        -> (above: CGFloat, height: CGFloat, images: [(x: CGFloat, size: CGSize, index: Int32)])? {
+        var images: [(x: CGFloat, size: CGSize, index: Int32)] = []
+        var imageHeight: CGFloat = 0
+        var textAscent: CGFloat = 0
+        var textDescent: CGFloat = 0
+        var hasText = false
+        var hasDelegates = false
+        for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] where CTRunGetGlyphCount(run) > 0 {
+            if let box = ImageText.box(of: run) {
+                hasDelegates = true
+                guard box.size.width > 0, box.size.height > 0 else { continue }
+                var origin = CGPoint.zero
+                CTRunGetPositions(run, CFRange(location: 0, length: 1), &origin)
+                images.append((origin.x, box.size, box.index))
+                imageHeight = max(imageHeight, box.size.height)
+                continue
+            }
+            let range = CTRunGetStringRange(run)
+            // Line separators and the joiners of an image are not text.
+            guard (range.location..<(range.location + range.length)).contains(where: {
+                let character = CFStringGetCharacterAtIndex(string, $0)
+                return character != 0x0A && character != 0x2060
+            }) else { continue }
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            CTRunGetTypographicBounds(run, CFRange(), &ascent, &descent, nil)
+            textAscent = max(textAscent, ascent)
+            textDescent = max(textDescent, descent)
+            hasText = true
+        }
+        guard hasDelegates else { return nil }
+        guard !images.isEmpty else { return (0, 0, []) }
+        guard hasText else { return (imageHeight, imageHeight, images) }
+        let strutAbove = textAscent + (lineHeight - textAscent - textDescent) / 2
+        let above = max(strutAbove, imageHeight)
+        return (above, above + lineHeight - strutAbove, images)
     }
 
     /// The decorations of one line, from its glyph runs, so they follow the
@@ -283,6 +396,8 @@ public final class BlockLayout: @unchecked Sendable {
             guard styleIndex < runs.count else { continue }
             let style = runs[styleIndex]
             guard !style.styles.isDisjoint(with: Decoration.styles) else { continue }
+            // A placed image is not underlined or struck through.
+            if style.styles.contains(.image), ImageText.box(of: run) != nil { continue }
             var origin = CGPoint.zero
             CTRunGetPositions(run, CFRange(location: 0, length: 1), &origin)
             var ascent: CGFloat = 0
@@ -309,7 +424,8 @@ public final class BlockLayout: @unchecked Sendable {
                 let y = baseline - CTFontGetUnderlinePosition(base) - thickness / 2
                 decorations.append(Decoration(kind: .underline,
                                               rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),
-                                              color: ColorIndex.link, tag: Int32(link - links.startIndex + linkOffset)))
+                                              color: ColorIndex.of(style.role, style.styles),
+                                              tag: Int32(link - links.startIndex + linkOffset)))
             }
             if style.styles.contains(.strikethrough) {
                 let y = baseline - CTFontGetXHeight(typography.font(style.role, style.styles)) / 2 - thickness / 2
@@ -397,12 +513,13 @@ extension BlockLayout {
     /// match `columnWidth` are kept. Returns `nil` if `isCancelled` reports
     /// true before every block is done.
     static func layOut(_ blocks: [MarkdownBlock], columnWidth: CGFloat, typography: Typography,
-                       reusing existing: [BlockLayout]? = nil,
+                       reusing existing: [BlockLayout]? = nil, images: ImageSizes = .none,
                        isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
-        let kept = existing?.map { $0.isFinal(for: columnWidth) ? $0 : nil }
-            ?? [BlockLayout?](repeating: nil, count: blocks.count)
+        let kept = existing.map { existing in
+            existing.indices.map { existing[$0].isFinal(for: columnWidth, images: images, block: blocks[$0]) ? existing[$0] : nil }
+        } ?? [BlockLayout?](repeating: nil, count: blocks.count)
         return layOut(blocks, filling: kept, hints: existing, columnWidth: columnWidth, typography: typography,
-                      isCancelled: isCancelled)
+                      images: images, isCancelled: isCancelled)
     }
 
     /// Lays out the blocks whose entry in `layouts` is nil, in parallel when
@@ -410,7 +527,7 @@ extension BlockLayout {
     /// blocks laid out, plus one pass over `layouts`. `hints` (one per block)
     /// lend tables what still applies of an earlier layout.
     static func layOut(_ blocks: [MarkdownBlock], filling layouts: [BlockLayout?], hints: [BlockLayout?]? = nil,
-                       columnWidth: CGFloat, typography: Typography,
+                       columnWidth: CGFloat, typography: Typography, images: ImageSizes = .none,
                        isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
         precondition(layouts.count == blocks.count, "one layout per block")
         let missing = layouts.indices.filter { layouts[$0] == nil }
@@ -418,7 +535,7 @@ extension BlockLayout {
         if missing.count == 1, !isCancelled() {
             let index = missing[0]
             layouts[index] = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
-                                  isCancelled: isCancelled)
+                                  images: images, isCancelled: isCancelled)
         } else if missing.count > 1 {
             let results = ResultBuffer(count: missing.count)
             defer { results.free() }
@@ -426,7 +543,7 @@ extension BlockLayout {
                 guard !isCancelled() else { return }
                 let index = missing[slot]
                 if let layout = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
-                                     isCancelled: isCancelled) {
+                                     images: images, isCancelled: isCancelled) {
                     results.store(layout, at: slot)
                 }
             }

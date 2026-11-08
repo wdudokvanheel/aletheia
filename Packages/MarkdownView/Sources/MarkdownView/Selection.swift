@@ -182,6 +182,10 @@ extension MarkdownSnapshot {
         if granularity == .word, !range.isEmpty {
             let index = min(max(forward ? offset - 1 : offset, start), contentsEnd - 1)
             range = Self.wordRange(in: text, at: index, within: range)
+            // An image is a word: its whole alt text.
+            if let image = document.blocks[position.block].images.first(where: { $0.range.overlaps(range) }) {
+                range = min(range.lowerBound, image.range.lowerBound)..<max(range.upperBound, image.range.upperBound)
+            }
         }
         return TextPosition(block: position.block, offset: range.lowerBound)
             ..< TextPosition(block: position.block, offset: range.upperBound)
@@ -331,21 +335,30 @@ extension MarkdownSnapshot {
         if let table = table(inBlock: index, atY: y) {
             let origin = tableOrigin(table, inBlock: index, codeOffsets)
             guard let hit = table.line(at: CGPoint(x: point.x - origin.x, y: point.y - origin.y)) else { return nil }
-            let x = point.x - origin.x - hit.origin.x
-            for decoration in hit.line.decorations where decoration.kind == .underline {
-                if decoration.rect.minX <= x, x < decoration.rect.maxX, links.indices.contains(Int(decoration.tag)) {
-                    return links[Int(decoration.tag)].destination
-                }
-            }
-            return nil
+            return linkDestination(on: hit.line, atX: point.x - origin.x - hit.origin.x, inBlock: index)
         }
         let lineIndex = layout.firstLine(endingBelow: y)
         guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
         // Code blocks have no links, so scrolling never moves one.
-        let x = point.x - columnX - layout.lines[lineIndex].x
-        for decoration in layout.lines[lineIndex].decorations where decoration.kind == .underline {
-            if decoration.rect.minX <= x, x < decoration.rect.maxX, links.indices.contains(Int(decoration.tag)) {
-                return links[Int(decoration.tag)].destination
+        return linkDestination(on: layout.lines[lineIndex], atX: point.x - columnX - layout.lines[lineIndex].x,
+                               inBlock: index)
+    }
+
+    /// The destination of the link under `x` on a line of block `index`:
+    /// its underlined text, or an image inside it.
+    private func linkDestination(on line: LineLayout, atX x: CGFloat, inBlock index: Int) -> String? {
+        let block = document.blocks[index]
+        for decoration in line.decorations where decoration.rect.minX <= x && x < decoration.rect.maxX {
+            let tag = Int(decoration.tag)
+            switch decoration.kind {
+            case .underline where block.links.indices.contains(tag):
+                return block.links[tag].destination
+            case .image where block.images.indices.contains(tag):
+                if let link = BlockLayout.linkIndex(in: block.links[...], at: block.images[tag].range.lowerBound) {
+                    return block.links[link].destination
+                }
+            default:
+                break
             }
         }
         return nil
@@ -356,7 +369,8 @@ extension MarkdownSnapshot {
     /// The plain text of `range` for copying: the selected display text of
     /// each block with text, joined by newlines. Display text never contains
     /// list markers or task boxes; table cells are separated by tabs and rows
-    /// by newlines.
+    /// by newlines. An image copies as its alt text, and one without alt
+    /// text as nothing.
     func text(in range: Range<TextPosition>) -> String {
         guard range.lowerBound.block < layouts.count else { return "" }
         var pieces: [String] = []
@@ -364,7 +378,9 @@ extension MarkdownSnapshot {
             let text = document.blocks[index].text as NSString
             let start = index == range.lowerBound.block ? min(range.lowerBound.offset, text.length) : 0
             let end = index == range.upperBound.block ? min(range.upperBound.offset, text.length) : text.length
-            pieces.append(start < end ? text.substring(with: NSRange(location: start, length: end - start)) : "")
+            var piece = start < end ? text.substring(with: NSRange(location: start, length: end - start)) : ""
+            if !document.blocks[index].images.isEmpty { piece = piece.replacingOccurrences(of: "\u{FFFC}", with: "") }
+            pieces.append(piece)
         }
         return pieces.joined(separator: "\n")
     }

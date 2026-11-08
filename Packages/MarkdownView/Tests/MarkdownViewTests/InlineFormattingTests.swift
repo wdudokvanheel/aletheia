@@ -87,9 +87,10 @@ final class InlineFormattingTests: XCTestCase {
             MarkdownLink(range: 0..<9, destination: "https://x.test/a_b&c"),
             MarkdownLink(range: 19..<23, destination: "mailto:me@x.test")
         ])
+        // Alt text is marked as an image's, which mutes it until the image shows.
         XCTAssertEqual(block.styleRuns, [
-            run(0..<4, [.link, .strong]), run(4..<9, .link), run(9..<14), run(14..<18, .emphasis), run(18..<19),
-            run(19..<23, .link), run(23..<24)
+            run(0..<4, [.link, .strong]), run(4..<9, .link), run(9..<10), run(10..<14, .image),
+            run(14..<18, [.emphasis, .image]), run(18..<19), run(19..<23, [.link, .image]), run(23..<24)
         ])
     }
 
