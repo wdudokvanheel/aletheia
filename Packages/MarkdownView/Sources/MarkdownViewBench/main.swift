@@ -6,7 +6,7 @@ let usage = """
     Usage:
       MarkdownViewBench generate [--out DIR] [--seed N]
       MarkdownViewBench run [--set curated|own|smoke|generated] [--renderer webkit|custom] [--reps N]
-                            [--limit N] [--filter TEXT] [--manifest PATH] [--out PATH]
+                            [--limit N] [--filter TEXT] [--skip N] [--manifest PATH] [--out PATH]
                             [--preview-resources DIR] [--idle-seconds S] [--timeout S] [--onscreen]
 
     Paths default to the repository that contains the working directory:
@@ -14,6 +14,7 @@ let usage = """
       manifest          build/markdown-corpus/manifest.json (set "generated" reads generated/generated-manifest.json)
       results           build/markdown-corpus/results/<renderer>-<set>.json
       preview resources Sources/Aletheia/Resources/Preview (WebKit only)
+    The smoke set defaults to --idle-seconds 0 and --timeout 30 and runs the watchdog.
     Run in Release: swift run -c release MarkdownViewBench ...
     """
 
@@ -77,24 +78,28 @@ case "generate":
 case "run":
     let options: RunOptions
     do {
-        let arguments = try Arguments(rest, options: ["--set", "--renderer", "--reps", "--limit", "--filter", "--manifest",
-                                                      "--out", "--preview-resources", "--idle-seconds", "--timeout"],
+        let arguments = try Arguments(rest, options: ["--set", "--renderer", "--reps", "--limit", "--filter", "--skip",
+                                                      "--manifest", "--out", "--preview-resources", "--idle-seconds",
+                                                      "--timeout"],
                                       flags: ["--onscreen"])
         let set = arguments.string("--set") ?? "curated"
         let renderer = arguments.string("--renderer") ?? "webkit"
         guard ["curated", "own", "smoke", "generated"].contains(set) else { throw BenchError.unavailable("unknown set \(set)") }
         guard ["webkit", "custom"].contains(renderer) else { throw BenchError.unavailable("unknown renderer \(renderer)") }
+        let smoke = set == "smoke"
         options = RunOptions(
             manifest: arguments.path("--manifest") ?? Paths.corpus.appendingPathComponent("manifest.json"),
             set: set, renderer: renderer, repetitions: max(1, try arguments.number("--reps", default: 20)),
             output: arguments.path("--out") ?? Paths.corpus.appendingPathComponent("results/\(renderer)-\(set).json"),
             limit: try arguments.string("--limit").map { _ in try arguments.number("--limit", default: 0) },
             filter: arguments.string("--filter"),
+            skip: max(0, try arguments.number("--skip", default: 0)),
             previewResources: arguments.path("--preview-resources")
                 ?? Paths.repository.appendingPathComponent("Sources/Aletheia/Resources/Preview"),
-            idleSeconds: try arguments.number("--idle-seconds", default: 3.0),
-            timeout: try arguments.number("--timeout", default: 300.0),
-            onscreen: arguments.flag("--onscreen"))
+            idleSeconds: try arguments.number("--idle-seconds", default: smoke ? 0 : 3.0),
+            timeout: try arguments.number("--timeout", default: smoke ? 30 : 300.0),
+            onscreen: arguments.flag("--onscreen"),
+            watchdog: smoke)
         guard renderer == "custom"
                 || FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
             throw BenchError.unavailable("no index.html in \(options.previewResources.path); pass --preview-resources")

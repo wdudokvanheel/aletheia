@@ -10,6 +10,7 @@ swift run -c release MarkdownViewBench generate
 swift run -c release MarkdownViewBench run --set curated            # WebKit, 20 repetitions
 swift run -c release MarkdownViewBench run --set curated --renderer custom
 swift run -c release MarkdownViewBench run --set generated --renderer custom --filter 100k
+swift run -c release MarkdownViewBench run --set smoke --renderer custom --reps 1   # crash and hang check
 swift run -c release MarkdownViewBench run --set own --limit 200 --reps 3 --idle-seconds 0
 ```
 
@@ -24,10 +25,11 @@ Default paths are relative to the repository root:
 | `run --renderer` | `webkit`; `custom` measures `MarkdownPreviewView` |
 | `run --reps N` | `20` |
 | `run --limit N`, `--filter TEXT` | all documents; filter matches the path or curated name |
+| `run --skip N` | `0`; skips the first N documents after the filter, to continue after a crash |
 | `run --out PATH` | `build/markdown-corpus/results/<renderer>-<set>.json` |
 | `run --preview-resources DIR` | `Sources/Aletheia/Resources/Preview` (WebKit only) |
-| `run --idle-seconds S` | `3`; `0` skips the settles, the idle sample and per-view memory |
-| `run --timeout S` | `300` per render |
+| `run --idle-seconds S` | `3` (`0` for smoke); `0` skips the settles, the idle sample and per-view memory |
+| `run --timeout S` | `300` (`30` for smoke) per render, and the watchdog's hang limit |
 | `run --onscreen` | off; shows the window and keeps WebKit's occlusion detection, like the app |
 
 ## Generator
@@ -111,21 +113,38 @@ app's 200 ms debounce to edits.
   right after the scroll passes.
 - **idleCPUPercent:** the bench's CPU over `idleSeconds`, from 1 s after the scroll passes.
 
+### Smoke set, watchdog and crashes
+
+The smoke set runs a watchdog: a `CFRunLoopObserver` on the main run loop records the longest
+span the main thread spent between run loop activities (waits excluded), as `blockedMs` per
+document. A document is over the limit when `blockedMs` or any open exceeds 1 s; such
+documents and failures are printed, other rows are not, with progress every 500 documents. If
+one span exceeds `--timeout`, a watchdog thread ends the run with exit status 3.
+
+Each document's line is written as `{"path":...,"status":"running"}` first and replaced when
+it finishes, so the file names the document even if the process is killed. On a fatal signal
+(including Swift traps, from any thread) or a hang, the bench replaces that line with the
+document as `crashed` (`error` gives the signal) or `hung`, closes the file with
+`"aggregate":null,"interrupted":{document, index, reason}`, and prints the `--skip` value that
+continues after it. A stack overflow off the main thread cannot run the handler; the
+`running` line still names the document.
+
 ## Result schema (`aletheia-markdown-bench/2`)
 
 The file is streamed: the header first, one line per finished document, and the aggregate last.
-Keys are sorted. Times are in milliseconds. Version 2 adds the custom renderer's fields; WebKit-only
-header fields became optional.
+Keys are sorted. Times are in milliseconds. Version 2 adds the custom renderer's fields, the
+watchdog, `skip`, the `running` line and the interrupted ending; WebKit-only header fields
+became optional.
 
 ```
 { "schema": "aletheia-markdown-bench/2",
-  "run": { timestamp, renderer, set, manifest, documents, repetitions, limit?, filter?,
+  "run": { timestamp, renderer, set, manifest, documents, repetitions, limit?, filter?, skip?,
            idleSeconds, debounceMs, previewResources?,
            machine {model, cpu, cores, memoryGiB}, os {version, build}, build, git? {commit, dirty},
            webkit?, window {width, height, backingScale, screenRefreshHz, displayAsleep, placement,
            occlusionDetection?, scrollerStyle?}, firstPreviewMs, baselineMemoryMiB,
-           helperAttribution?, definitions },
-  "documents": [ { path, name?, bytes?, status: ok|failed|skipped, error?,
+           helperAttribution?, watchdog? {limitMs, hangSeconds}, definitions },
+  "documents": [ { path, name?, bytes?, status: ok|failed|skipped|running|crashed|hung, error?,
                    edit? {offset, kind},
                    ms? {startup|firstScreen|open|tabSwitch|update|updateWork|updateMain|scrollFrame:
                         {n, p50, p95, min, max}},
@@ -133,11 +152,15 @@ header fields became optional.
                    idleCPUPercent? {seconds, process, helpers, total, helpersByKind},
                    library? {firstScreen|open|tabSwitch|update: [{blocks, complete, parse, layout,
                              install, draw}]},
-                   scroll? {passes, frames, documentHeight, viewportHeight, over144Hz, over60Hz} } ],
+                   scroll? {passes, frames, documentHeight, viewportHeight, over144Hz, over60Hz},
+                   blockedMs? } ],
   "aggregate": { documents, ok, failed, skipped, elapsedSeconds,
                  ms {metric: {n, p50, p95, max, worstP95, worstDocument}},
                  memoryTotalMiB? {n, p50, p95, min, max}, memoryViewMiB? {...},
-                 idleCPUTotalPercent? {...}, scroll? {frames, over144Hz, over60Hz} } }
+                 idleCPUTotalPercent? {...}, scroll? {frames, over144Hz, over60Hz},
+                 watchdog? {limitMs, over [{path, blockedMs, openMs}], worstBlockedMs,
+                            worstBlockedDocument, worstOpenMs, worstOpenDocument} } | null,
+  "interrupted"?: {document, index, reason: crashed|hung} }
 ```
 
 `firstPreviewMs` is a warm-up open of a small document, the first preview or view after

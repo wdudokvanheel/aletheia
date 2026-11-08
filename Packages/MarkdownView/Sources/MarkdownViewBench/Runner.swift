@@ -10,10 +10,13 @@ struct RunOptions {
     var output: URL
     var limit: Int?
     var filter: String?
+    var skip: Int
     var previewResources: URL
     var idleSeconds: Double
     var timeout: Double
     var onscreen: Bool
+    /// The run loop watchdog and the 1 s check; on for the smoke set.
+    var watchdog: Bool
     var custom: Bool { renderer == "custom" }
 }
 
@@ -108,6 +111,8 @@ struct DocumentResult: Codable {
     /// Custom: the library's Timings per repetition, by metric.
     var library: [String: [LibraryTimings]]?
     var scroll: ScrollResult?
+    /// With the watchdog: the longest main run loop busy span while measuring this document.
+    var blockedMs: Double?
 }
 
 struct WindowInfo: Codable {
@@ -125,6 +130,10 @@ struct WindowInfo: Codable {
     let scrollerStyle: String?
 }
 
+struct WatchdogSettings: Codable {
+    let limitMs: Double
+    let hangSeconds: Double
+}
 
 struct RunHeader: Codable {
     let timestamp: String
@@ -135,6 +144,7 @@ struct RunHeader: Codable {
     let repetitions: Int
     let limit: Int?
     let filter: String?
+    let skip: Int?
     let idleSeconds: Double
     let debounceMs: Int
     let previewResources: String?
@@ -147,6 +157,7 @@ struct RunHeader: Codable {
     let firstPreviewMs: Double
     let baselineMemoryMiB: Double
     let helperAttribution: String?
+    let watchdog: WatchdogSettings?
     let definitions: [String: String]
 }
 
@@ -171,6 +182,7 @@ struct Aggregate: Codable {
     let memoryViewMiB: Summary?
     let idleCPUTotalPercent: Summary?
     let scroll: ScrollTotals?
+    let watchdog: WatchdogSummary?
 }
 
 struct ScrollTotals: Codable {
@@ -179,12 +191,30 @@ struct ScrollTotals: Codable {
     let over60Hz: Int
 }
 
+struct OverLimit: Codable {
+    let path: String
+    let blockedMs: Double
+    let openMs: Double
+}
 
-/// Streams one result file: the header, then a line per document, then the aggregate.
+struct WatchdogSummary: Codable {
+    let limitMs: Double
+    /// Documents whose longest main-thread busy span or slowest open exceeded the limit.
+    let over: [OverLimit]
+    let worstBlockedMs: Double
+    let worstBlockedDocument: String
+    let worstOpenMs: Double
+    let worstOpenDocument: String
+}
+
+/// Streams one result file: the header, then a line per document, then the aggregate. While a
+/// document is measured its line is `{"path":...,"status":"running"}`, so a killed run names it.
 final class ResultWriter {
     static let schema = "aletheia-markdown-bench/2"
     private let handle: FileHandle
+    private let url: URL
     private var first = true
+    private var running: UInt64?
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -197,18 +227,43 @@ final class ResultWriter {
             throw BenchError.unavailable("cannot write \(url.path)")
         }
         handle = try FileHandle(forWritingTo: url)
+        self.url = url
         try write("{\"schema\":\"\(Self.schema)\",\"run\":\(encode(header)),\"documents\":[\n")
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
     private func write(_ text: String) throws { try handle.write(contentsOf: Data(text.utf8)) }
 
+    /// Writes the running line for document `index` and arms what replaces it on a crash or hang.
+    func begin(_ path: String, index: Int) throws {
+        let offset = try handle.offset()
+        let separator = first ? "" : ",\n"
+        let quoted = try encode(path)
+        try write(separator + "{\"path\":\(quoted),\"status\":\"running\"}")
+        running = offset
+        func tail(_ status: String, _ error: String) -> String {
+            separator + "{\"error\":\"\(error)\",\"path\":\(quoted),\"status\":\"\(status)\"}\n],\"aggregate\":null,"
+                + "\"interrupted\":{\"document\":\(quoted),\"index\":\(index),\"reason\":\"\(status)\"}}\n"
+        }
+        Interruption.arm(fd: handle.fileDescriptor, offset: offset,
+                         crashed: tail("crashed", Interruption.signalPlaceholder),
+                         hung: tail("hung", "the main thread stopped returning to its run loop"),
+                         message: "\nerror: interrupted while measuring document \(index) (0-based, after --filter): \(path)\n"
+                            + "the result file ends with it: \(url.path)\ncontinue after it with --skip \(index + 1)\n")
+    }
+
     func append(_ result: DocumentResult) throws {
+        if let running {
+            try handle.truncate(atOffset: running)
+            try handle.seek(toOffset: running)
+            self.running = nil
+        }
         try write((first ? "" : ",\n") + encode(result))
         first = false
     }
 
     func finish(_ aggregate: Aggregate) throws {
+        Interruption.disarm()
         try write("\n],\"aggregate\":\(encode(aggregate))}\n")
         try handle.close()
     }
@@ -217,6 +272,9 @@ final class ResultWriter {
 @MainActor
 final class Runner {
     static let metrics = ["startup", "firstScreen", "open", "tabSwitch", "update", "updateWork", "updateMain", "scrollFrame"]
+    /// The watchdog's limit for a busy main thread or an open.
+    static let limitMs = 1000.0
+    static let watchdogDefinition = "blockedMs: longest span the main thread spent between run loop activities (CFRunLoopObserver, waits excluded) while measuring the document; a document is over the limit when that or any open exceeds limitMs. A span over hangSeconds ends the run, marking the document hung"
     static let definitions = [
         "rendered": "commitPreview returned to the bench (the last point the app observes), then one more callAsyncJavaScript that forces style and layout and resolves after the next requestAnimationFrame plus a zero timeout, so the frame's rendering update has run. Images are not awaited.",
         "startup": "new preview (WKWebView, configuration, scheme handler, index.html load) until didFinish",
@@ -258,6 +316,7 @@ final class Runner {
         let (manifest, all) = try Manifest.load(options.manifest, set: options.set)
         var entries = all
         if let filter = options.filter { entries = entries.filter { $0.path.contains(filter) || ($0.name ?? "").contains(filter) } }
+        entries = Array(entries.dropFirst(options.skip))
         if let limit = options.limit { entries = Array(entries.prefix(limit)) }
         let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Markdown preview benchmark")
         defer { ProcessInfo.processInfo.endActivity(activity) }
@@ -284,7 +343,8 @@ final class Runner {
         let header = RunHeader(
             timestamp: ISO8601DateFormatter().string(from: Date()), renderer: options.renderer, set: options.set,
             manifest: manifest.path, documents: entries.count, repetitions: options.repetitions,
-            limit: options.limit, filter: options.filter, idleSeconds: options.idleSeconds, debounceMs: 200,
+            limit: options.limit, filter: options.filter, skip: options.skip > 0 ? options.skip : nil,
+            idleSeconds: options.idleSeconds, debounceMs: 200,
             previewResources: options.custom ? nil : options.previewResources.path, machine: environment.machine,
             os: environment.os, build: environment.build, git: environment.git, webkit: environment.webkit,
             window: WindowInfo(width: window.frame.width, height: window.frame.height,
@@ -296,10 +356,17 @@ final class Runner {
                                scrollerStyle: options.custom ? (NSScroller.preferredScrollerStyle == .overlay ? "overlay" : "legacy") : nil),
             firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),
             helperAttribution: options.custom ? nil : ProcessMetrics.attribution,
-            definitions: options.custom ? Self.customDefinitions : Self.definitions)
+            watchdog: options.watchdog ? WatchdogSettings(limitMs: Self.limitMs, hangSeconds: options.timeout) : nil,
+            definitions: (options.custom ? Self.customDefinitions : Self.definitions)
+                .merging(options.watchdog ? ["watchdog": Self.watchdogDefinition] : [:]) { $1 })
         let writer = try ResultWriter(options.output, header: header)
+        Interruption.installHandlers()
+        let watchdog = options.watchdog ? Watchdog(hangSeconds: options.timeout) : nil
+        watchdog?.start()
         print("\(options.renderer) \(options.set): \(entries.count) documents, \(options.repetitions) repetitions, "
               + "first preview \(String(format: "%.1f", firstOpen)) ms")
+        // The smoke set prints only failures, documents over the limit, and progress.
+        let quiet = options.set == "smoke"
         print(options.custom ? Self.customTableHeader : Self.tableHeader)
 
         var pooled: [String: [Double]] = [:]
@@ -309,13 +376,36 @@ final class Runner {
         var idle: [Double] = []
         var counts = ["ok": 0, "failed": 0, "skipped": 0]
         var scroll = ScrollTotals(frames: 0, over144Hz: 0, over60Hz: 0)
-        for entry in entries {
-            let (result, samples) = await interval("document") {
+        var over: [OverLimit] = []
+        var worstBlocked = (0.0, "")
+        var worstOpen = (0.0, "")
+        var failures: [String] = []
+        for (index, entry) in entries.enumerated() {
+            try writer.begin(entry.path, index: options.skip + index)
+            _ = watchdog?.takeLongest()
+            var (result, samples) = await interval("document") {
                 options.custom ? await measureCustom(entry) : await measure(entry)
             }
+            var isOver = false
+            if let watchdog {
+                let blocked = round2(watchdog.takeLongest())
+                let open = result.ms?["open"]?.max ?? 0
+                result.blockedMs = blocked
+                if blocked > worstBlocked.0 { worstBlocked = (blocked, result.path) }
+                if open > worstOpen.0 { worstOpen = (open, result.path) }
+                if blocked > Self.limitMs || open > Self.limitMs {
+                    isOver = true
+                    over.append(OverLimit(path: result.path, blockedMs: blocked, openMs: open))
+                }
+            }
             try writer.append(result)
-            print(Self.row(result, custom: options.custom))
+            if !quiet || result.status == "failed" || isOver { print(Self.row(result, custom: options.custom)) }
+            if quiet, (index + 1) % 500 == 0 {
+                print("  \(index + 1)/\(entries.count) documents, \(failures.count) failed, \(over.count) over 1 s, "
+                      + String(format: "%.0f s", milliseconds(started, now()) / 1000))
+            }
             counts[result.status, default: 0] += 1
+            if result.status == "failed" { failures.append(result.path) }
             guard result.status == "ok" else { continue }
             for (metric, values) in samples { pooled[metric, default: []] += values }
             for (metric, summary) in result.ms ?? [:] where summary.p95 > (worst[metric]?.0 ?? -1) {
@@ -339,9 +429,15 @@ final class Runner {
             documents: entries.count, ok: counts["ok"] ?? 0, failed: counts["failed"] ?? 0,
             skipped: counts["skipped"] ?? 0, elapsedSeconds: round1(milliseconds(started, now()) / 1000),
             ms: latency, memoryTotalMiB: Summary(memory), memoryViewMiB: Summary(viewMemory),
-            idleCPUTotalPercent: Summary(idle), scroll: options.custom ? scroll : nil)
+            idleCPUTotalPercent: Summary(idle), scroll: options.custom ? scroll : nil,
+            watchdog: watchdog.map { _ in
+                WatchdogSummary(limitMs: Self.limitMs, over: over, worstBlockedMs: worstBlocked.0,
+                                worstBlockedDocument: worstBlocked.1, worstOpenMs: worstOpen.0, worstOpenDocument: worstOpen.1)
+            })
         try writer.finish(aggregate)
         print(Self.summary(aggregate))
+        for path in failures.prefix(20) { print("failed: \(path)") }
+        if failures.count > 20 { print("... \(failures.count - 20) more failed documents") }
         print("wrote \(options.output.path)")
     }
 
@@ -469,8 +565,9 @@ final class Runner {
     static func row(_ result: DocumentResult, custom: Bool) -> String {
         let label = result.name ?? result.path.split(separator: "/").suffix(2).joined(separator: "/")
         let kib = result.bytes.map { String(format: "%.1f", Double($0) / 1024) } ?? "-"
+        let blocked = result.blockedMs.map { $0 > limitMs ? String(format: "  blocked %.0f ms", $0) : "" } ?? ""
         guard result.status == "ok", let ms = result.ms else {
-            return pad(label, 34, left: true) + pad(kib, 8) + "  \(result.status): \(result.error ?? "")"
+            return pad(label, 34, left: true) + pad(kib, 8) + "  \(result.status): \(result.error ?? "")" + blocked
         }
         func p95(_ metric: String) -> String { ms[metric].map { String(format: "%.1f", $0.p95) } ?? "-" }
         if custom {
@@ -479,12 +576,12 @@ final class Runner {
                 + pad(p95("updateMain"), 10) + pad(p95("scrollFrame"), 11)
                 + pad(result.scroll.map { "\($0.over144Hz)" } ?? "-", 8)
                 + pad(result.memoryMiB?.view.map { String(format: "%.1f", $0) } ?? "-", 10)
-                + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7)
+                + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7) + blocked
         }
         return pad(label, 34, left: true) + pad(kib, 8) + pad(pair(ms["open"]), 16) + pad(pair(ms["tabSwitch"]), 14)
             + pad(pair(ms["update"]), 16) + pad(ms["updateWork"].map { String(format: "%.1f", $0.p95) } ?? "-", 10)
             + pad(result.memoryMiB.map { String(format: "%.1f", $0.total) } ?? "-", 7)
-            + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7)
+            + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7) + blocked
     }
 
     static func summary(_ aggregate: Aggregate) -> String {
@@ -505,6 +602,14 @@ final class Runner {
         }
         if let scroll = aggregate.scroll {
             lines.append("scroll frames: \(scroll.frames), over 1000/144 ms: \(scroll.over144Hz), over 16.7 ms: \(scroll.over60Hz)")
+        }
+        if let watchdog = aggregate.watchdog {
+            lines.append("over \(Int(watchdog.limitMs)) ms: \(watchdog.over.count) documents; "
+                + String(format: "longest main-thread block %.1f ms (%@), slowest open %.1f ms (%@)",
+                         watchdog.worstBlockedMs, watchdog.worstBlockedDocument, watchdog.worstOpenMs, watchdog.worstOpenDocument))
+            for item in watchdog.over.prefix(20) {
+                lines.append(String(format: "  over: blocked %.1f ms, open %.1f ms  %@", item.blockedMs, item.openMs, item.path))
+            }
         }
         if let idle = aggregate.idleCPUTotalPercent {
             lines.append(String(format: "idle CPU %%: p50 %.2f, p95 %.2f, max %.2f", idle.p50, idle.p95, idle.max))
