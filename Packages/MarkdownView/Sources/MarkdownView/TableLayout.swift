@@ -599,14 +599,20 @@ final class TableLayout: @unchecked Sendable {
                     let end = min(to, line.range.upperBound)
                     guard start < end else { continue }
                     let x = origin.x + alignmentOffset(of: line, row: row, column: column)
-                    let x1 = line.caretX(start)
-                    let x2 = line.caretX(end)
-                    let minX = x + min(x1, x2)
-                    var maxX = x + max(x1, x2)
+                    var spans = line.highlightSpans(start, end)
                     if end == line.range.upperBound, to > line.range.upperBound || continues {
-                        maxX = max(maxX, origin.x + columnWidths[column])
+                        // On to the cell's edge after the line's end.
+                        let edge = line.continuationX
+                        if line.isRightToLeft {
+                            spans.append((origin.x - x, edge))
+                        } else {
+                            spans.append((edge, origin.x + columnWidths[column] - x))
+                        }
                     }
-                    rects.append(CGRect(x: minX, y: origin.y + line.top, width: maxX - minX, height: line.height))
+                    for span in LineLayout.merged(spans) where span.maxX > span.minX {
+                        rects.append(CGRect(x: x + span.minX, y: origin.y + line.top, width: span.maxX - span.minX,
+                                            height: line.height))
+                    }
                 }
             }
         }

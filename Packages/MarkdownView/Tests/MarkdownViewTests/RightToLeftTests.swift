@@ -2,7 +2,8 @@ import CoreText
 import XCTest
 @testable import MarkdownView
 
-/// Paragraph directions as `dir="auto"` sets them (F10).
+/// Paragraph directions as `dir="auto"` sets them, and selection in
+/// mixed-direction lines (F9, F10).
 final class RightToLeftTests: XCTestCase {
     private func snapshot(_ markdown: String, width: CGFloat = 700) throws -> MarkdownSnapshot {
         MarkdownSnapshot.layOut(try MarkdownDocument.parse(markdown), width: width)
@@ -87,6 +88,78 @@ final class RightToLeftTests: XCTestCase {
         // The cell's own period is drawn at its left.
         let period = arabic.range.upperBound - 1
         XCTAssertLessThan(arabic.caretX(period), arabic.caretX(arabic.range.lowerBound))
+    }
+
+    /// For every selection of `line`'s text, the highlight covers the
+    /// selected glyphs and no others, by their centers.
+    private func assertHighlightCoversExactlyTheSelection(_ snapshot: MarkdownSnapshot, block: Int,
+                                                          line lineIndex: Int,
+                                                          file: StaticString = #filePath, lineNumber: UInt = #line) {
+        let layout = snapshot.layouts[block]
+        let line = layout.lines[lineIndex]
+        let text = snapshot.document.blocks[block].text as NSString
+        let top = snapshot.blockTops[block] + line.top
+        let left = snapshot.columnX + line.x
+        var glyphs: [(index: Int, center: CGFloat)] = []
+        for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
+            let count = CTRunGetGlyphCount(run)
+            var positions = [CGPoint](repeating: .zero, count: count)
+            var advances = [CGSize](repeating: .zero, count: count)
+            var indices = [CFIndex](repeating: 0, count: count)
+            CTRunGetPositions(run, CFRange(), &positions)
+            CTRunGetAdvances(run, CFRange(), &advances)
+            CTRunGetStringIndices(run, CFRange(), &indices)
+            for glyph in 0..<count where advances[glyph].width > 1 {
+                glyphs.append((indices[glyph] + Int(line.base), left + positions[glyph].x + advances[glyph].width / 2))
+            }
+        }
+        var boundaries: [Int] = []
+        var offset = line.range.lowerBound
+        while offset < line.caretEnd {
+            boundaries.append(offset)
+            offset = NSMaxRange(text.rangeOfComposedCharacterSequence(at: offset))
+        }
+        boundaries.append(line.caretEnd)
+        var checked = 0
+        for (i, from) in boundaries.enumerated() {
+            for to in boundaries[(i + 1)...] where to < line.caretEnd {
+                let selection = TextPosition(block: block, offset: from)..<TextPosition(block: block, offset: to)
+                let rects = snapshot.selectionRects(for: selection, minY: top + 1, maxY: top + line.height - 1)
+                for glyph in glyphs {
+                    let isSelected = glyph.index >= from && glyph.index < to
+                    let isLit = rects.contains { $0.minX < glyph.center && glyph.center < $0.maxX }
+                    if isSelected != isLit {
+                        XCTFail("selecting \(from)..<\(to) of \(text.substring(with: NSRange(location: line.range.lowerBound, length: line.range.count)).debugDescription): glyph of \(glyph.index) \(isSelected ? "not lit" : "lit")",
+                                file: file, line: lineNumber)
+                        return
+                    }
+                }
+                checked += 1
+            }
+        }
+        XCTAssertGreaterThan(checked, 10, file: file, line: lineNumber)
+    }
+
+    func testHighlightsInMixedDirectionLinesCoverOnlySelectedGlyphs() throws {
+        // chokidar's README, and shaghlaty's change log.
+        let chokidar = try snapshot("like Urdu as (چوکیدار) which is used")
+        assertHighlightCoversExactlyTheSelection(chokidar, block: 0, line: 0)
+        let shaghlaty = try snapshot("The tab reads «مؤكدة» / Confirmed and the chip «مؤكد» / Confirmed.", width: 1200)
+        assertHighlightCoversExactlyTheSelection(shaghlaty, block: 0, line: 0)
+        let arabic = try snapshot("مرحبا بالعالم (hello world) 123 نص.")
+        assertHighlightCoversExactlyTheSelection(arabic, block: 0, line: 0)
+        let picker = try snapshot("The language picker names Arabic «العربية (العراق)» in either language.", width: 1200)
+        assertHighlightCoversExactlyTheSelection(picker, block: 0, line: 0)
+    }
+
+    func testASelectionPastARightToLeftLineReachesItsLeftEdge() throws {
+        let snapshot = try snapshot("مرحبا بالعالم\n\nnext")
+        let line = try XCTUnwrap(snapshot.layouts[0].lines.first)
+        let selection = TextPosition(block: 0, offset: 2)..<TextPosition(block: 1, offset: 2)
+        let rects = snapshot.selectionRects(for: selection, minY: 0, maxY: snapshot.blockTops[0] + line.height)
+        let first = try XCTUnwrap(rects.first)
+        XCTAssertEqual(first.minX, snapshot.columnX, accuracy: 0.5)
+        XCTAssertEqual(first.maxX, snapshot.columnX + line.x + line.caretX(2), accuracy: 0.5)
     }
 
     func testFirstStrongCharacterDecides() {

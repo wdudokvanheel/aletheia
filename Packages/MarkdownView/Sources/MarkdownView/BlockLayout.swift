@@ -89,6 +89,66 @@ struct LineLayout {
                    height: height, baseline: baseline, color: color, endsWithNewline: endsWithNewline,
                    isRightToLeft: isRightToLeft, codeBlock: codeBlock, decorations: decorations)
     }
+
+    /// The highlight of offsets `from..<to` (in `range`'s terms) as x
+    /// ranges relative to `x`, in visual order and merged where they meet.
+    /// A line with right-to-left runs gets one per glyph run the range
+    /// touches, so glyphs between selected ones in visual order stay clear.
+    func highlightSpans(_ from: Int, _ to: Int) -> [(minX: CGFloat, maxX: CGFloat)] {
+        let line = line
+        let start = from - Int(base)
+        let end = to - Int(base)
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+        guard runs.contains(where: { CTRunGetStatus($0).contains(.rightToLeft) }) else {
+            let x1 = CTLineGetOffsetForStringIndex(line, start, nil)
+            let x2 = CTLineGetOffsetForStringIndex(line, end, nil)
+            return [(min(x1, x2), max(x1, x2))]
+        }
+        var spans: [(minX: CGFloat, maxX: CGFloat)] = []
+        for run in runs {
+            let range = CTRunGetStringRange(run)
+            let lower = max(start, range.location)
+            let upper = min(end, range.location + range.length)
+            guard lower < upper, CTRunGetGlyphCount(run) > 0 else { continue }
+            var origin = CGPoint.zero
+            CTRunGetPositions(run, CFRange(location: 0, length: 1), &origin)
+            let width = CGFloat(CTRunGetTypographicBounds(run, CFRange(), nil, nil, nil))
+            let isRightToLeft = CTRunGetStatus(run).contains(.rightToLeft)
+            // A run's ends are its edges; inside it, the caret positions.
+            func edge(_ index: Int) -> CGFloat {
+                if index == range.location { return isRightToLeft ? origin.x + width : origin.x }
+                if index == range.location + range.length { return isRightToLeft ? origin.x : origin.x + width }
+                return CTLineGetOffsetForStringIndex(line, index, nil)
+            }
+            let a = edge(lower)
+            let b = edge(upper)
+            spans.append((min(a, b), max(a, b)))
+        }
+        return Self.merged(spans)
+    }
+
+    /// Spans sorted by their left edge, those that meet or overlap merged.
+    static func merged(_ spans: [(minX: CGFloat, maxX: CGFloat)]) -> [(minX: CGFloat, maxX: CGFloat)] {
+        guard spans.count > 1 else { return spans }
+        var merged: [(minX: CGFloat, maxX: CGFloat)] = []
+        for span in spans.sorted(by: { $0.minX < $1.minX }) {
+            if let last = merged.last, span.minX <= last.maxX + 0.5 {
+                merged[merged.count - 1].maxX = max(last.maxX, span.maxX)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
+    }
+
+    /// Where a selection continuing past the line starts, relative to `x`:
+    /// its visual end, on the right, or on the left for a right-to-left line.
+    var continuationX: CGFloat {
+        let line = line
+        if isRightToLeft { return min(CTLineGetOffsetForStringIndex(line, range.upperBound - Int(base), nil), 0) }
+        return max(CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)),
+                   CTLineGetOffsetForStringIndex(line, range.upperBound - Int(base), nil))
+    }
 }
 
 /// A rectangle drawn with a line's text. x is relative to the line's `x` and

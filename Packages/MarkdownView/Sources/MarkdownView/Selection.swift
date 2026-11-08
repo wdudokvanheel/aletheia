@@ -248,19 +248,28 @@ extension MarkdownSnapshot {
                 // A selection that starts at the very end of the block still
                 // covers the separator to the next one.
                 guard from < to || (isLast && continuesToNextBlock && from == line.range.upperBound) else { continue }
-                let x1 = line.caretX(from)
-                let x2 = line.caretX(to)
                 let left = columnX + line.x - codeOffset(of: line, inBlock: index, codeOffsets)
-                var minX = left + min(x1, x2)
-                var maxX = left + max(x1, x2)
-                if end > line.range.upperBound || (isLast && continuesToNextBlock) { maxX = max(maxX, columnX + line.maxX) }
-                if line.codeBlock >= 0 {
-                    let box = layout.codeBlocks[Int(line.codeBlock)].rect
-                    minX = max(minX, columnX + box.minX)
-                    maxX = min(maxX, columnX + box.maxX)
-                    guard maxX > minX else { continue }
+                var spans = from < to ? line.highlightSpans(from, to) : []
+                if end > line.range.upperBound || (isLast && continuesToNextBlock) {
+                    // On to the edge of the text area after the line's end.
+                    let edge = line.continuationX
+                    if line.isRightToLeft {
+                        spans.append((columnX + line.minX - left, edge))
+                    } else {
+                        spans.append((edge, columnX + line.maxX - left))
+                    }
                 }
-                rects.append(CGRect(x: minX, y: top + line.top, width: maxX - minX, height: line.height))
+                for span in LineLayout.merged(spans) {
+                    var minX = left + span.minX
+                    var maxX = left + span.maxX
+                    if line.codeBlock >= 0 {
+                        let box = layout.codeBlocks[Int(line.codeBlock)].rect
+                        minX = max(minX, columnX + box.minX)
+                        maxX = min(maxX, columnX + box.maxX)
+                    }
+                    guard maxX > minX || (from == to && maxX >= minX) else { continue }
+                    rects.append(CGRect(x: minX, y: top + line.top, width: maxX - minX, height: line.height))
+                }
             }
         }
         return rects
