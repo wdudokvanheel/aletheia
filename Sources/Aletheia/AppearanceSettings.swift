@@ -146,6 +146,11 @@ struct AppColorScheme {
     ]
 }
 
+/// The app-wide Markdown preview renderer. WebKit stays the default while Custom is experimental.
+enum MarkdownRenderer: String, CaseIterable {
+    case webkit, custom
+}
+
 @MainActor
 final class AppSettings: NSObject {
     static let shared = AppSettings()
@@ -153,6 +158,10 @@ final class AppSettings: NSObject {
     static let colorSchemeKey = "colorScheme"
     static let revealActiveFileKey = "revealActiveFileInTree"
     static let revealActiveFileDidChange = Notification.Name("AletheiaRevealActiveFileDidChange")
+    static let markdownRendererKey = "markdownRenderer"
+    static let markdownRendererDidChange = Notification.Name("AletheiaMarkdownRendererDidChange")
+    static let previewTimingsKey = "showPreviewTimings"
+    static let previewTimingsDidChange = Notification.Name("AletheiaPreviewTimingsDidChange")
     static let schemes = AppColorScheme.all
 
     private let defaults: UserDefaults
@@ -170,6 +179,26 @@ final class AppSettings: NSObject {
         guard revealActiveFileInTree != enabled else { return }
         defaults.set(enabled, forKey: Self.revealActiveFileKey)
         NotificationCenter.default.post(name: Self.revealActiveFileDidChange, object: self)
+    }
+
+    /// Unknown stored values fall back to WebKit.
+    var markdownRenderer: MarkdownRenderer {
+        defaults.string(forKey: Self.markdownRendererKey).flatMap(MarkdownRenderer.init(rawValue:)) ?? .webkit
+    }
+
+    func setMarkdownRenderer(_ renderer: MarkdownRenderer) {
+        guard markdownRenderer != renderer else { return }
+        defaults.set(renderer.rawValue, forKey: Self.markdownRendererKey)
+        NotificationCenter.default.post(name: Self.markdownRendererDidChange, object: self)
+    }
+
+    /// The Custom renderer's diagnostics overlay.
+    var showsPreviewTimings: Bool { defaults.bool(forKey: Self.previewTimingsKey) }
+
+    func setShowsPreviewTimings(_ enabled: Bool) {
+        guard showsPreviewTimings != enabled else { return }
+        defaults.set(enabled, forKey: Self.previewTimingsKey)
+        NotificationCenter.default.post(name: Self.previewTimingsDidChange, object: self)
     }
 
     private var settingsWindow: NSWindow?
