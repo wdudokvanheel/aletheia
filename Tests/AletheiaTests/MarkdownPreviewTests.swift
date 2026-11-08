@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownView
 import WebKit
 import XCTest
 @testable import Aletheia
@@ -311,7 +312,19 @@ final class MarkdownPreviewTests: XCTestCase {
     }
 
     @MainActor func testWindowModesRestoreAndRetainNativeEditingState() async throws {
+        try await assertWindowModesRestoreAndRetainNativeEditingState(.webkit)
+    }
+
+    @MainActor func testWindowModesRestoreAndRetainNativeEditingStateWithCustom() async throws {
+        try await assertWindowModesRestoreAndRetainNativeEditingState(.custom)
+    }
+
+    @MainActor private func assertWindowModesRestoreAndRetainNativeEditingState(_ renderer: MarkdownRenderer) async throws {
         _ = NSApplication.shared
+        let settings = AppSettings.shared
+        let previous = settings.markdownRenderer
+        defer { settings.setMarkdownRenderer(previous) }
+        settings.setMarkdownRenderer(renderer)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
         try Data("# Original".utf8).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -353,7 +366,11 @@ final class MarkdownPreviewTests: XCTestCase {
                 XCTAssertGreaterThan(split.arrangedSubviews[1].frame.width, 100)
             }
             if mode == .editor { XCTAssertTrue(visibleContent === editor.enclosingScrollView) }
-            if mode == .preview { XCTAssertTrue(visibleContent is WKWebView) }
+            if mode == .preview {
+                XCTAssertTrue(renderer == .webkit ? visibleContent is WKWebView : visibleContent is MarkdownPreviewView)
+                XCTAssertTrue(visibleContent === controller.preview?.view)
+                XCTAssertTrue(controller.window?.firstResponder === controller.preview?.focusView)
+            }
             XCTAssertEqual(controller.session.markdownModes?[url.path], mode)
             XCTAssertEqual(controller.session.lastMarkdownMode, mode)
             XCTAssertEqual(editor.string, "# Original edited")
@@ -399,6 +416,277 @@ final class MarkdownPreviewTests: XCTestCase {
             try await self.script(preview, "return document.documentElement.style.getPropertyValue('--background')") as? String == ""
         }
         preview.show(nil)
+    }
+
+    // MARK: Custom renderer
+
+    /// Whether `view` shows a snapshot of exactly `text`.
+    @MainActor private func shows(_ view: MarkdownPreviewView, _ text: String) -> Bool {
+        (try? MarkdownDocument.parse(text).blocks) == view.snapshot.document.blocks
+    }
+
+    @MainActor private func customPreview(showing document: EditorDocument) async throws -> CustomMarkdownPreview {
+        let preview = CustomMarkdownPreview()
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        document.onContentChange = { [weak preview] in preview?.contentChanged() }
+        preview.show(document)
+        let text = document.editor.string
+        try await eventually {
+            preview.preview.snapshot.isComplete && shows(preview.preview, text)
+        }
+        return preview
+    }
+
+    /// The WebKit search test's cases on the Custom renderer.
+    @MainActor func testCustomSearchUsesSourceOccurrenceIncludingHiddenDestinationsAndUTF16() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        let source = "😀 first\r\n\r\n[repeat](repeat) repeat **repeat**\r\n\r\nrepeat\r\n\r\n[hidden]: destination"
+        try Data(source.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let custom = try await customPreview(showing: document)
+        let view = custom.preview
+        XCTAssertEqual(view.snapshot.document.blocks.map(\.text), ["😀 first", "repeat repeat repeat", "repeat"])
+        let ns = source as NSString
+        let occurrences = FindBar.ranges(in: source, query: "repeat")
+        for (index, block, offset) in [(0, 1, 0), (2, 1, 7), (3, 1, 14), (4, 2, 0)] {
+            custom.setSearch(query: "repeat", sourceRange: occurrences[index])
+            XCTAssertEqual(view.selection, TextPosition(block: block, offset: offset)..<TextPosition(block: block, offset: offset + 6),
+                           "occurrence \(index)")
+        }
+        // The identical word in the link destination has no visible range; neither has markup,
+        // a match across blocks, or one in a link reference definition.
+        for (query, range) in [("repeat", occurrences[1]), ("**", ns.range(of: "**")),
+                               ("**repeat**\r\n\r\nrepeat", ns.range(of: "**repeat**\r\n\r\nrepeat")),
+                               ("destination", ns.range(of: "destination"))] {
+            custom.setSearch(query: "repeat", sourceRange: occurrences[0])
+            XCTAssertNotNil(view.selection)
+            custom.setSearch(query: query, sourceRange: range)
+            XCTAssertNil(view.selection, query)
+        }
+        // The range must still hold the query in the buffer.
+        custom.setSearch(query: "first", sourceRange: occurrences[0])
+        XCTAssertNil(view.selection)
+        custom.setSearch(query: "repeat", sourceRange: NSRange(location: ns.length, length: 6))
+        XCTAssertNil(view.selection)
+        custom.show(nil)
+    }
+
+    @MainActor func testCustomSearchSurvivesPendingRenderAndReloadButClearsOnSwitch() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("first target".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let other = EditorDocument(file: try TextFile.read(url))
+        let custom = CustomMarkdownPreview()
+        let view = custom.preview
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        document.onContentChange = { custom.contentChanged() }
+        func selected(_ offset: Int) -> Bool {
+            view.selectedText == "target" && view.selection?.lowerBound == TextPosition(block: 0, offset: offset)
+        }
+        // Set before the first snapshot installs.
+        custom.show(document)
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 6, length: 6))
+        XCTAssertNil(view.selection)
+        try await eventually { selected(6) }
+
+        // An edit: the find bar's next match applies once that render installs.
+        document.editor.insertText("new ", replacementRange: NSRange(location: 0, length: 0))
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 10, length: 6))
+        try await eventually { shows(view, "new first target") && selected(10) }
+
+        // An external reload goes through the edit path; a match still there stays selected.
+        try Data("new first target, reloaded".utf8).write(to: url)
+        document.reload(.text(try TextFile.read(url)))
+        XCTAssertFalse(document.isDirty)
+        try await eventually { shows(view, "new first target, reloaded") }
+        XCTAssertTrue(selected(10))
+        // One that moved is cleared until the find bar sends its new range.
+        try Data("a newer first target".utf8).write(to: url)
+        document.reload(.text(try TextFile.read(url)))
+        XCTAssertNil(view.selection)
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 14, length: 6))
+        try await eventually { shows(view, "a newer first target") && selected(14) }
+
+        // A hidden preview applies a search once it shows the buffer it refers to.
+        custom.setVisible(false)
+        document.editor.insertText("> ", replacementRange: NSRange(location: 0, length: 0))
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 16, length: 6))
+        XCTAssertTrue(selected(14), "the old snapshot keeps the old match")
+        custom.setVisible(true)
+        try await eventually { shows(view, "> a newer first target") && view.selectedText == "target" }
+
+        // Showing another document clears the search, and an empty query clears it.
+        custom.show(other)
+        XCTAssertNil(view.selection)
+        try await eventually { shows(view, "first target") }
+        XCTAssertNil(view.selection)
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 6, length: 6))
+        XCTAssertTrue(selected(6))
+        custom.setSearch(query: "", sourceRange: nil)
+        XCTAssertNil(view.selection)
+        // Without a search, the user's selection is kept on updates and mode changes.
+        view.documentView?.selectAll(nil)
+        custom.setSearch(query: "", sourceRange: nil)
+        custom.show(other)
+        XCTAssertEqual(view.selectedText, "first target")
+        custom.show(nil)
+        XCTAssertNil(view.selection)
+        custom.setSearch(query: "target", sourceRange: NSRange(location: 6, length: 6))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(view.selection)
+        XCTAssertTrue(view.snapshot.document.blocks.isEmpty)
+    }
+
+    /// Showing no document clears content, selection and search and stops
+    /// work; showing it again shows the current unsaved buffer with editing
+    /// state intact. Custom renders as it is edited, without the debounce.
+    @MainActor func testCustomUnsavedEditsHideAndShowAgain() async throws {
+        _ = NSApplication.shared
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("# Disk".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let custom = try await customPreview(showing: document)
+        let view = custom.preview
+        document.editor.insertText(" first", replacementRange: NSRange(location: 6, length: 0))
+        try await eventually { view.snapshot.document.blocks.first?.text == "Disk first" }
+        document.editor.breakUndoCoalescing()
+        document.editor.insertText(" second", replacementRange: NSRange(location: 12, length: 0))
+        let selection = document.editor.selectedRange()
+        custom.show(nil)
+        XCTAssertNil(view.selection)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(view.snapshot.document.blocks.isEmpty, "the edit before hiding never shows")
+        custom.show(document)
+        try await eventually { view.snapshot.document.blocks.first?.text == "Disk first second" }
+        XCTAssertEqual(document.editor.selectedRange(), selection)
+        XCTAssertTrue(document.isDirty)
+        document.editor.undoManager?.undo()
+        XCTAssertEqual(document.editor.string, "# Disk first")
+        try await eventually { view.snapshot.document.blocks.first?.text == "Disk first" }
+        custom.show(nil)
+    }
+
+    /// Find next and previous in Preview mode select the source match in the
+    /// hidden editor and in the preview, on both renderers.
+    @MainActor func testFindBarNavigatesThePreviewInPreviewMode() async throws {
+        _ = NSApplication.shared
+        let settings = AppSettings.shared
+        let previous = settings.markdownRenderer
+        defer { settings.setMarkdownRenderer(previous) }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        let source = "# cat\n\nA [cat](cat.md) and a cat.\n\n- one cat"
+        try Data(source.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let matches = FindBar.ranges(in: source, query: "cat")
+        XCTAssertEqual(matches.count, 5)
+        for renderer in MarkdownRenderer.allCases {
+            settings.setMarkdownRenderer(renderer)
+            let controller = EditorWindow()
+            let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                      filePaths: [url.path], selectedPath: url.path, markdownModes: [url.path: .preview])
+            await withCheckedContinuation { continuation in controller.restore(state) { _ in continuation.resume() } }
+            let editor = try XCTUnwrap(controller.documents.first?.editor)
+            XCTAssertTrue(controller.window?.firstResponder === controller.preview?.focusView)
+            /// The preview's selected text, or nil before it shows the match.
+            func previewSelection() async throws -> String? {
+                if let custom = controller.preview as? CustomMarkdownPreview {
+                    return shows(custom.preview, source) ? custom.preview.selectedText : nil
+                }
+                let webkit = try XCTUnwrap(controller.preview as? MarkdownPreview)
+                guard webkit.ready else { return nil }
+                return try await script(webkit, "return committedSource === source ? window.getSelection().toString() : null",
+                                        ["source": source]) as? String
+            }
+            controller.findBar.query.stringValue = "cat"
+            controller.showFind(nil)
+            XCTAssertEqual(controller.findBar.matches, matches)
+            XCTAssertEqual(controller.findBar.current, 0)
+            try await eventually { try await previewSelection() == "cat" }
+            // Next: the link text, then its destination (nothing shown), the plain word, the
+            // list item, around to the heading; then back.
+            for (forward, index, expected) in [(true, 1, "cat"), (true, 2, ""), (true, 3, "cat"), (true, 4, "cat"),
+                                               (true, 0, "cat"), (false, 4, "cat"), (false, 3, "cat")] {
+                if forward { controller.findBar.nextMatch(nil) } else { controller.findBar.previousMatch(nil) }
+                XCTAssertEqual(controller.findBar.current, index, "\(renderer)")
+                XCTAssertEqual(editor.selectedRange(), matches[index], "\(renderer): the hidden source selects the match")
+                try await eventually { try await previewSelection() == expected }
+            }
+            // Replace edits the hidden source and the preview follows.
+            controller.showReplace(nil)
+            controller.findBar.replacement.stringValue = "dog"
+            controller.findBar.replaceCurrent(nil)
+            let replaced = source.replacingOccurrences(of: "a cat.", with: "a dog.")
+            XCTAssertEqual(editor.string, replaced)
+            try await eventually {
+                if let custom = controller.preview as? CustomMarkdownPreview { return shows(custom.preview, replaced) }
+                let webkit = try XCTUnwrap(controller.preview as? MarkdownPreview)
+                return try await script(webkit, "return committedSource", [:]) as? String == replaced
+            }
+            editor.undoManager?.undo()
+            XCTAssertEqual(editor.string, source)
+            // Closing the bar clears the preview's selection and returns focus to the preview.
+            controller.findBar.closeSearch(nil)
+            try await eventually { try await previewSelection() == "" }
+            XCTAssertTrue(controller.window?.firstResponder === controller.preview?.focusView)
+            controller.window?.performClose(nil)
+        }
+    }
+
+    /// A clean document changed on disk reloads through the Custom preview's
+    /// edit path: the top visible block stays in place and the selection
+    /// follows its text.
+    @MainActor func testExternalReloadKeepsCustomScrollAndSelection() async throws {
+        _ = NSApplication.shared
+        let settings = AppSettings.shared
+        let previous = settings.markdownRenderer
+        defer { settings.setMarkdownRenderer(previous) }
+        settings.setMarkdownRenderer(.custom)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        let sections = (1...120).map { "## Section \($0)\n\nParagraph \($0) with enough words to wrap across the preview column." }
+        let original = "# Title\n\n" + sections.joined(separator: "\n\n")
+        try Data(original.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let controller = EditorWindow()
+        let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                  filePaths: [url.path], selectedPath: url.path, markdownModes: [url.path: .preview])
+        await withCheckedContinuation { continuation in controller.restore(state) { _ in continuation.resume() } }
+        let document = try XCTUnwrap(controller.documents.first)
+        let custom = try XCTUnwrap(controller.preview as? CustomMarkdownPreview)
+        let view = custom.preview
+        try await eventually {
+            view.snapshot.isComplete && shows(view, original)
+                && view.snapshot.width == view.contentView.bounds.width
+        }
+        // Select a word half way down; the reveal centers it.
+        view.reveal(sourceRange: (original as NSString).range(of: "Paragraph 60 with"))
+        XCTAssertEqual(view.selectedText, "Paragraph 60 with")
+        let top = view.contentView.bounds.minY
+        XCTAssertGreaterThan(top, 1000)
+        try await eventually { document.previewPosition.y == top }
+        let selected = try XCTUnwrap(view.selection?.lowerBound.block)
+        let screenY = view.snapshot.blockTops[selected] - top
+
+        // Edited above the visible area and below it, on disk.
+        let changed = original.replacingOccurrences(of: "Paragraph 3 with", with: "Paragraph 3, now much longer, with")
+            .replacingOccurrences(of: "## Section 2\n", with: "## Section 2\n\nAn inserted paragraph.\n\n- and\n- a list\n")
+            .replacingOccurrences(of: "Paragraph 100 with", with: "Paragraph one hundred with")
+        try Data(changed.utf8).write(to: url)
+        controller.checkDiskChanges()
+        try await eventually { view.snapshot.isComplete && shows(view, changed) }
+        XCTAssertEqual(document.editor.string, changed)
+        XCTAssertFalse(document.isDirty)
+        XCTAssertEqual(view.selectedText, "Paragraph 60 with", "the selection follows its text")
+        let block = try XCTUnwrap(view.selection?.lowerBound.block)
+        XCTAssertEqual(block, selected + 2, "two blocks inserted above")
+        XCTAssertEqual(view.snapshot.blockTops[block] - view.contentView.bounds.minY, screenY, accuracy: 0.5,
+                       "the visible blocks stay in place")
+        try await eventually { document.previewPosition.y == view.contentView.bounds.minY }
+        controller.window?.performClose(nil)
     }
 
     func testOldSessionLoadsAndModesRoundTrip() throws {

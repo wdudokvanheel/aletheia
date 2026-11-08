@@ -24,6 +24,10 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
     private weak var document: EditorDocument?
     /// The buffer changed since it was last pushed.
     private var stale = false
+    /// The find bar's query and current match in the shown buffer, as the
+    /// WebKit preview keeps them.
+    private var searchQuery = ""
+    private var searchRange: NSRange?
     private var visible = true
     private var nextFraction: Double?
     /// From showing a document until its complete snapshot installs, scroll
@@ -76,11 +80,15 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         if changed { keepSnapshot() }
         self.document = document
         preview.imageProvider = self
+        if changed {
+            searchQuery = ""
+            searchRange = nil
+        }
         guard let document else {
             nextFraction = nil
             restoring = false
             stale = false
-            preview.clearSelection()
+            preview.clearSearch()
             preview.setSource("")
             return
         }
@@ -88,6 +96,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         stale = false
         guard changed else {
             preview.setSource(document.editor.string)
+            sendSearch()
             return
         }
         let reusable = kept.removeValue(forKey: ObjectIdentifier(document)).flatMap {
@@ -120,6 +129,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         guard visible, stale, let document else { return }
         stale = false
         preview.setSource(document.editor.string)
+        sendSearch()
     }
 
     func applyTheme() {
@@ -131,8 +141,37 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
             link: palette.accent)
     }
 
-    /// Find in the preview arrives in Phase 8.
-    func setSearch(query: String, sourceRange: NSRange?) {}
+    /// The find bar matches in the source buffer and passes its query and
+    /// current match here, as UTF-16 offsets, as it does to WebKit: the view
+    /// selects the match where it is displayed and centers it.
+    func setSearch(query: String, sourceRange: NSRange?) {
+        let hadSearch = searchRange != nil
+        if document != nil, !query.isEmpty, let sourceRange,
+           sourceRange.location != NSNotFound, sourceRange.length > 0 {
+            searchQuery = query
+            searchRange = sourceRange
+            sendSearch()
+        } else {
+            searchQuery = ""
+            searchRange = nil
+            // Without a search the selection is the user's, kept across updates.
+            if hadSearch { preview.clearSearch() }
+        }
+    }
+
+    /// Reveals the match in the source the view was last given, like the
+    /// WebKit preview after each render: again after every change while it
+    /// is still the query there, and otherwise only clearing the selection
+    /// until the find bar sends the new match. A stale (hidden) preview
+    /// waits until it pushes the buffer.
+    private func sendSearch() {
+        guard let range = searchRange, !stale, let text = document?.editor.textStorage?.mutableString else { return }
+        if NSMaxRange(range) <= text.length, text.substring(with: range) == searchQuery {
+            preview.reveal(sourceRange: range)
+        } else {
+            preview.clearSearch()
+        }
+    }
 
     func setVisible(_ visible: Bool) {
         self.visible = visible
