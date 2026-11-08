@@ -80,8 +80,10 @@ struct BlockLayoutBuilder {
         // Every direction first: a window holds the paragraphs after the
         // one it opens for.
         var isRightToLeft = [Bool](repeating: false, count: segments.count)
-        for (index, segment) in segments.enumerated() where segment.kind == .paragraph || segment.kind == .heading {
-            isRightToLeft[index] = direction(of: segment.range)
+        if let text, TextDirection.hasRightToLeft(text, 0..<textLength) {
+            for (index, segment) in segments.enumerated() where segment.kind == .paragraph || segment.kind == .heading {
+                isRightToLeft[index] = direction(of: segment.range)
+            }
         }
         if !isEstimate, !block.images.isEmpty {
             imageSizes = block.images.map { BlockLayout.size($0.source, in: images) }
@@ -233,28 +235,41 @@ struct BlockLayoutBuilder {
     }
 
     /// The window to typeset a line starting at `start` with, at text
-    /// `width`: the current one while it reaches far enough past `start`
-    /// and fits its images to `width`, or else a new one starting there.
-    private mutating func window(at start: Int, width: CGFloat, reaching end: Int = 0) -> TextWindow? {
-        if let window, window.range.lowerBound <= start, end <= window.range.upperBound,
-           window.range.upperBound == textLength
-            || (start - window.range.lowerBound < window.advance && window.range.upperBound - start >= window.advance / 2),
-           window.images?.hasLoaded != true || window.imageWidth == width {
+    /// `width`, when the line's paragraph (up to Core Text, text between
+    /// newlines) starts at `paragraphStart`: the current one while it
+    /// reaches far enough past `start`, fits its images to `width`, and
+    /// holds less than `advance` of the paragraph before `start`; or else a
+    /// new one starting there.
+    private mutating func window(at start: Int, width: CGFloat, paragraphStart: Int) -> TextWindow? {
+        let advance = advance
+        if let window, window.range.lowerBound <= start,
+           window.range.upperBound == textLength || window.range.upperBound - start >= window.reach,
+           window.images?.hasLoaded != true || window.imageWidth == width,
+           start - max(window.range.lowerBound, paragraphStart) < advance {
             return window
         }
-        return openWindow(at: start, width: width, reaching: end)
+        // Deep in a long paragraph, a window holds two advances of it.
+        return openWindow(at: start, width: width,
+                          length: start - paragraphStart >= advance ? 2 * advance : TextWindow.length)
     }
 
-    private mutating func openWindow(at start: Int, width: CGFloat, reaching end: Int = 0) -> TextWindow? {
+    /// How much of a paragraph a window holds before a line it breaks:
+    /// Core Text looks back that far for each break. Short lines (narrow
+    /// columns, emoji) make each break cost as much as a long one, so
+    /// windows move on sooner.
+    private var advance: Int {
+        let lineLength = lines.isEmpty ? TextWindow.advance : lines.last!.range.upperBound / lines.count
+        return min(max(16 * lineLength, TextWindow.advance / 16), TextWindow.advance)
+    }
+
+    private mutating func openWindow(at start: Int, width: CGFloat, reaching end: Int = 0,
+                                     length windowLength: Int = TextWindow.length) -> TextWindow? {
         guard let text else { return nil }
         let images = imageSizes.isEmpty ? nil : ImageText(block: block, sizes: imageSizes, width: width)
-        // Short lines (narrow columns, emoji) make each break cost as much
-        // as a long one, so windows move on sooner.
-        let lineLength = lines.isEmpty ? TextWindow.advance : (lines.last!.range.upperBound) / lines.count
-        let advance = min(max(16 * lineLength, TextWindow.advance / 16), TextWindow.advance)
         guard let window = TextWindow(text: text, block: block, start: start, reaching: end, length: textLength,
-                                      advance: advance, typography: typography, images: images, imageWidth: width,
-                                      directions: directions, isWarm: linesWarm) else { return nil }
+                                      windowLength: windowLength, typography: typography,
+                                      images: images, imageWidth: width, directions: directions,
+                                      isWarm: linesWarm) else { return nil }
         self.window = window
         return window
     }
@@ -267,17 +282,20 @@ struct BlockLayoutBuilder {
     private mutating func layOutText(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat,
                                      isRightToLeft: Bool = false) -> CGFloat {
         guard !range.isEmpty else { return 0 }
-        guard text != nil, var window = window(at: range.lowerBound, width: width) else {
+        guard text != nil,
+              var window = window(at: range.lowerBound, width: width, paragraphStart: range.lowerBound) else {
             return estimatedHeight(of: range, width: width)
         }
         var y = top
         var start = range.lowerBound
+        var paragraphStart = start
         while start < range.upperBound {
-            if let current = self.window(at: start, width: width) { window = current }
+            if let current = self.window(at: start, width: width, paragraphStart: paragraphStart) { window = current }
             var count = max(CTTypesetterSuggestLineBreak(window.typesetter, start - window.range.lowerBound,
                                                          Double(width)), 1)
             if start + count >= window.range.upperBound, window.range.upperBound < textLength,
-               window.range.lowerBound < start, let fresh = openWindow(at: start, width: width) {
+               window.range.lowerBound < start, let fresh = openWindow(at: start, width: width,
+                                                                       length: max(2 * advance, 4 * count)) {
                 // The line may go on past the window: break it again from here.
                 window = fresh
                 count = max(CTTypesetterSuggestLineBreak(window.typesetter, 0, Double(width)), 1)
@@ -288,6 +306,7 @@ struct BlockLayoutBuilder {
             }
             y += appendLine(start..<end, in: window, x: x, maxX: x + width, top: y, codeBlock: -1,
                             isRightToLeft: isRightToLeft).height
+            if lines.last?.endsWithNewline == true { paragraphStart = end }
             start = end
         }
         recordImageWidths(in: range, width)
@@ -480,11 +499,14 @@ struct TextWindow {
     /// How much text a window holds: under the 10,000 characters past which
     /// Core Text stops kerning, and short enough to typeset again quickly.
     static let length = 8_192
-    /// Lines start at most this far into a window, so breaking a line never
-    /// looks back further, and at least half of it before its end, unless
-    /// it ends the text. Windows of short lines move on sooner: `advance`.
+    /// A line starts at most this far into a paragraph in its window, so
+    /// breaking it never looks back further; less for short lines.
     static let advance = 4_096
-    let advance: Int
+    /// A line starts at least this far before its window's end, unless the
+    /// window ends the text, or half the window for a shorter one; a line
+    /// longer than that gets a new window.
+    static let reach = 1_024
+    let reach: Int
 
     /// Display offsets of the window's text.
     let range: Range<Int>
@@ -496,14 +518,16 @@ struct TextWindow {
     let imageWidth: CGFloat
     let set: LineSet
 
-    /// The window from `start`, through `reaching` at least, of `text`, the
-    /// display text of `block` (`length` units), with the block's `images`
-    /// fitted to `imageWidth` and the paragraph `directions` of the block.
-    init?(text: CFString, block: MarkdownBlock, start: Int, reaching: Int, length: Int, advance: Int = advance,
-          typography: Typography, images: ImageText?, imageWidth: CGFloat, directions: [ParagraphDirection],
-          isWarm: Bool) {
-        self.advance = advance
-        var end = min(max(start + Self.length * advance / Self.advance, reaching), length)
+    /// The window from `start`, through `reaching` at least and about
+    /// `windowLength` long, of `text`, the display text of `block` (`length`
+    /// units), with the block's `images` fitted to `imageWidth` and the
+    /// paragraph `directions` of the block.
+    init?(text: CFString, block: MarkdownBlock, start: Int, reaching: Int, length: Int,
+          windowLength: Int = TextWindow.length, typography: Typography, images: ImageText?, imageWidth: CGFloat,
+          directions: [ParagraphDirection], isWarm: Bool) {
+        // The rest of the text, when it is short enough: one window for a
+        // block of up to `length`.
+        var end = length - start <= Self.length ? length : min(max(start + min(windowLength, Self.length), reaching), length)
         if end < length {
             // Never inside a character or an image.
             let composed = CFStringGetRangeOfComposedCharactersAtIndex(text, end)
@@ -513,6 +537,7 @@ struct TextWindow {
             }
         }
         let range = start..<end
+        reach = min(Self.reach, range.count / 2)
         // A window of the whole text shares the block's runs.
         let runs = range == 0..<length ? block.styleRuns : Self.slice(block.styleRuns, to: range)
         let windowImages = images?.slice(range)
@@ -522,7 +547,8 @@ struct TextWindow {
             return lower < upper ? ParagraphDirection(range: (lower - start)..<(upper - start),
                                                       isRightToLeft: direction.isRightToLeft) : nil
         }
-        guard let substring = CFStringCreateWithSubstring(nil, text, CFRange(location: start, length: end - start)),
+        guard let substring = range == 0..<length ? text
+                : CFStringCreateWithSubstring(nil, text, CFRange(location: start, length: end - start)),
               let string = BlockLayout.makeString(substring, runs: runs, typography: typography, images: windowImages,
                                                   directions: windowDirections) else { return nil }
         self.range = range

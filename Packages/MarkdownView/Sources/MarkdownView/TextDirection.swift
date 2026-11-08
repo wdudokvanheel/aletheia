@@ -21,38 +21,64 @@ enum TextDirection {
         var hasRightToLeft = false
         var isolates = 0
         var high: UInt16 = 0
-        var buffer = [UniChar](repeating: 0, count: 512)
-        var location = range.lowerBound
-        while location < range.upperBound {
-            let count = min(buffer.count, range.upperBound - location)
-            CFStringGetCharacters(string, CFRange(location: location, length: count), &buffer)
-            for unit in buffer[0..<count] {
-                let scalar: UInt32
-                if UTF16.isLeadSurrogate(unit) {
-                    high = unit
-                    continue
-                } else if UTF16.isTrailSurrogate(unit), high != 0 {
-                    scalar = 0x10000 + (UInt32(high - 0xD800) << 10) + UInt32(unit - 0xDC00)
-                    high = 0
-                } else {
-                    scalar = UInt32(unit)
-                    high = 0
+        let chunk = 256
+        return withUnsafeTemporaryAllocation(of: UniChar.self, capacity: chunk) { buffer in
+            var location = range.lowerBound
+            while location < range.upperBound {
+                let count = min(chunk, range.upperBound - location)
+                CFStringGetCharacters(string, CFRange(location: location, length: count), buffer.baseAddress!)
+                for unit in buffer[0..<count] {
+                    let scalar: UInt32
+                    if UTF16.isLeadSurrogate(unit) {
+                        high = unit
+                        continue
+                    } else if UTF16.isTrailSurrogate(unit), high != 0 {
+                        scalar = 0x10000 + (UInt32(high - 0xD800) << 10) + UInt32(unit - 0xDC00)
+                        high = 0
+                    } else {
+                        scalar = UInt32(unit)
+                        high = 0
+                    }
+                    let isRightToLeftBlock = isInRightToLeftBlock(scalar)
+                    if isRightToLeftBlock { hasRightToLeft = true }
+                    if direction == nil {
+                        switch scalar {
+                        case 0x2066, 0x2067, 0x2068: isolates += 1
+                        case 0x2069: isolates = max(isolates - 1, 0)
+                        default:
+                            if isolates == 0 { direction = strongDirection(scalar, isRightToLeftBlock) }
+                        }
+                    }
+                    if hasRightToLeft, direction != nil { return (direction == true, true) }
                 }
-                let isRightToLeftBlock = isInRightToLeftBlock(scalar)
-                if isRightToLeftBlock { hasRightToLeft = true }
-                if direction == nil {
-                    switch scalar {
-                    case 0x2066, 0x2067, 0x2068: isolates += 1
-                    case 0x2069: isolates = max(isolates - 1, 0)
-                    default:
-                        if isolates == 0 { direction = strongDirection(scalar, isRightToLeftBlock) }
+                location += count
+            }
+            return (direction == true, hasRightToLeft)
+        }
+    }
+
+    /// Whether `range` of `string` holds any character of a right-to-left
+    /// script, which most text does not: then every paragraph in it reads
+    /// left to right and nothing needs its direction set.
+    static func hasRightToLeft(_ string: CFString, _ range: Range<Int>) -> Bool {
+        let chunk = 1_024
+        return withUnsafeTemporaryAllocation(of: UniChar.self, capacity: chunk) { buffer in
+            var location = range.lowerBound
+            while location < range.upperBound {
+                let count = min(chunk, range.upperBound - location)
+                CFStringGetCharacters(string, CFRange(location: location, length: count), buffer.baseAddress!)
+                // Right-to-left blocks start at U+0590; their supplementary
+                // ranges at lead surrogates U+D802 and U+D83A.
+                for unit in buffer[0..<count] where unit >= 0x0590 {
+                    if unit <= 0x08FF || (0xFB1D...0xFDFF).contains(unit) || (0xFE70...0xFEFE).contains(unit)
+                        || unit == 0x200F || (0xD802...0xD803).contains(unit) || (0xD83A...0xD83B).contains(unit) {
+                        return true
                     }
                 }
-                if hasRightToLeft, direction != nil { return (direction == true, true) }
+                location += count
             }
-            location += count
+            return false
         }
-        return (direction == true, hasRightToLeft)
     }
 
     /// True for a strong right-to-left character, false for a strong

@@ -799,17 +799,20 @@ private final class RowsText: @unchecked Sendable {
                                       destination: link.destination))
             next += 1
         }
+        // Rows of left-to-right text are typeset as they are. With
+        // right-to-left text, each cell is its own paragraph.
         var separators: [Int32] = []
         var directions: [ParagraphDirection] = []
-        let hasRightToLeft = TextDirection.scan(plain, 0..<(end - start)).hasRightToLeft
-        for row in rows {
-            for column in 0..<columns {
-                let cell = structure.cell(row, column)
-                let local = (cell.lowerBound - start)..<(cell.upperBound - start)
-                if column + 1 < columns { separators.append(Int32(local.upperBound)) }
-                if hasRightToLeft, !local.isEmpty, TextDirection.scan(plain, local).isRightToLeft {
-                    directions.append(ParagraphDirection(range: local.lowerBound..<min(local.upperBound + 1, end - start),
-                                                         isRightToLeft: true))
+        if TextDirection.hasRightToLeft(plain, 0..<(end - start)) {
+            for row in rows {
+                for column in 0..<columns {
+                    let cell = structure.cell(row, column)
+                    let local = (cell.lowerBound - start)..<(cell.upperBound - start)
+                    if column + 1 < columns { separators.append(Int32(local.upperBound)) }
+                    if !local.isEmpty, TextDirection.scan(plain, local).isRightToLeft {
+                        directions.append(ParagraphDirection(range: local.lowerBound..<min(local.upperBound + 1, end - start),
+                                                             isRightToLeft: true))
+                    }
                 }
             }
         }
@@ -844,14 +847,18 @@ private final class RowsText: @unchecked Sendable {
     private static func typeset(_ plain: CFString, runs: [StyleRun], images: ImageText?, separators: [Int32],
                                 directions: [ParagraphDirection], typography: Typography)
         -> (string: CFAttributedString, typesetter: CTTypesetter)? {
-        let length = CFStringGetLength(plain)
-        var units = [UniChar](repeating: 0, count: length)
-        CFStringGetCharacters(plain, CFRange(location: 0, length: length), &units)
-        for separator in separators where Int(separator) < length && units[Int(separator)] == 0x09 {
-            units[Int(separator)] = 0x2029
+        var separated = plain
+        if !separators.isEmpty {
+            let length = CFStringGetLength(plain)
+            var units = [UniChar](repeating: 0, count: length)
+            CFStringGetCharacters(plain, CFRange(location: 0, length: length), &units)
+            for separator in separators where Int(separator) < length && units[Int(separator)] == 0x09 {
+                units[Int(separator)] = 0x2029
+            }
+            guard let string = CFStringCreateWithCharacters(nil, units, length) else { return nil }
+            separated = string
         }
-        guard let separated = CFStringCreateWithCharacters(nil, units, length),
-              let string = BlockLayout.makeString(separated, runs: runs, typography: typography, kerned: false,
+        guard let string = BlockLayout.makeString(separated, runs: runs, typography: typography, kerned: false,
                                                   images: images, directions: directions) else { return nil }
         let options = [kCTTypesetterOptionAllowUnboundedLayout: kCFBooleanTrue!] as CFDictionary
         let typesetter = CTTypesetterCreateWithAttributedStringAndOptions(string, options)
