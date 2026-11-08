@@ -1,0 +1,456 @@
+import AppKit
+import WebKit
+
+struct RunOptions {
+    var manifest: URL
+    var set: String
+    var renderer: String
+    var repetitions: Int
+    var output: URL
+    var limit: Int?
+    var filter: String?
+    var previewResources: URL
+    var idleSeconds: Double
+    var timeout: Double
+    var onscreen: Bool
+}
+
+struct ManifestEntry {
+    let path: String
+    let name: String?
+    let url: URL?
+}
+
+enum Manifest {
+    /// Entries of `set`, whose paths are relative to the manifest's `root`. Set entries are
+    /// paths, or objects with `path` (null when a curated file is missing) and `name`.
+    static func load(_ url: URL, set: String) throws -> (URL, [ManifestEntry]) {
+        var url = url
+        var json = try object(url)
+        var sets = json["sets"] as? [String: Any] ?? [:]
+        if sets[set] == nil, set == "generated" {
+            url = url.deletingLastPathComponent().appendingPathComponent("generated/generated-manifest.json")
+            json = try object(url)
+            sets = json["sets"] as? [String: Any] ?? [:]
+        }
+        guard let items = sets[set] as? [Any] else {
+            throw BenchError.unavailable("set \(set) is not in \(url.path); sets: \(sets.keys.sorted().joined(separator: ", "))")
+        }
+        let rootValue = json["root"] as? String ?? "."
+        let root = rootValue.hasPrefix("/") ? URL(fileURLWithPath: rootValue)
+            : url.deletingLastPathComponent().appendingPathComponent(rootValue).standardizedFileURL
+        return (url, items.map { item in
+            let path = (item as? String) ?? ((item as? [String: Any])?["path"] as? String)
+            let name = (item as? [String: Any])?["name"] as? String
+            return ManifestEntry(path: path ?? "(\(name ?? "unnamed") missing)", name: name,
+                                 url: path.map { root.appendingPathComponent($0) })
+        })
+    }
+
+    private static func object(_ url: URL) throws -> [String: Any] {
+        guard let json = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw BenchError.unavailable("\(url.path) is not a manifest object")
+        }
+        return json
+    }
+}
+
+struct EditPoint: Codable {
+    /// UTF-16 offset of the first keystroke; later repetitions type after it.
+    let offset: Int
+    /// `paragraph`: end of the paragraph line nearest the middle; `end`: end of the document.
+    let kind: String
+
+    static func find(in text: String) -> EditPoint {
+        let units = Array(text.utf16)
+        let middle = units.count / 2
+        var best: Int?
+        var fence: (UInt16, Int)?
+        var start = 0
+        while start < units.count {
+            var end = start
+            while end < units.count, units[end] != 10, units[end] != 13 { end += 1 }
+            var first = start
+            while first < end, first - start < 4, units[first] == 32 { first += 1 }
+            if first < end, first - start < 4 {
+                let unit = units[first]
+                var run = first
+                while run < end, units[run] == unit { run += 1 }
+                if (unit == 96 || unit == 126), run - first >= 3 {
+                    if let open = fence { if open.0 == unit, run - first >= open.1 { fence = nil } }
+                    else { fence = (unit, run - first) }
+                } else if fence == nil, (65...90).contains(unit) || (97...122).contains(unit)
+                            || (unit >= 0xC0 && !(0xD800...0xDFFF).contains(unit)) {
+                    if best.map({ abs(end - middle) < abs($0 - middle) }) ?? true { best = end }
+                }
+            }
+            start = end + (end + 1 < units.count && units[end] == 13 && units[end + 1] == 10 ? 2 : 1)
+        }
+        if let best { return EditPoint(offset: best, kind: "paragraph") }
+        var end = units.count
+        while end > 0, units[end - 1] == 10 || units[end - 1] == 13 { end -= 1 }
+        return EditPoint(offset: end, kind: "end")
+    }
+}
+
+struct DocumentResult: Codable {
+    let path: String
+    var name: String?
+    var bytes: Int?
+    var status = "ok"
+    var error: String?
+    var edit: EditPoint?
+    var ms: [String: Summary]?
+    var memoryMiB: Memory?
+    var idleCPUPercent: IdleCPU?
+}
+
+struct WindowInfo: Codable {
+    let width: Double
+    let height: Double
+    let backingScale: Double
+    let screenRefreshHz: Int
+    /// While the display sleeps WebKit paces frames with a timer instead of the display.
+    let displayAsleep: Bool
+    /// `transparent`: alpha 0 and click-through on the main screen; `onscreen`: visible.
+    let placement: String
+    let occlusionDetection: Bool
+}
+
+struct RunHeader: Codable {
+    let timestamp: String
+    let renderer: String
+    let set: String
+    let manifest: String
+    let documents: Int
+    let repetitions: Int
+    let limit: Int?
+    let filter: String?
+    let idleSeconds: Double
+    let debounceMs: Int
+    let previewResources: String
+    let machine: Environment.Machine
+    let os: Environment.OS
+    let build: String
+    let git: Environment.Git?
+    let webkit: String?
+    let window: WindowInfo
+    let firstPreviewMs: Double
+    let baselineMemoryMiB: Double
+    let helperAttribution: String
+    let definitions: [String: String]
+}
+
+struct AggregateLatency: Codable {
+    let n: Int
+    let p50: Double
+    let p95: Double
+    let max: Double
+    let worstP95: Double
+    let worstDocument: String
+}
+
+struct Aggregate: Codable {
+    let documents: Int
+    let ok: Int
+    let failed: Int
+    let skipped: Int
+    let elapsedSeconds: Double
+    let ms: [String: AggregateLatency]
+    let memoryTotalMiB: Summary?
+    let idleCPUTotalPercent: Summary?
+}
+
+/// Streams one result file: the header, then a line per document, then the aggregate.
+final class ResultWriter {
+    private let handle: FileHandle
+    private var first = true
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }()
+
+    init(_ url: URL, header: RunHeader) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw BenchError.unavailable("cannot write \(url.path)")
+        }
+        handle = try FileHandle(forWritingTo: url)
+        try write("{\"schema\":\"aletheia-markdown-bench/1\",\"run\":\(encode(header)),\"documents\":[\n")
+    }
+
+    private func encode<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+    private func write(_ text: String) throws { try handle.write(contentsOf: Data(text.utf8)) }
+
+    func append(_ result: DocumentResult) throws {
+        try write((first ? "" : ",\n") + encode(result))
+        first = false
+    }
+
+    func finish(_ aggregate: Aggregate) throws {
+        try write("\n],\"aggregate\":\(encode(aggregate))}\n")
+        try handle.close()
+    }
+}
+
+@MainActor
+final class Runner {
+    static let metrics = ["startup", "open", "tabSwitch", "update", "updateWork"]
+    static let definitions = [
+        "rendered": "commitPreview returned to the bench (the last point the app observes), then one more callAsyncJavaScript that forces style and layout and resolves after the next requestAnimationFrame plus a zero timeout, so the frame's rendering update has run. Images are not awaited.",
+        "startup": "new preview (WKWebView, configuration, scheme handler, index.html load) until didFinish",
+        "open": "new preview until the document is rendered; includes startup",
+        "tabSwitch": "warm preview showing a small other document: show(document) until rendered",
+        "update": "one keystroke inserted in the paragraph line nearest the middle, contentChanged() until rendered; includes the app's 200 ms debounce",
+        "updateWork": "update from the end of the debounce until rendered",
+        "memoryMiB": "phys_footprint after the settle and idle sample (right after the last update when idleSeconds is 0), with one preview showing the document: the bench (task_info TASK_VM_INFO) plus WebKit helpers (proc_pid_rusage)",
+        "idleCPUPercent": "user+system CPU over idleSeconds, starting 1 s after the last update rendered, as percent of one core, bench and helpers",
+        "percentiles": "nearest rank over the repetitions; aggregate pools every repetition of every ok document"
+    ]
+    static let otherText = """
+        # Other tab
+
+        A short document shown before switching back, so the tab switch renders the measured document from a cleared preview.
+        """
+    static let keystrokes = Array(" quick brown fox jumps over the lazy dog")
+
+    let options: RunOptions
+    let window: NSWindow
+    private var preview: WebKitPreview?
+    private var timeout: Duration { .milliseconds(Int(options.timeout * 1000)) }
+
+    init(options: RunOptions) {
+        self.options = options
+        // On the main screen for its scale and display refresh. By default the window is fully
+        // transparent and click-through, and the preview ignores occlusion (see WebKitPreview).
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        window = NSWindow(contentRect: NSRect(origin: screen.origin, size: NSSize(width: 900, height: 1200)),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.ignoresMouseEvents = true
+        window.alphaValue = options.onscreen ? 1 : 0
+    }
+
+    func run() async throws {
+        let started = now()
+        let (manifest, all) = try Manifest.load(options.manifest, set: options.set)
+        var entries = all
+        if let filter = options.filter { entries = entries.filter { $0.path.contains(filter) || ($0.name ?? "").contains(filter) } }
+        if let limit = options.limit { entries = Array(entries.prefix(limit)) }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Markdown preview benchmark")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        window.orderFrontRegardless()
+
+        let baseline = Double(ProcessMetrics.ownFootprint()) / 1_048_576
+        // The first preview after launch also starts the shared GPU and networking helpers.
+        let first: (startup: Double, open: Double)
+        do {
+            first = try await open(BenchDocument(url: scratchURL(), text: Self.otherText), timeout: .seconds(60))
+        } catch BenchError.stalled(let state) {
+            throw BenchError.unavailable("the preview page is \(state), so WebKit does not render frames; "
+                + (options.onscreen ? "--onscreen needs an awake, unlocked display" : "the occlusion override failed"))
+        }
+        dispose()
+
+        let environment = Environment.current(repository: Paths.repository,
+            webkitVersion: Bundle(for: WKWebView.self).object(forInfoDictionaryKey: "CFBundleVersion") as? String)
+        let header = RunHeader(
+            timestamp: ISO8601DateFormatter().string(from: Date()), renderer: options.renderer, set: options.set,
+            manifest: manifest.path, documents: entries.count, repetitions: options.repetitions,
+            limit: options.limit, filter: options.filter, idleSeconds: options.idleSeconds, debounceMs: 200,
+            previewResources: options.previewResources.path, machine: environment.machine, os: environment.os,
+            build: environment.build, git: environment.git, webkit: environment.webkit,
+            window: WindowInfo(width: window.frame.width, height: window.frame.height,
+                               backingScale: window.backingScaleFactor,
+                               screenRefreshHz: window.screen?.maximumFramesPerSecond ?? 0,
+                               displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+                               placement: options.onscreen ? "onscreen" : "transparent",
+                               occlusionDetection: options.onscreen),
+            firstPreviewMs: round2(first.open), baselineMemoryMiB: round1(baseline),
+            helperAttribution: ProcessMetrics.attribution, definitions: Self.definitions)
+        let writer = try ResultWriter(options.output, header: header)
+        print("\(options.renderer) \(options.set): \(entries.count) documents, \(options.repetitions) repetitions, "
+              + "first preview \(String(format: "%.1f", first.open)) ms")
+        print(Self.tableHeader)
+
+        var pooled: [String: [Double]] = [:]
+        var worst: [String: (Double, String)] = [:]
+        var memory: [Double] = []
+        var idle: [Double] = []
+        var counts = ["ok": 0, "failed": 0, "skipped": 0]
+        for entry in entries {
+            let (result, samples) = await interval("document") { await measure(entry) }
+            try writer.append(result)
+            print(Self.row(result))
+            counts[result.status, default: 0] += 1
+            guard result.status == "ok" else { continue }
+            for (metric, values) in samples { pooled[metric, default: []] += values }
+            for (metric, summary) in result.ms ?? [:] where summary.p95 > (worst[metric]?.0 ?? -1) {
+                worst[metric] = (summary.p95, result.path)
+            }
+            if let total = result.memoryMiB?.total { memory.append(total) }
+            if let total = result.idleCPUPercent?.total { idle.append(total) }
+        }
+        var latency: [String: AggregateLatency] = [:]
+        for (metric, values) in pooled {
+            guard let summary = Summary(values), let worst = worst[metric] else { continue }
+            latency[metric] = AggregateLatency(n: summary.n, p50: summary.p50, p95: summary.p95, max: summary.max,
+                                               worstP95: worst.0, worstDocument: worst.1)
+        }
+        let aggregate = Aggregate(documents: entries.count, ok: counts["ok"] ?? 0, failed: counts["failed"] ?? 0,
+                                  skipped: counts["skipped"] ?? 0, elapsedSeconds: round1(milliseconds(started, now()) / 1000),
+                                  ms: latency, memoryTotalMiB: Summary(memory), idleCPUTotalPercent: Summary(idle))
+        try writer.finish(aggregate)
+        print(Self.summary(aggregate))
+        print("wrote \(options.output.path)")
+    }
+
+    private func scratchURL() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("markdown-bench-other.md")
+    }
+
+    private func open(_ document: BenchDocument, timeout: Duration? = nil) async throws -> (startup: Double, open: Double) {
+        dispose()
+        return try await interval("open") {
+            let start = now()
+            let preview = WebKitPreview(resources: options.previewResources, occlusionDetection: options.onscreen)
+            self.preview = preview
+            window.contentView = preview.webView
+            preview.show(document)
+            let timing = try await preview.nextRender(timeout: timeout ?? self.timeout)
+            guard let ready = preview.readyAt else { throw BenchError.navigation("no didFinish") }
+            return (milliseconds(start, ready), milliseconds(start, timing.rendered))
+        }
+    }
+
+    private func dispose() {
+        guard let preview else { return }
+        preview.show(nil)
+        preview.prepareForRelease()
+        preview.webView.removeFromSuperview()
+        window.contentView = NSView()
+        self.preview = nil
+    }
+
+    /// Reads a file the way the app does, refusing what the app refuses to open.
+    static func read(_ url: URL) -> (text: String?, bytes: Int, problem: String?) {
+        guard let data = try? Data(contentsOf: url) else { return (nil, 0, "unreadable") }
+        let content = data.starts(with: [0xEF, 0xBB, 0xBF]) ? data.dropFirst(3) : data
+        guard let text = String(data: content, encoding: .utf8),
+              !text.unicodeScalars.contains(where: {
+                  $0.value == 0 || ($0.value < 32 && $0.value != 9 && $0.value != 10 && $0.value != 13)
+              }) else { return (nil, data.count, "not UTF-8 text") }
+        return (text, data.count, nil)
+    }
+
+    private func measure(_ entry: ManifestEntry) async -> (DocumentResult, [String: [Double]]) {
+        var result = DocumentResult(path: entry.path, name: entry.name)
+        guard let url = entry.url else {
+            result.status = "skipped"
+            result.error = "missing from the manifest"
+            return (result, [:])
+        }
+        let (text, bytes, problem) = Self.read(url)
+        result.bytes = bytes
+        guard let text else {
+            result.status = "skipped"
+            result.error = problem
+            return (result, [:])
+        }
+        let document = BenchDocument(url: url.resolvingSymlinksInPath(), text: text)
+        let other = BenchDocument(url: document.url.deletingLastPathComponent().appendingPathComponent(".bench-other.md"),
+                                  text: Self.otherText)
+        var samples: [String: [Double]] = [:]
+        do {
+            for _ in 0..<options.repetitions {
+                let opened = try await open(document)
+                samples["startup", default: []].append(opened.startup)
+                samples["open", default: []].append(opened.open)
+            }
+            guard let preview else { throw BenchError.navigation("no preview") }
+            for _ in 0..<options.repetitions {
+                preview.show(other)
+                _ = try await preview.nextRender(timeout: timeout)
+                let timing = try await interval("tabSwitch") {
+                    let start = now()
+                    preview.show(document)
+                    let timing = try await preview.nextRender(timeout: timeout)
+                    return (start, timing)
+                }
+                samples["tabSwitch", default: []].append(milliseconds(timing.0, timing.1.rendered))
+            }
+            let edit = EditPoint.find(in: text)
+            result.edit = edit
+            for index in 0..<options.repetitions {
+                let typed = NSMutableString(string: document.text)
+                typed.insert(String(Self.keystrokes[index % Self.keystrokes.count]), at: edit.offset + index)
+                document.text = typed as String
+                let (start, timing) = try await interval("update") {
+                    let start = now()
+                    preview.contentChanged()
+                    return (start, try await preview.nextRender(timeout: timeout))
+                }
+                samples["update", default: []].append(milliseconds(start, timing.rendered))
+                samples["updateWork", default: []].append(milliseconds(timing.start, timing.rendered))
+            }
+            if options.idleSeconds > 0 {
+                try await Task.sleep(for: .seconds(1)) // settle
+                result.idleCPUPercent = try await interval("idle") { try await ProcessMetrics.idleCPU(seconds: options.idleSeconds) }
+            }
+            result.memoryMiB = ProcessMetrics.memory()
+        } catch {
+            result.status = "failed"
+            result.error = error.localizedDescription
+        }
+        dispose()
+        result.ms = Dictionary(uniqueKeysWithValues: samples.compactMap { key, values in Summary(values).map { (key, $0) } })
+        return (result, samples)
+    }
+
+    // MARK: Summary table
+
+    private static func pad(_ text: String, _ width: Int, left: Bool = false) -> String {
+        let clipped = text.count > width ? "…" + text.suffix(width - 1) : text
+        let space = String(repeating: " ", count: max(0, width - clipped.count))
+        return left ? clipped + space : space + clipped
+    }
+
+    private static func pair(_ summary: Summary?) -> String {
+        summary.map { String(format: "%.1f/%.1f", $0.p50, $0.p95) } ?? "-"
+    }
+
+    static let tableHeader = pad("document", 34, left: true) + pad("KiB", 8) + pad("open p50/p95", 16)
+        + pad("tab p50/p95", 14) + pad("update p50/p95", 16) + pad("work p95", 10) + pad("MiB", 7) + pad("idle%", 7)
+
+    static func row(_ result: DocumentResult) -> String {
+        let label = result.name ?? result.path.split(separator: "/").suffix(2).joined(separator: "/")
+        let kib = result.bytes.map { String(format: "%.1f", Double($0) / 1024) } ?? "-"
+        guard result.status == "ok", let ms = result.ms else {
+            return pad(label, 34, left: true) + pad(kib, 8) + "  \(result.status): \(result.error ?? "")"
+        }
+        return pad(label, 34, left: true) + pad(kib, 8) + pad(pair(ms["open"]), 16) + pad(pair(ms["tabSwitch"]), 14)
+            + pad(pair(ms["update"]), 16) + pad(ms["updateWork"].map { String(format: "%.1f", $0.p95) } ?? "-", 10)
+            + pad(result.memoryMiB.map { String(format: "%.1f", $0.total) } ?? "-", 7)
+            + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7)
+    }
+
+    static func summary(_ aggregate: Aggregate) -> String {
+        var lines = ["\n\(aggregate.ok) ok, \(aggregate.failed) failed, \(aggregate.skipped) skipped in \(aggregate.elapsedSeconds) s",
+                     pad("all repetitions (ms)", 22, left: true) + pad("n", 7) + pad("p50", 9) + pad("p95", 9)
+                        + pad("max", 10) + pad("worst doc p95", 15) + "  worst document"]
+        for metric in metrics {
+            guard let value = aggregate.ms[metric] else { continue }
+            lines.append(pad(metric, 22, left: true) + pad("\(value.n)", 7) + pad(String(format: "%.1f", value.p50), 9)
+                         + pad(String(format: "%.1f", value.p95), 9) + pad(String(format: "%.1f", value.max), 10)
+                         + pad(String(format: "%.1f", value.worstP95), 15) + "  " + value.worstDocument)
+        }
+        if let memory = aggregate.memoryTotalMiB {
+            lines.append(String(format: "memory total MiB: p50 %.1f, p95 %.1f, max %.1f", memory.p50, memory.p95, memory.max))
+        }
+        if let idle = aggregate.idleCPUTotalPercent {
+            lines.append(String(format: "idle CPU %%: p50 %.2f, p95 %.2f, max %.2f", idle.p50, idle.p95, idle.max))
+        }
+        return lines.joined(separator: "\n")
+    }
+}
