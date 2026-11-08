@@ -39,13 +39,27 @@ public final class MarkdownPreviewView: NSScrollView {
     /// The selection as the plain text Copy writes.
     public var selectedText: String { canvas.selection.map { canvas.snapshot.text(in: $0) } ?? "" }
 
+    /// Where images come from, held weakly: the host keeps it alive. Without
+    /// one, images show their alt text. See `MarkdownImageProvider` for what
+    /// the view asks for and when; setting another provider asks again.
+    public var imageProvider: (any MarkdownImageProvider)? {
+        get { canvas.images.provider }
+        set { canvas.images.setProvider(newValue) }
+    }
+
+    /// The decoded images the view keeps, and their bytes. See `ImageStore`
+    /// for the limits.
+    public var retainedImageCount: Int { canvas.images.retainedCount }
+    public var retainedImageBytes: Int { canvas.images.retainedBytes }
+
     let pipeline = RenderPipeline(typography: .standard)
     private let canvas = MarkdownDocumentView(frame: .zero)
     private let messageLabel = NSTextField(labelWithString: "")
     private var source = ""
     private var sourceGeneration: UInt64 = 0
     private var installedSourceGeneration: UInt64 = 0
-    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, plan: RenderPlan)?
+    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, plan: RenderPlan,
+                            images: ImageSizes)?
     /// The generation of the update in flight and when it was submitted,
     /// until its last snapshot installs.
     private var inFlight: (generation: UInt64, start: ContinuousClock.Instant)?
@@ -78,6 +92,8 @@ public final class MarkdownPreviewView: NSScrollView {
         applyPalette()
         pipeline.onOutcome = { [weak self] outcome in self?.handle(outcome) }
         canvas.onDraw = { [weak self] duration in self?.didDraw(duration) }
+        // Loads lay out again like a typing update: after the update in flight.
+        canvas.images.onSizesChanged = { [weak self] in self?.scheduleUpdate() }
     }
 
     @available(*, unavailable)
@@ -99,7 +115,9 @@ public final class MarkdownPreviewView: NSScrollView {
     /// width is the same, so an unchanged document installs without parsing
     /// or layout. Without a snapshot it starts from nothing. It neither
     /// waits for typing updates nor pauses, and lays out the top first
-    /// unless a scroll position follows.
+    /// unless a scroll position follows. Image loads and failures of the
+    /// previous document are forgotten; the image sizes `snapshot` was laid
+    /// out with are kept, so its layouts stay while its images load again.
     public func setSource(_ text: String, reusing snapshot: MarkdownSnapshot?) {
         replaceSource(text, reusing: snapshot ?? .empty)
     }
@@ -108,6 +126,7 @@ public final class MarkdownPreviewView: NSScrollView {
         source = text
         sourceGeneration += 1
         reusedBase = snapshot.map { (sourceGeneration, $0) }
+        if let snapshot { canvas.images.reset(sizes: snapshot.images, source: sourceGeneration) }
         scheduleUpdate(waiting: snapshot == nil)
         // Hidden or without a width: nothing older may install meanwhile.
         if !isShown || canvas.frame.width < 1 { cancelUpdates() }
@@ -120,11 +139,13 @@ public final class MarkdownPreviewView: NSScrollView {
         resumeTask = nil
     }
 
-    /// Hidden previews keep their snapshot and start no work. Sources set
-    /// while hidden coalesce into one update when shown again.
+    /// Hidden previews keep their snapshot and start no work: image loads
+    /// are cancelled and animations stop. Sources set while hidden coalesce
+    /// into one update when shown again.
     public func setVisible(_ visible: Bool) {
         guard visible != isShown else { return }
         isShown = visible
+        canvas.images.setShown(visible)
         if visible { scheduleUpdate() } else { resumeTask?.cancel(); resumeTask = nil }
     }
 
@@ -225,18 +246,25 @@ public final class MarkdownPreviewView: NSScrollView {
         scheduleUpdate()
     }
 
+    /// Images coming into view are asked for once per turn of the run loop.
+    public override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        canvas.images.schedulePass()
+    }
+
     // MARK: Updates
 
-    /// Submits an update unless one for the same source and width is out.
-    /// A newer source alone (`waiting`) waits for the update in flight and
-    /// for the pause after a slow one; a new width or a finished live resize
-    /// supersedes it at once.
+    /// Submits an update unless one for the same source, width, and image
+    /// sizes is out. A newer source or new sizes alone (`waiting`) wait for
+    /// the update in flight and for the pause after a slow one; a new width
+    /// or a finished live resize supersedes it at once.
     private func scheduleUpdate(waiting: Bool = true) {
         let width = canvas.frame.width
         guard isShown, sourceGeneration > 0, width >= 1 else { return }
         let complete = !inLiveResize
+        let images = canvas.images.sizes
         if let submitted, submitted.sourceGeneration == sourceGeneration, submitted.width == width,
-           submitted.complete || !complete {
+           submitted.images === images, submitted.complete || !complete {
             return
         }
         if waiting, let submitted, submitted.width == width, submitted.complete == complete {
@@ -249,12 +277,12 @@ public final class MarkdownPreviewView: NSScrollView {
         resumeTask?.cancel()
         resumeTask = nil
         let plan = RenderPlan(firstStep)
-        submitted = (sourceGeneration, width, complete, plan)
+        submitted = (sourceGeneration, width, complete, plan, images)
         let base = reusedBase.flatMap { $0.sourceGeneration == sourceGeneration ? $0.snapshot : nil } ?? canvas.snapshot
         let generation = pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width,
                                          scrollFraction: CGFloat(scrollFraction),
                                          viewportHeight: contentView.bounds.height, visibleFirst: false,
-                                         complete: complete, base: base, plan: plan)
+                                         complete: complete, base: base, plan: plan, images: images)
         inFlight = (generation, .now)
     }
 
@@ -306,7 +334,11 @@ public final class MarkdownPreviewView: NSScrollView {
         let old = canvas.snapshot
         let oldY = contentView.bounds.minY
         let sourceChanged = sourceGeneration != installedSourceGeneration
-        let anchor = !sourceChanged && old.layouts.count == snapshot.layouts.count ? old.anchor(atY: oldY) : nil
+        // Images loaded or failed: the same blocks at the same width.
+        let sameBlocks = !sourceChanged && old.width == snapshot.width && old.layouts.count == snapshot.layouts.count
+            && old.images !== snapshot.images
+        let anchor = !sourceChanged && !sameBlocks && old.layouts.count == snapshot.layouts.count
+            ? old.anchor(atY: oldY) : nil
         let update = sourceChanged ? snapshot.update(from: old) : nil
         let oldSelection = canvas.selection
         canvas.install(snapshot, sourceChanged: sourceChanged)
@@ -318,6 +350,9 @@ public final class MarkdownPreviewView: NSScrollView {
         if isCurrent, let target = pendingScroll {
             scroll(to: target)
             if snapshot.isComplete { pendingScroll = nil }
+        } else if sameBlocks {
+            scroll(toY: snapshot.sameBlocksAnchoredY(oldY, height: contentView.bounds.height, from: old))
+            redrawsAll = false
         } else if let anchor {
             scroll(toY: snapshot.y(for: anchor))
         } else if let update {
@@ -325,7 +360,8 @@ public final class MarkdownPreviewView: NSScrollView {
             redrawsAll = false
         }
         if isCurrent, snapshot.isComplete { completedSourceGeneration = sourceGeneration }
-        let invalidated = redrawsAll ? nil : invalidate(from: old, oldSelection: oldSelection, update: update)
+        let invalidated = redrawsAll ? nil : invalidate(from: old, oldSelection: oldSelection, update: update,
+                                                        sameBlocks: sameBlocks)
         canvas.lastInvalidation = invalidated
         if invalidated == nil { canvas.needsDisplay = true }
         messageLabel.isHidden = true
@@ -342,6 +378,7 @@ public final class MarkdownPreviewView: NSScrollView {
         timingsAwaitingDraw = timings
         // Nothing visible changed: there is no draw to wait for.
         if invalidated?.isEmpty == true { didDraw(.zero) }
+        canvas.images.didInstall(source: sourceGeneration)
         onInstall?(snapshot)
     }
 
@@ -350,13 +387,13 @@ public final class MarkdownPreviewView: NSScrollView {
     /// height change, and the selection where it moved. Nil when it all
     /// redraws.
     private func invalidate(from old: MarkdownSnapshot, oldSelection: Range<TextPosition>?,
-                            update: BlockUpdate?) -> [CGRect]? {
+                            update: BlockUpdate?, sameBlocks: Bool) -> [CGRect]? {
         let new = canvas.snapshot
         let visible = canvas.visibleRect
-        guard var rects = new.changedRects(from: old, in: visible) else { return nil }
+        guard var rects = new.changedRects(from: old, in: visible, sameBlocks: sameBlocks) else { return nil }
         let selection = canvas.selection
         let kept = { (old: TextPosition, new: TextPosition) in
-            update?.match?.newIndex(ofOld: old.block) == new.block && old.offset == new.offset
+            sameBlocks ? old == new : update?.match?.newIndex(ofOld: old.block) == new.block && old.offset == new.offset
         }
         if oldSelection != nil || selection != nil {
             if let oldSelection, let selection, kept(oldSelection.lowerBound, selection.lowerBound),
@@ -434,6 +471,8 @@ final class MarkdownDocumentView: NSView {
     /// The code block showing its overlay scroller, until the timer hides it.
     var codeScroller: CodeBlockID?
     var codeScrollerTimer: Timer?
+    /// The images it draws, and their loading.
+    private(set) lazy var images = ImageStore(view: self)
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -501,11 +540,46 @@ final class MarkdownDocumentView: NSView {
                 offsets.isEmpty ? 0 : offsets[CodeBlockID(block: index, code: $0)] ?? 0
             }
         }
+        for index in range where snapshot.layouts[index].drawsImages {
+            drawImages(ofBlock: index, in: snapshot, context: context, clip: clip)
+        }
         if let codeScroller, range.contains(codeScroller.block) { drawScroller(of: codeScroller, in: context) }
     }
 
     private func origin(of block: Int, in snapshot: MarkdownSnapshot) -> CGPoint {
         CGPoint(x: snapshot.columnX, y: snapshot.blockTops[block])
+    }
+
+    /// Draws a block's kept images in the places their lines keep, at the
+    /// size the layout gives them, with a selection tint over selected ones.
+    /// An image not kept yet leaves its place empty.
+    private func drawImages(ofBlock index: Int, in snapshot: MarkdownSnapshot, context: CGContext, clip: CGRect) {
+        let blockImages = snapshot.document.blocks[index].images
+        let selected: Range<Int>? = selection.flatMap { selection in
+            guard selection.lowerBound.block <= index, index <= selection.upperBound.block else { return nil }
+            return (selection.lowerBound.block == index ? selection.lowerBound.offset : 0)
+                ..< (selection.upperBound.block == index ? selection.upperBound.offset : Int.max)
+        }
+        let offsets = codeOffsets
+        var tint: CGColor?
+        snapshot.layouts[index].forEachImage(intersecting: clip, at: origin(of: index, in: snapshot), codeOffset: {
+            offsets.isEmpty ? 0 : offsets[CodeBlockID(block: index, code: $0)] ?? 0
+        }) { image, rect, box in
+            guard blockImages.indices.contains(image), let bitmap = images.image(for: blockImages[image].source) else { return }
+            context.saveGState()
+            if let box { context.clip(to: box) }
+            context.interpolationQuality = .high
+            context.translateBy(x: rect.minX, y: rect.maxY)
+            context.scaleBy(x: 1, y: -1)
+            context.draw(bitmap, in: CGRect(origin: .zero, size: rect.size))
+            context.restoreGState()
+            if let selected, selected.overlaps(blockImages[image].range) {
+                let color = tint ?? selectionColor.withAlphaComponent(0.4).cgColor
+                tint = color
+                context.setFillColor(color)
+                context.fill(box.map { rect.intersection($0) } ?? rect)
+            }
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -673,6 +747,8 @@ extension BlockLayout {
         } else {
             for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
                 let runStyle = styleRun(at: textOffset + CTRunGetStringRange(run).location)
+                // An image's place: drawn with the images.
+                if runStyle.styles.contains(.image), ImageText.box(of: run) != nil { continue }
                 context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles))])
                 context.textPosition = position
                 CTRunDraw(run, context, CFRange())
@@ -749,6 +825,33 @@ extension BlockLayout {
         while index < lines.count, origin.y + lines[index].top < clip.maxY {
             body(lines[index])
             index += 1
+        }
+    }
+
+    /// Calls `body` with each image placed on the lines that intersect
+    /// `clip`, with the block at `origin`: its index in the block's images,
+    /// its rectangle in view coordinates, and in a table wider than its box,
+    /// scrolled by `codeOffset`, the box to clip it to.
+    func forEachImage(intersecting clip: CGRect, at origin: CGPoint, codeOffset: (Int) -> CGFloat,
+                      _ body: (_ image: Int, _ rect: CGRect, _ box: CGRect?) -> Void) {
+        guard drawsImages else { return }
+        forEachLine(intersecting: clip, at: origin) { line in
+            for decoration in line.decorations where decoration.kind == .image {
+                let rect = decoration.rect.offsetBy(dx: origin.x + line.x, dy: origin.y)
+                if rect.intersects(clip) { body(Int(decoration.tag), rect, nil) }
+            }
+        }
+        for table in tables where table.drawsImages {
+            let box = table.rect.offsetBy(dx: origin.x, dy: origin.y)
+            guard box.intersects(clip) else { continue }
+            let isScrolled = codeBlocks[table.scrollIndex].maxOffset > 0
+            let tableOrigin = CGPoint(x: box.minX - (isScrolled ? codeOffset(table.scrollIndex) : 0), y: box.minY)
+            table.forEachLine(intersecting: clip, origin: tableOrigin) { line, x, top, _ in
+                for decoration in line.decorations where decoration.kind == .image {
+                    let rect = decoration.rect.offsetBy(dx: x, dy: top)
+                    if rect.intersects(clip) { body(Int(decoration.tag), rect, isScrolled ? box : nil) }
+                }
+            }
         }
     }
 }
