@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreText
 import Dispatch
 import Foundation
+import Synchronization
 
 /// Which rows of a table block a layout lays out now. The others get
 /// estimated heights, from their cells' natural widths, until a later layout
@@ -152,10 +153,12 @@ final class TableLayout: @unchecked Sendable {
     /// work is checked between chunks of rows.
     static func build(_ structure: TableStructure, block: MarkdownBlock, text: CFString, x: CGFloat, top: CGFloat,
                       width available: CGFloat, scrollIndex: Int, typography: Typography, hint: TableLayout?,
-                      rows request: TableRows, images: ImageText? = nil, isCancelled: () -> Bool) -> TableLayout? {
+                      rows request: TableRows, images: ImageText? = nil, linesWarm: Bool = true,
+                      isCancelled: () -> Bool) -> TableLayout? {
         let rowCount = structure.rowCount
         let columns = structure.columnCount
-        let source = RowsSource(structure: structure, block: block, text: text, typography: typography, images: images)
+        var source = RowsSource(structure: structure, block: block, text: text, typography: typography, images: images,
+                                linesWarm: linesWarm)
         let kept = hint.map { matchRows(of: $0, to: structure, sourceText: block.sourceText, typography: typography) }
         func keptRow(_ row: Int) -> TableRowLayout? {
             guard let kept, let hint, kept[row] >= 0 else { return nil }
@@ -165,7 +168,7 @@ final class TableLayout: @unchecked Sendable {
         // Natural widths: kept rows bring theirs, the others are measured,
         // shaped in runs of rows. A run likely laid out now is kept for that.
         let measuredWidths = SharedBuffer<CGFloat>(repeating: 0, count: rowCount * columns)
-        let measuredLines = SharedBuffer<LineLayout?>(repeating: nil, count: rowCount * columns)
+        let measuredLines = SharedBuffer<PendingLine?>(repeating: nil, count: rowCount * columns)
         let shaped = SharedBuffer<RowsText?>(repeating: nil, count: rowCount)
         let runBases = SharedBuffer<Int32>(repeating: 0, count: rowCount)
         var measure: [Int] = []
@@ -184,6 +187,8 @@ final class TableLayout: @unchecked Sendable {
                 ..< min(max(first, 0) + Int(max(height, 0) / (typography.lineHeight(.body) + rowChrome(typography))) + 8,
                         rowCount)
         }
+        // Only the lines of rows likely shown now are about to be drawn.
+        source.warmRows = linesWarm ? shapedRows : 0..<0
         let measureRuns = source.runs(of: measure)
         guard forEachChunk(measureRuns.count, minimum: 1, isCancelled: isCancelled, { range in
             for run in range.map({ measureRuns[$0] }) {
@@ -192,7 +197,7 @@ final class TableLayout: @unchecked Sendable {
                     runBases[row] = text.base(ofRow: row)
                     for column in 0..<columns {
                         guard let line = text.naturalLine(row, column, typography: typography) else { continue }
-                        measuredWidths[row * columns + column] = line.maxX
+                        measuredWidths[row * columns + column] = line.layout.maxX
                         measuredLines[row * columns + column] = line
                     }
                     if shapedRows.contains(row) { shaped[row] = text }
@@ -239,13 +244,13 @@ final class TableLayout: @unchecked Sendable {
                 let width = widths[column]
                 if naturalWidths[base + column] <= width {
                     if let line = naturalLines[base + column] {
-                        lines.append(line)
+                        lines.append(line.take())
                         bases[column] = measuredBases[row]
                     } else if let old, old.isNatural(column), !old.lines(ofCell: column).isEmpty {
                         lines.append(contentsOf: old.lines(ofCell: column))
                         bases[column] = old.bases[column]
                     } else if let text = text(), let line = text.naturalLine(row, column, typography: typography) {
-                        lines.append(line)
+                        lines.append(line.take())
                         bases[column] = text.base(ofRow: row)
                     }
                 } else if wrap {
@@ -500,6 +505,8 @@ final class TableLayout: @unchecked Sendable {
     func alignmentOffset(of line: LineLayout, row: Int, column: Int) -> CGFloat {
         var alignment = alignments[column]
         if alignment == .none, hasHeader, row == 0 { alignment = .center }
+        // A right-to-left cell starts on the right, as `text-align: start` does.
+        if alignment == .none, line.isRightToLeft { alignment = .right }
         let room = max(columnWidths[column] - line.maxX, 0)
         switch alignment {
         case .center: return (room / 2).rounded()
@@ -538,8 +545,7 @@ final class TableLayout: @unchecked Sendable {
         while index + 1 < lines.endIndex, origin.y + lines[index].top + lines[index].height <= point.y { index += 1 }
         let line = lines[index]
         let x = point.x - origin.x - alignmentOffset(of: line, row: row, column: column)
-        let found = CTLineGetStringIndexForPosition(line.line, CGPoint(x: x, y: 0))
-        let local = found == kCFNotFound ? line.range.lowerBound : min(max(found, line.range.lowerBound), line.caretEnd)
+        let local = line.offset(atX: x).map { min(max($0, line.range.lowerBound), line.caretEnd) } ?? line.range.lowerBound
         return textOffset(row: row, column: column) + local
     }
 
@@ -568,8 +574,7 @@ final class TableLayout: @unchecked Sendable {
         let lines = rows[row].lines(ofCell: column)
         guard let line = lines.last(where: { $0.range.lowerBound <= local }) ?? lines.first else { return nil }
         let origin = textOrigin(row: row, column: column)
-        return CGPoint(x: origin.x + alignmentOffset(of: line, row: row, column: column)
-                        + CTLineGetOffsetForStringIndex(line.line, local, nil),
+        return CGPoint(x: origin.x + alignmentOffset(of: line, row: row, column: column) + line.caretX(local),
                        y: origin.y + line.baseline)
     }
 
@@ -594,8 +599,8 @@ final class TableLayout: @unchecked Sendable {
                     let end = min(to, line.range.upperBound)
                     guard start < end else { continue }
                     let x = origin.x + alignmentOffset(of: line, row: row, column: column)
-                    let x1 = CTLineGetOffsetForStringIndex(line.line, start, nil)
-                    let x2 = CTLineGetOffsetForStringIndex(line.line, end, nil)
+                    let x1 = line.caretX(start)
+                    let x2 = line.caretX(end)
                     let minX = x + min(x1, x2)
                     var maxX = x + max(x1, x2)
                     if end == line.range.upperBound, to > line.range.upperBound || continues {
@@ -667,10 +672,17 @@ private struct RowsSource {
     let text: CFString
     let typography: Typography
     let images: ImageText?
+    let linesWarm: Bool
+    /// The rows whose lines are about to be drawn, rather than laid out ahead.
+    var warmRows = 0..<0
+    /// Tables this long keep no lines laid out ahead: measuring lays out
+    /// every cell, and keeping each line until its row is built would hold
+    /// the shaping of the whole table at once.
+    static let largeLength = 131_072
 
     /// About this many UTF-16 units of rows go into one string: enough to
     /// save most of the cost of a typesetter per row, and few enough to
-    /// shape runs in parallel.
+    /// shape runs in parallel and to typeset one again within a frame.
     static let runLength = 4_000
 
     /// `rows` (ascending) split into runs of consecutive rows about
@@ -695,19 +707,39 @@ private struct RowsSource {
     }
 
     func text(of rows: Range<Int>) -> RowsText? {
-        RowsText(rows: rows, structure: structure, block: block, text: text, typography: typography, images: images)
+        let isWarm = rows.overlaps(warmRows)
+        return RowsText(rows: rows, structure: structure, block: block, text: text, typography: typography,
+                        images: images, isWarm: isWarm,
+                        keepsLines: isWarm || structure.displayRange.count < Self.largeLength)
     }
+}
+
+/// A cell's line on one line, laid out but not yet in its set: measuring
+/// lays out every cell on one line, and a cell that wraps never uses it.
+private struct PendingLine {
+    let layout: LineLayout
+    let line: CTLine?
+    let location: CFRange
+
+    /// The line, added to its set.
+    func take() -> LineLayout { layout.indexed(layout.lineSet.append(line, range: location)) }
+
+    /// The same without its Core Text line, for a set that does not keep it.
+    var unkept: PendingLine { PendingLine(layout: layout, line: nil, location: location) }
 }
 
 /// The text of a run of rows, from the first row's first cell to the last
 /// row's last cell, with its style runs and links, for one typesetter. Header
-/// cells are bold, and nothing is kerned. Cell lines come from ranges of it.
+/// cells are bold, and nothing is kerned. Each cell is typeset as its own
+/// paragraph, so its direction is that of its first strong character. Cell
+/// lines come from ranges of it.
 private final class RowsText: @unchecked Sendable {
     let structure: TableStructure
     /// The display offset of the string's start.
     let start: Int
     let plain: CFString
-    /// The text as typeset, with loaded images replaced.
+    /// The text as typeset, with loaded images replaced and cells separated
+    /// by paragraph separators.
     let typeset: CFString
     let runs: [StyleRun]
     let links: [MarkdownLink]
@@ -716,9 +748,19 @@ private final class RowsText: @unchecked Sendable {
     let typesetter: CTTypesetter
     /// The images in the string, relative to its start.
     let images: ImageText?
+    /// Where cells end within a row, and the cells that read right to left,
+    /// relative to the string.
+    private let separators: [Int32]
+    private let directions: [ParagraphDirection]
+    let set: LineSet
+    private let isWarm: Bool
+    /// Whether lines laid out now keep their Core Text lines; see
+    /// `RowsSource.largeLength`.
+    private let keepsLines: Bool
+    private let typography: Typography
 
     init?(rows: Range<Int>, structure: TableStructure, block: MarkdownBlock, text: CFString, typography: Typography,
-          images blockImages: ImageText?) {
+          images blockImages: ImageText?, isWarm: Bool, keepsLines: Bool) {
         let columns = structure.columnCount
         let start = structure.cell(rows.lowerBound, 0).lowerBound
         let end = structure.cell(rows.upperBound - 1, columns - 1).upperBound
@@ -751,9 +793,23 @@ private final class RowsText: @unchecked Sendable {
                                       destination: link.destination))
             next += 1
         }
+        var separators: [Int32] = []
+        var directions: [ParagraphDirection] = []
+        let hasRightToLeft = TextDirection.scan(plain, 0..<(end - start)).hasRightToLeft
+        for row in rows {
+            for column in 0..<columns {
+                let cell = structure.cell(row, column)
+                let local = (cell.lowerBound - start)..<(cell.upperBound - start)
+                if column + 1 < columns { separators.append(Int32(local.upperBound)) }
+                if hasRightToLeft, !local.isEmpty, TextDirection.scan(plain, local).isRightToLeft {
+                    directions.append(ParagraphDirection(range: local.lowerBound..<min(local.upperBound + 1, end - start),
+                                                         isRightToLeft: true))
+                }
+            }
+        }
         let images = blockImages.map { $0.slice(start..<end) }
-        guard let string = BlockLayout.makeString(plain, runs: runs, typography: typography, kerned: false,
-                                                  images: images) else { return nil }
+        guard let (string, typesetter) = Self.typeset(plain, runs: runs, images: images, separators: separators,
+                                                      directions: directions, typography: typography) else { return nil }
         self.images = images
         self.structure = structure
         self.start = start
@@ -762,16 +818,39 @@ private final class RowsText: @unchecked Sendable {
         self.runs = runs
         self.links = links
         linkOffset = first
-        typesetter = Self.typesetter(string)
+        self.typesetter = typesetter
+        self.separators = separators
+        self.directions = directions
+        self.isWarm = isWarm
+        self.keepsLines = keepsLines
+        self.typography = typography
+        set = LineSet(length: end - start, isWarm: isWarm) { [runs, separators, directions] in
+            Self.typeset(plain, runs: runs, images: images, separators: separators, directions: directions,
+                         typography: typography)?.typesetter
+        }
     }
 
-    /// Shaped in full however long, as a short string is: past about
-    /// 10,000 characters Core Text otherwise shapes line by line and
-    /// ignores kerning attributes, which pad inline code.
-    private static func typesetter(_ string: CFAttributedString) -> CTTypesetter {
+    /// `plain` with `runs`, `images`, and paragraph separators in place of
+    /// the tabs at `separators`, and its typesetter: shaped in full however
+    /// long, as a short string is, since past about 10,000 characters Core
+    /// Text otherwise shapes line by line and ignores kerning attributes,
+    /// which pad inline code.
+    private static func typeset(_ plain: CFString, runs: [StyleRun], images: ImageText?, separators: [Int32],
+                                directions: [ParagraphDirection], typography: Typography)
+        -> (string: CFAttributedString, typesetter: CTTypesetter)? {
+        let length = CFStringGetLength(plain)
+        var units = [UniChar](repeating: 0, count: length)
+        CFStringGetCharacters(plain, CFRange(location: 0, length: length), &units)
+        for separator in separators where Int(separator) < length && units[Int(separator)] == 0x09 {
+            units[Int(separator)] = 0x2029
+        }
+        guard let separated = CFStringCreateWithCharacters(nil, units, length),
+              let string = BlockLayout.makeString(separated, runs: runs, typography: typography, kerned: false,
+                                                  images: images, directions: directions) else { return nil }
         let options = [kCTTypesetterOptionAllowUnboundedLayout: kCFBooleanTrue!] as CFDictionary
-        return CTTypesetterCreateWithAttributedStringAndOptions(string, options)
+        let typesetter = CTTypesetterCreateWithAttributedStringAndOptions(string, options)
             ?? CTTypesetterCreateWithAttributedString(string)
+        return (string, typesetter)
     }
 
     /// Where a row's text starts in the string.
@@ -782,21 +861,31 @@ private final class RowsText: @unchecked Sendable {
         return (cell.lowerBound - start)..<(cell.upperBound - start)
     }
 
-    private func line(_ range: Range<Int>, top: CGFloat, typography: Typography,
-                      shaped: (typesetter: CTTypesetter, typeset: CFString)? = nil) -> LineLayout {
-        let line = CTTypesetterCreateLine(shaped?.typesetter ?? typesetter,
-                                          CFRange(location: range.lowerBound, length: range.count))
-        var runIndex = BlockLayout.styleRunIndex(in: runs, at: range.lowerBound)
-        return BlockLayout.lineLayout(line, range: range, string: shaped?.typeset ?? typeset, runs: runs,
-                                      runIndex: &runIndex, links: links[...], linkOffset: linkOffset, x: 0, maxX: nil,
-                                      top: top, codeBlock: -1, typography: typography,
-                                      hasImages: images?.items.isEmpty == false).layout
+    private func isRightToLeft(_ range: Range<Int>) -> Bool {
+        directions.contains { $0.range.lowerBound == range.lowerBound }
     }
 
-    /// A cell on one line, however wide; nil for an empty cell.
-    func naturalLine(_ row: Int, _ column: Int, typography: Typography) -> LineLayout? {
+    /// A line for `range` of a cell, not yet added to `set`.
+    private func pendingLine(_ range: Range<Int>, top: CGFloat, typography: Typography, cell: Range<Int>,
+                             shaped: (typesetter: CTTypesetter, typeset: CFString, set: LineSet)? = nil) -> PendingLine {
+        let location = CFRange(location: range.lowerBound, length: range.count)
+        let line = CTTypesetterCreateLine(shaped?.typesetter ?? typesetter, location)
+        var runIndex = BlockLayout.styleRunIndex(in: runs, at: range.lowerBound)
+        let layout = BlockLayout.lineLayout(line, in: shaped?.set ?? set, index: -1, range: range,
+                                            string: shaped?.typeset ?? typeset, runs: runs, runIndex: &runIndex,
+                                            links: links[...], linkOffset: linkOffset, x: 0, maxX: nil, top: top,
+                                            codeBlock: -1, typography: typography,
+                                            hasImages: images?.items.isEmpty == false,
+                                            isRightToLeft: !directions.isEmpty && isRightToLeft(cell)).layout
+        let pending = PendingLine(layout: layout, line: line, location: location)
+        return keepsLines && (shaped?.set ?? set).isKept ? pending : pending.unkept
+    }
+
+    /// A cell on one line, however wide, not yet added to the set; nil for
+    /// an empty cell.
+    func naturalLine(_ row: Int, _ column: Int, typography: Typography) -> PendingLine? {
         let range = cell(row, column)
-        return range.isEmpty ? nil : line(range, top: 0, typography: typography)
+        return range.isEmpty ? nil : pendingLine(range, top: 0, typography: typography, cell: range)
     }
 
     /// A cell wrapped at `width`, one line box per line. Breaks found in
@@ -807,19 +896,27 @@ private final class RowsText: @unchecked Sendable {
         var start = cell.lowerBound
         var top: CGFloat = 0
         // Images wider than the column shrink to it, as `max-width: 100%`
-        // fits them to their cell: the run is shaped again for this cell.
-        var shaped: (typesetter: CTTypesetter, typeset: CFString)?
-        if let fitted = images?.fitting(cell, to: width),
-           let string = BlockLayout.makeString(plain, runs: runs, typography: typography, kerned: false, images: fitted) {
-            shaped = (Self.typesetter(string), CFAttributedStringGetString(string))
+        // fits them to their cell: the run is shaped again for this cell,
+        // and its lines go into a set of their own.
+        var shaped: (typesetter: CTTypesetter, typeset: CFString, set: LineSet)?
+        if let fitted = images?.fitting(cell, to: width) {
+            let make = { [plain, runs, separators, directions] in
+                Self.typeset(plain, runs: runs, images: fitted, separators: separators, directions: directions,
+                             typography: typography)
+            }
+            if let made = make() {
+                let set = LineSet(length: CFStringGetLength(plain), isWarm: isWarm) { make()?.typesetter }
+                shaped = (made.typesetter, CFAttributedStringGetString(made.string), set)
+            }
         }
         while start < cell.upperBound {
             let count = max(CTTypesetterSuggestLineBreak(shaped?.typesetter ?? typesetter, start, Double(width)), 1)
             let end = images.map { $0.lineEnd(start + count) } ?? start + count
-            let layout = line(start..<min(end, cell.upperBound), top: top, typography: typography, shaped: shaped)
-            lines.append(layout)
-            top += layout.height
-            start = layout.range.upperBound
+            let line = pendingLine(start..<min(end, cell.upperBound), top: top, typography: typography, cell: cell,
+                                   shaped: shaped).take()
+            lines.append(line)
+            top += line.height
+            start = line.range.upperBound
         }
         return lines
     }

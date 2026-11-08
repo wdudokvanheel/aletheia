@@ -326,13 +326,14 @@ final class RenderWorker: @unchecked Sendable {
         guard !visible.isComplete, request.complete, !isCancelled() else { return }
 
         // Step 2: everything else, in parallel, including the rest of a
-        // partly laid out table.
+        // partly laid out table. Its lines are laid out ahead of being
+        // drawn, so they are the first to go when there is no room for them.
         start = ContinuousClock.now
         let kept = layouts.indices.map { isFinal(layouts[$0], $0) ? layouts[$0] : nil }
         let hints = layouts.indices.map(hint)
         let all = signposter.withIntervalSignpost("layout") {
             BlockLayout.layOut(blocks, filling: kept, hints: hints, columnWidth: columnWidth, typography: typography,
-                               images: images, isCancelled: isCancelled)
+                               images: images, linesWarm: false, isCancelled: isCancelled)
         }
         guard let all else { return }
         timings.layout += ContinuousClock.now - start

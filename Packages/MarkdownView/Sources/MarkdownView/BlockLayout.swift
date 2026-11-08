@@ -3,17 +3,24 @@ import CoreText
 import Foundation
 
 /// One laid-out line, positioned relative to its block's top and the text
-/// column's left edge.
+/// column's left edge. Its geometry is kept; its `CTLine` is kept in its
+/// `LineSet` while there is room, and typeset again when needed.
 struct LineLayout {
-    let line: CTLine
-    /// The line's UTF-16 range in the block's display text.
-    let range: Range<Int>
-    /// Where the text starts: the indent of its lists and quotes, plus a code
-    /// block's padding. A scrolled code block moves its lines left of this.
-    let x: CGFloat
-    /// The right edge of the line's text area, which a selection continuing
-    /// past the line reaches.
-    let maxX: CGFloat
+    /// The set holding the line's `CTLine`, and its index there.
+    let lineSet: LineSet
+    let index: Int32
+    /// What to subtract from an offset in `range` for the index in the
+    /// line's string: where a block's window of text starts.
+    let base: Int32
+    private let start: Int32
+    private let end: Int32
+    /// The line's code block in `BlockLayout.codeBlocks`, or -1.
+    let codeBlock: Int32
+    /// Kept small, as there is one per line: x positions within a column
+    /// or cell fit a `Float`.
+    private let storedX: Float
+    private let storedMinX: Float
+    private let storedMaxX: Float
     let top: CGFloat
     let height: CGFloat
     let baseline: CGFloat
@@ -22,13 +29,66 @@ struct LineLayout {
     let color: UInt8?
     /// Whether the line ends with a `\n` from a hard break or block separator.
     let endsWithNewline: Bool
-    /// The line's code block in `BlockLayout.codeBlocks`, or -1.
-    let codeBlock: Int32
+    /// Whether its paragraph reads right to left, by its first strong character.
+    let isRightToLeft: Bool
     /// Inline code backgrounds, link underlines, and strikethroughs, in run order.
     let decorations: [Decoration]
 
+    init(lineSet: LineSet, index: Int32, range: Range<Int>, base: Int32, x: CGFloat, minX: CGFloat, maxX: CGFloat,
+         top: CGFloat, height: CGFloat, baseline: CGFloat, color: UInt8?, endsWithNewline: Bool, isRightToLeft: Bool,
+         codeBlock: Int32, decorations: [Decoration]) {
+        self.lineSet = lineSet
+        self.index = index
+        self.base = base
+        start = Int32(clamping: range.lowerBound)
+        end = Int32(clamping: range.upperBound)
+        self.codeBlock = codeBlock
+        storedX = Float(x)
+        storedMinX = Float(minX)
+        storedMaxX = Float(maxX)
+        self.top = top
+        self.height = height
+        self.baseline = baseline
+        self.color = color
+        self.endsWithNewline = endsWithNewline
+        self.isRightToLeft = isRightToLeft
+        self.decorations = decorations
+    }
+
+    /// The line's UTF-16 range in the block's display text.
+    var range: Range<Int> { Int(start)..<Int(end) }
+    /// Where the text starts: the indent of its lists and quotes, plus a code
+    /// block's padding, or for a right-to-left paragraph, far enough right
+    /// to end at `maxX`. A scrolled code block moves its lines left of this.
+    var x: CGFloat { CGFloat(storedX) }
+    /// The left and right edges of the line's text area, which a selection
+    /// continuing past the line reaches: on the right, or on the left for
+    /// a right-to-left paragraph.
+    var minX: CGFloat { CGFloat(storedMinX) }
+    var maxX: CGFloat { CGFloat(storedMaxX) }
+
+    /// The Core Text line, typeset again first if its set was dropped.
+    var line: CTLine { lineSet.line(at: index) }
+
     /// The last caret offset on the line: before its newline, if it has one.
     var caretEnd: Int { endsWithNewline ? range.upperBound - 1 : range.upperBound }
+
+    /// The x of the caret before `offset` (an offset in `range`'s terms),
+    /// relative to `x`.
+    func caretX(_ offset: Int) -> CGFloat { CTLineGetOffsetForStringIndex(line, offset - Int(base), nil) }
+
+    /// The caret offset nearest to `x` (relative to `x`), in `range`'s terms.
+    func offset(atX x: CGFloat) -> Int? {
+        let index = CTLineGetStringIndexForPosition(line, CGPoint(x: x, y: 0))
+        return index == kCFNotFound ? nil : index + Int(base)
+    }
+
+    /// The same line in its set at `index`, for a line appended to it later.
+    func indexed(_ index: Int32) -> LineLayout {
+        LineLayout(lineSet: lineSet, index: index, range: range, base: base, x: x, minX: minX, maxX: maxX, top: top,
+                   height: height, baseline: baseline, color: color, endsWithNewline: endsWithNewline,
+                   isRightToLeft: isRightToLeft, codeBlock: codeBlock, decorations: decorations)
+    }
 }
 
 /// A rectangle drawn with a line's text. x is relative to the line's `x` and
@@ -69,7 +129,8 @@ struct BlockBox {
 struct MarkerLayout {
     enum Kind {
         case disc, circle, square
-        case number(CTLine)
+        /// Drawn as `MarkerNumbers` typesets it.
+        case number(Int)
         case task(checked: Bool)
     }
 
@@ -187,13 +248,16 @@ public final class BlockLayout: @unchecked Sendable {
     /// at any width, lends tables the rows and natural cell widths that still
     /// apply; one whose images were sized differently lends nothing. A table
     /// block lays out only `tableRows` and estimates the rest. Nil when
-    /// `isCancelled` reports true during a table.
+    /// `isCancelled` reports true during a table. Lines laid out ahead of
+    /// being drawn (not `linesWarm`) are the first to be dropped when there
+    /// is no room for them; see `LineSet`.
     static func make(_ block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, hint: BlockLayout? = nil,
-                     tableRows: TableRows = .all, images: ImageSizes = .none,
+                     tableRows: TableRows = .all, images: ImageSizes = .none, linesWarm: Bool = true,
                      isCancelled: () -> Bool = { false }) -> BlockLayout? {
         var builder = BlockLayoutBuilder(block: block, textLength: block.text.utf16.count, columnWidth: columnWidth,
                                          typography: typography, isEstimate: false)
         builder.images = images
+        builder.linesWarm = linesWarm
         builder.hint = hint.flatMap {
             guard !$0.isEstimate, !$0.tables.isEmpty else { return nil }
             // Rows keep their images' sizes, which depend on the width too.
@@ -260,11 +324,26 @@ public final class BlockLayout: @unchecked Sendable {
         return string
     }
 
+    /// UTF-16 units `range` of `text`, which is `length` units long, as a
+    /// Core Foundation string.
+    static func substring(of text: String, _ range: Range<Int>, length: Int) -> CFString? {
+        if range == 0..<length { return makeText(text, length: length) }
+        let utf16 = text.utf16
+        let start = utf16.index(utf16.startIndex, offsetBy: range.lowerBound)
+        let end = utf16.index(start, offsetBy: range.count)
+        let units = Array(utf16[start..<end])
+        return CFStringCreateWithCharacters(nil, units, units.count)
+    }
+
     /// `string` with the fonts of `runs`, which cover it in order, without
-    /// kerning unless `kerned`, and with `images` in their places.
+    /// kerning unless `kerned`, with `images` in their places, and with the
+    /// base writing direction of each paragraph in `directions`, which
+    /// others leave to Core Text: the direction of its first strong character.
     static func makeString(_ string: CFString, runs: [StyleRun], typography: Typography,
-                           kerned: Bool = true, images: ImageText? = nil) -> CFAttributedString? {
-        if runs.count <= 1, runs.first?.styles.contains(.code) != true, runs.first?.styles.contains(.image) != true {
+                           kerned: Bool = true, images: ImageText? = nil,
+                           directions: [ParagraphDirection] = []) -> CFAttributedString? {
+        if runs.count <= 1, runs.first?.styles.contains(.code) != true, runs.first?.styles.contains(.image) != true,
+           directions.isEmpty {
             let run = runs.first
             return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? [],
                                                                                kerned: kerned))
@@ -281,6 +360,13 @@ public final class BlockLayout: @unchecked Sendable {
             }
         }
         images?.apply(to: attributed)
+        for direction in directions {
+            let lower = max(direction.range.lowerBound, 0)
+            let upper = min(direction.range.upperBound, length)
+            guard lower < upper else { continue }
+            CFAttributedStringSetAttribute(attributed, CFRange(location: lower, length: upper - lower),
+                                           kCTParagraphStyleAttributeName, typography.paragraphStyle(direction.isRightToLeft))
+        }
         // Room for the padding beside inline code, as kerning after the
         // character before it and after its last character: on the whole
         // composed character, since an attribute run that splits a
@@ -301,14 +387,17 @@ public final class BlockLayout: @unchecked Sendable {
 
     /// A laid-out line for `range` of a string covered by `runs`, with its
     /// line box: the tallest line height of the roles in it, with the glyphs
-    /// centered in it as CSS does. `runIndex` is the run the line starts in
-    /// or one before it, and moves forward. Without `maxX`, the line's
-    /// right edge is its visible width. Also returns that visible width.
-    /// With `hasImages`, images on the line are placed; see `imageBox`.
-    static func lineLayout(_ line: CTLine, range: Range<Int>, string: CFString, runs: [StyleRun], runIndex: inout Int,
-                           links: ArraySlice<MarkdownLink>, linkOffset: Int, x: CGFloat, maxX: CGFloat?, top: CGFloat,
-                           codeBlock: Int32, typography: Typography,
-                           hasImages: Bool = false) -> (layout: LineLayout, width: CGFloat) {
+    /// centered in it as CSS does. The line is `index` in `set`. `range`,
+    /// `runs`, and `links` index the text the string's index `base` starts
+    /// at. `runIndex` is the run the line starts in or one before it, and
+    /// moves forward. Without `maxX`, the line's right edge is its visible
+    /// width. A right-to-left line ends at `maxX`. Also returns that visible
+    /// width. With `hasImages`, images on the line are placed; see `imageBox`.
+    static func lineLayout(_ line: CTLine, in set: LineSet, index: Int32, range: Range<Int>, base: Int = 0,
+                           string: CFString, runs: [StyleRun], runIndex: inout Int, links: ArraySlice<MarkdownLink>,
+                           linkOffset: Int, x: CGFloat, maxX: CGFloat?, top: CGFloat, codeBlock: Int32,
+                           typography: Typography, hasImages: Bool = false,
+                           isRightToLeft: Bool = false) -> (layout: LineLayout, width: CGFloat) {
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         var leading: CGFloat = 0
@@ -321,13 +410,13 @@ public final class BlockLayout: @unchecked Sendable {
         var color: UInt8? = ColorIndex.of(first.role, first.styles)
         var lineHeight = typography.lineHeight(first.role)
         var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
-        var index = runIndex + 1
-        while index < runs.count, runs[index].range.lowerBound < range.upperBound {
-            let run = runs[index]
+        var next = runIndex + 1
+        while next < runs.count, runs[next].range.lowerBound < range.upperBound {
+            let run = runs[next]
             if ColorIndex.of(run.role, run.styles) != color { color = nil }
             lineHeight = max(lineHeight, typography.lineHeight(run.role))
             isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
-            index += 1
+            next += 1
         }
 
         var height = lineHeight
@@ -345,12 +434,15 @@ public final class BlockLayout: @unchecked Sendable {
                 }
             }
         }
-        let endsWithNewline = !range.isEmpty && CFStringGetCharacterAtIndex(string, range.upperBound - 1) == 0x0A
+        let endsWithNewline = !range.isEmpty && CFStringGetCharacterAtIndex(string, range.upperBound - 1 - base) == 0x0A
         var lineDecorations = isDecorated ? decorations(of: line, baseline: baseline, runs: runs, links: links,
-                                                        linkOffset: linkOffset, typography: typography) : []
+                                                        linkOffset: linkOffset, base: base, typography: typography) : []
         lineDecorations.append(contentsOf: images)
-        let layout = LineLayout(line: line, range: range, x: x, maxX: maxX ?? visibleWidth, top: top, height: height,
-                                baseline: baseline, color: color, endsWithNewline: endsWithNewline, codeBlock: codeBlock,
+        var lineX = x
+        if isRightToLeft, let maxX { lineX += CGFloat(CTLineGetPenOffsetForFlush(line, 1, Double(maxX - x))) }
+        let layout = LineLayout(lineSet: set, index: index, range: range, base: Int32(clamping: base), x: lineX, minX: x,
+                                maxX: maxX ?? visibleWidth, top: top, height: height, baseline: baseline, color: color,
+                                endsWithNewline: endsWithNewline, isRightToLeft: isRightToLeft, codeBlock: codeBlock,
                                 decorations: lineDecorations)
         return (layout, codeBlock >= 0 ? visibleWidth : width)
     }
@@ -406,11 +498,11 @@ public final class BlockLayout: @unchecked Sendable {
     /// whitespace of a wrapped line. `runs` and `links` index the line's
     /// string; an underline's tag is its link's index plus `linkOffset`.
     static func decorations(of line: CTLine, baseline: CGFloat, runs: [StyleRun], links: ArraySlice<MarkdownLink>,
-                            linkOffset: Int, typography: Typography) -> [Decoration] {
+                            linkOffset: Int, base: Int = 0, typography: Typography) -> [Decoration] {
         let visibleWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line))
         var decorations: [Decoration] = []
         for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] where CTRunGetGlyphCount(run) > 0 {
-            let location = CTRunGetStringRange(run).location
+            let location = CTRunGetStringRange(run).location + base
             let styleIndex = styleRunIndex(in: runs, at: location)
             guard styleIndex < runs.count else { continue }
             let style = runs[styleIndex]
@@ -422,7 +514,9 @@ public final class BlockLayout: @unchecked Sendable {
             var ascent: CGFloat = 0
             var descent: CGFloat = 0
             let width = CGFloat(CTRunGetTypographicBounds(run, CFRange(), &ascent, &descent, nil))
-            let minX = origin.x
+            // Trailing whitespace hangs: past the visible width, or left of
+            // zero in a right-to-left line.
+            let minX = max(origin.x, 0)
             let maxX = min(origin.x + width, visibleWidth)
             guard maxX > minX else { continue }
             let base = typography.fonts[Int(style.role.rawValue)]
@@ -520,8 +614,7 @@ public final class BlockLayout: @unchecked Sendable {
     /// The caret offset on `line` nearest to `x` (relative to the text's left
     /// edge), never after the line's newline.
     func offset(on line: LineLayout, atX x: CGFloat) -> Int {
-        let index = CTLineGetStringIndexForPosition(line.line, CGPoint(x: x, y: 0))
-        guard index != kCFNotFound else { return line.range.lowerBound }
+        guard let index = line.offset(atX: x) else { return line.range.lowerBound }
         return min(max(index, line.range.lowerBound), line.caretEnd)
     }
 }
@@ -546,7 +639,7 @@ extension BlockLayout {
     /// blocks laid out, plus one pass over `layouts`. `hints` (one per block)
     /// lend tables what still applies of an earlier layout.
     static func layOut(_ blocks: [MarkdownBlock], filling layouts: [BlockLayout?], hints: [BlockLayout?]? = nil,
-                       columnWidth: CGFloat, typography: Typography, images: ImageSizes = .none,
+                       columnWidth: CGFloat, typography: Typography, images: ImageSizes = .none, linesWarm: Bool = true,
                        isCancelled: @Sendable () -> Bool = { false }) -> [BlockLayout]? {
         precondition(layouts.count == blocks.count, "one layout per block")
         let missing = layouts.indices.filter { layouts[$0] == nil }
@@ -554,7 +647,7 @@ extension BlockLayout {
         if missing.count == 1, !isCancelled() {
             let index = missing[0]
             layouts[index] = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
-                                  images: images, isCancelled: isCancelled)
+                                  images: images, linesWarm: linesWarm, isCancelled: isCancelled)
         } else if missing.count > 1 {
             let results = ResultBuffer(count: missing.count)
             defer { results.free() }
@@ -562,7 +655,7 @@ extension BlockLayout {
                 guard !isCancelled() else { return }
                 let index = missing[slot]
                 if let layout = make(blocks[index], columnWidth: columnWidth, typography: typography, hint: hints?[index],
-                                     images: images, isCancelled: isCancelled) {
+                                     images: images, linesWarm: linesWarm, isCancelled: isCancelled) {
                     results.store(layout, at: slot)
                 }
             }

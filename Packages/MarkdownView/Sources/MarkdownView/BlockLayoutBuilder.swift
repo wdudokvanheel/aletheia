@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreText
 import Foundation
+import os
 
 /// Lays out one block's segments top to bottom, inside the indents of their
 /// lists and quotes, with the margins that meet between two segments
@@ -21,6 +22,9 @@ struct BlockLayoutBuilder {
     var tableRows = TableRows.all
     /// The natural sizes of the images loaded so far.
     var images = ImageSizes.none
+    /// Whether the lines are about to be drawn, rather than laid out ahead;
+    /// see `LineSet.seal(isWarm:)`.
+    var linesWarm = true
     private(set) var isCancelled = false
     private(set) var lines: [LineLayout] = []
     private(set) var boxes: [BlockBox] = []
@@ -31,16 +35,13 @@ struct BlockLayoutBuilder {
     private(set) var imageSizes: [CGSize?] = []
     private(set) var imageWidths: [CGFloat] = []
     private(set) var drawsImages = false
-    /// The display text, then its attributed string and typesetter, made
-    /// when a segment first needs them: tables lay out cell by cell, so a
-    /// table block never shapes its whole text at once.
+    /// The display text, and the window of it being typeset, made when a
+    /// segment first needs it: tables lay out cell by cell, so a table
+    /// block never shapes its whole text at once.
     private var text: CFString?
-    private var string: CFAttributedString?
-    private var typesetter: CTTypesetter?
-    /// The images of the typesetter's string, fitted to `imageWidth`. A
-    /// block with loaded images gets a typesetter per text width.
-    private var imageText: ImageText?
-    private var imageWidth: CGFloat = 0
+    private var window: TextWindow?
+    /// Paragraphs whose direction is set rather than left to Core Text.
+    private var directions: [ParagraphDirection] = []
     /// The style run the next line starts in.
     private var runIndex = 0
     /// UTF-16 offsets of the display text's newlines, for estimates.
@@ -76,6 +77,12 @@ struct BlockLayoutBuilder {
         let segments = block.segments.isEmpty ? Self.segments(of: block, textLength: textLength) : block.segments
         let containers = block.containers
         if !isEstimate, textLength > 0 { text = BlockLayout.makeText(block.text, length: textLength) }
+        // Every direction first: a window holds the paragraphs after the
+        // one it opens for.
+        var isRightToLeft = [Bool](repeating: false, count: segments.count)
+        for (index, segment) in segments.enumerated() where segment.kind == .paragraph || segment.kind == .heading {
+            isRightToLeft[index] = direction(of: segment.range)
+        }
         if !isEstimate, !block.images.isEmpty {
             imageSizes = block.images.map { BlockLayout.size($0.source, in: images) }
             imageWidths = [CGFloat](repeating: 0, count: block.images.count)
@@ -135,7 +142,7 @@ struct BlockLayoutBuilder {
             let height: CGFloat
             switch segment.kind {
             case .paragraph, .heading:
-                height = layOutText(range, x: left, width: width, top: y)
+                height = layOutText(range, x: left, width: width, top: y, isRightToLeft: isRightToLeft[index])
             case .table:
                 height = layOutTable(range, x: left, width: width, top: y, isCancelled: isCancelled)
                 if self.isCancelled { return (0, 0, 0) }
@@ -212,33 +219,75 @@ struct BlockLayoutBuilder {
 
     // MARK: Lines
 
-    /// Makes the attributed display text and its typesetter, once, with
-    /// images fitted to `width`; again for another width when images are
-    /// loaded.
-    private mutating func prepareTypesetter(width: CGFloat) {
-        if typesetter != nil, imageText?.hasLoaded != true || imageWidth == width { return }
-        guard let text else { return }
+    /// Whether the paragraph in `range` reads right to left, by its first
+    /// strong character. One with any right-to-left text gets its
+    /// direction set, so lines after a hard break keep it.
+    private mutating func direction(of range: Range<Int>) -> Bool {
+        guard let text, !range.isEmpty else { return false }
+        let found = TextDirection.scan(text, range)
+        if found.hasRightToLeft {
+            directions.append(ParagraphDirection(range: range.lowerBound..<min(range.upperBound + 1, textLength),
+                                                 isRightToLeft: found.isRightToLeft))
+        }
+        return found.isRightToLeft
+    }
+
+    /// The window to typeset a line starting at `start` with, at text
+    /// `width`: the current one while it reaches far enough past `start`
+    /// and fits its images to `width`, or else a new one starting there.
+    private mutating func window(at start: Int, width: CGFloat, reaching end: Int = 0) -> TextWindow? {
+        if let window, window.range.lowerBound <= start, end <= window.range.upperBound,
+           window.range.upperBound == textLength
+            || (start - window.range.lowerBound < window.advance && window.range.upperBound - start >= window.advance / 2),
+           window.images?.hasLoaded != true || window.imageWidth == width {
+            return window
+        }
+        return openWindow(at: start, width: width, reaching: end)
+    }
+
+    private mutating func openWindow(at start: Int, width: CGFloat, reaching end: Int = 0) -> TextWindow? {
+        guard let text else { return nil }
         let images = imageSizes.isEmpty ? nil : ImageText(block: block, sizes: imageSizes, width: width)
-        guard let string = BlockLayout.makeString(text, runs: block.styleRuns, typography: typography,
-                                                  images: images) else { return }
-        self.string = string
-        imageText = images
-        imageWidth = width
-        typesetter = CTTypesetterCreateWithAttributedString(string)
+        // Short lines (narrow columns, emoji) make each break cost as much
+        // as a long one, so windows move on sooner.
+        let lineLength = lines.isEmpty ? TextWindow.advance : (lines.last!.range.upperBound) / lines.count
+        let advance = min(max(16 * lineLength, TextWindow.advance / 16), TextWindow.advance)
+        guard let window = TextWindow(text: text, block: block, start: start, reaching: end, length: textLength,
+                                      advance: advance, typography: typography, images: images, imageWidth: width,
+                                      directions: directions, isWarm: linesWarm) else { return nil }
+        self.window = window
+        return window
     }
 
     /// Wraps text with `CTTypesetter` at `width`, one line box per line.
-    private mutating func layOutText(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat) -> CGFloat {
+    /// Long text is typeset in windows: Core Text's line breaking looks back
+    /// to the start of the paragraph, so one typesetter over a paragraph of
+    /// a million characters takes minutes, and past about 10,000 it also
+    /// stops kerning.
+    private mutating func layOutText(_ range: Range<Int>, x: CGFloat, width: CGFloat, top: CGFloat,
+                                     isRightToLeft: Bool = false) -> CGFloat {
         guard !range.isEmpty else { return 0 }
-        prepareTypesetter(width: width)
-        guard let typesetter else { return estimatedHeight(of: range, width: width) }
+        guard text != nil, var window = window(at: range.lowerBound, width: width) else {
+            return estimatedHeight(of: range, width: width)
+        }
         var y = top
         var start = range.lowerBound
         while start < range.upperBound {
-            let count = max(CTTypesetterSuggestLineBreak(typesetter, start, Double(width)), 1)
+            if let current = self.window(at: start, width: width) { window = current }
+            var count = max(CTTypesetterSuggestLineBreak(window.typesetter, start - window.range.lowerBound,
+                                                         Double(width)), 1)
+            if start + count >= window.range.upperBound, window.range.upperBound < textLength,
+               window.range.lowerBound < start, let fresh = openWindow(at: start, width: width) {
+                // The line may go on past the window: break it again from here.
+                window = fresh
+                count = max(CTTypesetterSuggestLineBreak(window.typesetter, 0, Double(width)), 1)
+            }
             var end = min(start + count, range.upperBound)
-            if let imageText { end = min(imageText.lineEnd(end), range.upperBound) }
-            y += appendLine(start..<end, x: x, maxX: x + width, top: y, codeBlock: -1).height
+            if let images = window.images {
+                end = min(images.lineEnd(end - window.range.lowerBound) + window.range.lowerBound, range.upperBound)
+            }
+            y += appendLine(start..<end, in: window, x: x, maxX: x + width, top: y, codeBlock: -1,
+                            isRightToLeft: isRightToLeft).height
             start = end
         }
         recordImageWidths(in: range, width)
@@ -267,18 +316,25 @@ struct BlockLayoutBuilder {
         let padding = typography.codeBlockPadding
         var y = top + padding
         var widest: CGFloat = 0
-        // Code has no images, so any typesetter will do.
-        if !range.isEmpty { prepareTypesetter(width: typesetter == nil ? width : imageWidth) }
-        if !range.isEmpty, let string {
+        if !range.isEmpty, let text {
             var characters = [UniChar](repeating: 0, count: range.count)
-            CFStringGetCharacters(CFAttributedStringGetString(string), CFRange(location: range.lowerBound, length: range.count),
-                                  &characters)
+            CFStringGetCharacters(text, CFRange(location: range.lowerBound, length: range.count), &characters)
             let code = Int32(codeBlocks.count)
             var start = 0
             while start < characters.count {
                 let end = characters[start...].firstIndex(of: 0x0A).map { $0 + 1 } ?? characters.count
-                let line = appendLine((range.lowerBound + start)..<(range.lowerBound + end), x: x + padding,
-                                      maxX: x + width - padding, top: y, codeBlock: code)
+                let lineRange = (range.lowerBound + start)..<(range.lowerBound + end)
+                // Code has no images, so any window that holds the line will do.
+                var current = window
+                if let window, window.range.lowerBound <= lineRange.lowerBound,
+                   lineRange.upperBound <= window.range.upperBound {
+                    current = window
+                } else {
+                    current = openWindow(at: lineRange.lowerBound, width: width, reaching: lineRange.upperBound)
+                }
+                guard let window = current else { break }
+                let line = appendLine(lineRange, in: window, x: x + padding, maxX: x + width - padding, top: y,
+                                      codeBlock: code)
                 widest = max(widest, line.width)
                 y += line.height
                 start = end
@@ -297,17 +353,21 @@ struct BlockLayoutBuilder {
 
     /// Adds the line for `range` with its line box. Returns its height and,
     /// for code lines, the width of its text without trailing whitespace.
-    private mutating func appendLine(_ range: Range<Int>, x: CGFloat, maxX: CGFloat, top: CGFloat,
-                                     codeBlock: Int32) -> (height: CGFloat, width: CGFloat) {
-        guard let typesetter, let string else { return (0, 0) }
-        let line = CTTypesetterCreateLine(typesetter, CFRange(location: range.lowerBound, length: range.count))
+    private mutating func appendLine(_ range: Range<Int>, in window: TextWindow, x: CGFloat, maxX: CGFloat, top: CGFloat,
+                                     codeBlock: Int32, isRightToLeft: Bool = false) -> (height: CGFloat, width: CGFloat) {
+        let base = window.range.lowerBound
+        let location = CFRange(location: range.lowerBound - base, length: range.count)
+        let line = CTTypesetterCreateLine(window.typesetter, location)
         // Lines of blocks with images may hold run delegates, of loaded images
         // or of placeholders.
-        let hasImages = imageText != nil
-        let (layout, width) = BlockLayout.lineLayout(line, range: range, string: CFAttributedStringGetString(string),
+        let hasImages = window.images != nil
+        let index = window.set.append(window.set.isKept ? line : nil, range: location)
+        let (layout, width) = BlockLayout.lineLayout(line, in: window.set, index: index,
+                                                     range: range, base: base, string: window.string,
                                                      runs: block.styleRuns, runIndex: &runIndex, links: block.links[...],
                                                      linkOffset: 0, x: x, maxX: maxX, top: top, codeBlock: codeBlock,
-                                                     typography: typography, hasImages: hasImages)
+                                                     typography: typography, hasImages: hasImages,
+                                                     isRightToLeft: isRightToLeft)
         if hasImages, !drawsImages { drawsImages = layout.decorations.contains { $0.kind == .image } }
         lines.append(layout)
         return (layout.height, codeBlock >= 0 ? width : 0)
@@ -335,7 +395,8 @@ struct BlockLayoutBuilder {
         recordImageWidths(in: structure.displayRange, cellWidth)
         guard let table = TableLayout.build(structure, block: block, text: text, x: x, top: top, width: width,
                                             scrollIndex: codeBlocks.count, typography: typography, hint: hintTable,
-                                            rows: tableRows, images: images, isCancelled: isCancelled) else {
+                                            rows: tableRows, images: images, linesWarm: linesWarm,
+                                            isCancelled: isCancelled) else {
             self.isCancelled = true
             return 0
         }
@@ -363,13 +424,11 @@ struct BlockLayoutBuilder {
             markers.append(MarkerLayout(kind: level == 0 ? .disc : level == 1 ? .circle : .square,
                                         rect: square(typography.bulletSize), baseline: baseline, color: color))
         case .number(let number):
-            guard let text = CFAttributedStringCreate(nil, "\(number)." as CFString, typography.attributes(.body, []))
-            else { return }
-            let line = CTLineCreateWithAttributedString(text)
+            let line = MarkerNumbers.line(number, typography: typography)
             var ascent: CGFloat = 0
             var descent: CGFloat = 0
             let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, nil))
-            markers.append(MarkerLayout(kind: .number(line), rect: CGRect(x: right - width, y: baseline - ascent,
+            markers.append(MarkerLayout(kind: .number(number), rect: CGRect(x: right - width, y: baseline - ascent,
                                                                          width: width, height: ascent + descent),
                                         baseline: baseline, color: color))
         case .task(let checked):
@@ -412,5 +471,123 @@ struct BlockLayoutBuilder {
             return low
         }
         return max(firstIndex(atOrAfter: range.upperBound - 1) - firstIndex(atOrAfter: range.lowerBound), 0)
+    }
+}
+
+/// A window of a block's display text with its own typesetter, starting at
+/// a line start, and the set its lines go into.
+struct TextWindow {
+    /// How much text a window holds: under the 10,000 characters past which
+    /// Core Text stops kerning, and short enough to typeset again quickly.
+    static let length = 8_192
+    /// Lines start at most this far into a window, so breaking a line never
+    /// looks back further, and at least half of it before its end, unless
+    /// it ends the text. Windows of short lines move on sooner: `advance`.
+    static let advance = 4_096
+    let advance: Int
+
+    /// Display offsets of the window's text.
+    let range: Range<Int>
+    let typesetter: CTTypesetter
+    /// The string as typeset, with loaded images replaced.
+    let string: CFString
+    /// The images in the window, relative to its start.
+    let images: ImageText?
+    let imageWidth: CGFloat
+    let set: LineSet
+
+    /// The window from `start`, through `reaching` at least, of `text`, the
+    /// display text of `block` (`length` units), with the block's `images`
+    /// fitted to `imageWidth` and the paragraph `directions` of the block.
+    init?(text: CFString, block: MarkdownBlock, start: Int, reaching: Int, length: Int, advance: Int = advance,
+          typography: Typography, images: ImageText?, imageWidth: CGFloat, directions: [ParagraphDirection],
+          isWarm: Bool) {
+        self.advance = advance
+        var end = min(max(start + Self.length * advance / Self.advance, reaching), length)
+        if end < length {
+            // Never inside a character or an image.
+            let composed = CFStringGetRangeOfComposedCharactersAtIndex(text, end)
+            if composed.location < end { end = min(composed.location + composed.length, length) }
+            if let image = images?.items.first(where: { $0.range.lowerBound < end && end < $0.range.upperBound }) {
+                end = image.range.upperBound
+            }
+        }
+        let range = start..<end
+        // A window of the whole text shares the block's runs.
+        let runs = range == 0..<length ? block.styleRuns : Self.slice(block.styleRuns, to: range)
+        let windowImages = images?.slice(range)
+        let windowDirections = directions.compactMap { direction -> ParagraphDirection? in
+            let lower = max(direction.range.lowerBound, start)
+            let upper = min(direction.range.upperBound, end)
+            return lower < upper ? ParagraphDirection(range: (lower - start)..<(upper - start),
+                                                      isRightToLeft: direction.isRightToLeft) : nil
+        }
+        guard let substring = CFStringCreateWithSubstring(nil, text, CFRange(location: start, length: end - start)),
+              let string = BlockLayout.makeString(substring, runs: runs, typography: typography, images: windowImages,
+                                                  directions: windowDirections) else { return nil }
+        self.range = range
+        typesetter = CTTypesetterCreateWithAttributedString(string)
+        self.string = CFAttributedStringGetString(string)
+        self.images = windowImages
+        self.imageWidth = imageWidth
+        let source = block.text
+        set = LineSet(length: end - start, isWarm: isWarm) {
+            guard let substring = BlockLayout.substring(of: source, range, length: length),
+                  let string = BlockLayout.makeString(substring, runs: runs, typography: typography,
+                                                      images: windowImages, directions: windowDirections)
+            else { return nil }
+            return CTTypesetterCreateWithAttributedString(string)
+        }
+    }
+
+    /// The style runs in `range`, relative to its start.
+    static func slice(_ runs: [StyleRun], to range: Range<Int>) -> [StyleRun] {
+        var sliced: [StyleRun] = []
+        var index = BlockLayout.styleRunIndex(in: runs, at: range.lowerBound)
+        while index < runs.count, runs[index].range.lowerBound < range.upperBound {
+            let run = runs[index]
+            let lower = max(run.range.lowerBound, range.lowerBound)
+            let upper = min(run.range.upperBound, range.upperBound)
+            if lower < upper {
+                sliced.append(StyleRun(range: (lower - range.lowerBound)..<(upper - range.lowerBound), role: run.role,
+                                       styles: run.styles))
+            }
+            index += 1
+        }
+        return sliced
+    }
+}
+
+/// The typeset numbers of ordered list items, kept once for all lists: most
+/// count from one, so a few hundred lines serve every document, where a
+/// line per item would cost about 1.6 KB each.
+enum MarkerNumbers {
+    /// Numbers up to this are kept; larger ones are typeset when drawn.
+    static let keptLimit = 1_000
+    nonisolated(unsafe) private static let lock: UnsafeMutablePointer<os_unfair_lock> = {
+        let lock = UnsafeMutablePointer<os_unfair_lock>.allocate(capacity: 1)
+        lock.initialize(to: os_unfair_lock())
+        return lock
+    }()
+    /// Guarded by `lock`.
+    nonisolated(unsafe) private static var lines: [Int: CTLine] = [:]
+
+    /// `number` and a period in the body font.
+    static func line(_ number: Int, typography: Typography) -> CTLine {
+        let isKept = number >= 0 && number <= keptLimit && typography === Typography.standard
+        if isKept {
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
+            if let line = lines[number] { return line }
+            let line = make(number, typography)
+            lines[number] = line
+            return line
+        }
+        return make(number, typography)
+    }
+
+    private static func make(_ number: Int, _ typography: Typography) -> CTLine {
+        let text = CFAttributedStringCreate(nil, "\(number)." as CFString, typography.attributes(.body, []))
+        return CTLineCreateWithAttributedString(text ?? CFAttributedStringCreate(nil, "" as CFString, nil))
     }
 }

@@ -125,6 +125,33 @@ public struct MarkdownSnapshot: Sendable {
         return low
     }
 
+    /// The sets holding the lines of the blocks and table rows that
+    /// intersect `minY..<maxY`, each once.
+    func lineSets(intersecting minY: CGFloat, _ maxY: CGFloat) -> [LineSet] {
+        var sets: [LineSet] = []
+        var seen = Set<ObjectIdentifier>()
+        func add(_ set: LineSet) {
+            if sets.last === set { return }
+            if seen.insert(ObjectIdentifier(set)).inserted { sets.append(set) }
+        }
+        for index in blockRange(intersecting: minY, maxY) {
+            let layout = layouts[index]
+            let top = blockTops[index]
+            var line = layout.firstLine(endingBelow: minY - top)
+            while line < layout.lines.count, top + layout.lines[line].top < maxY {
+                add(layout.lines[line].lineSet)
+                line += 1
+            }
+            for table in layout.tables {
+                let tableTop = top + table.rect.minY
+                for row in table.rows(intersecting: minY - tableTop, maxY - tableTop) {
+                    for cellLine in table.rows[row].lines { add(cellLine.lineSet) }
+                }
+            }
+        }
+        return sets
+    }
+
     func with(generation: UInt64) -> MarkdownSnapshot {
         MarkdownSnapshot(document: document, layouts: layouts, width: width, typography: typography,
                          generation: generation, update: update, images: images)

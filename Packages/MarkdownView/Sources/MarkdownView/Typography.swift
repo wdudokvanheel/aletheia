@@ -101,6 +101,8 @@ public final class Typography: @unchecked Sendable {
     private let styledAttributes: [CFDictionary]
     /// The same without kerning, for table cells.
     private let unkernedAttributes: [CFDictionary]
+    /// Left-to-right and right-to-left paragraphs.
+    private let directionStyles: [CTParagraphStyle]
 
     private init() {
         var fonts: [CTFont] = []
@@ -157,7 +159,18 @@ public final class Typography: @unchecked Sendable {
         self.styledFonts = styledFonts
         self.styledAttributes = styledAttributes
         self.unkernedAttributes = unkernedAttributes
+        directionStyles = [CTWritingDirection.leftToRight, .rightToLeft].map { direction in
+            var direction = direction
+            return withUnsafeBytes(of: &direction) { bytes in
+                CTParagraphStyleCreate([CTParagraphStyleSetting(spec: .baseWritingDirection,
+                                                                valueSize: MemoryLayout<CTWritingDirection>.size,
+                                                                value: bytes.baseAddress!)], 1)
+            }
+        }
     }
+
+    /// A paragraph style that sets the base writing direction.
+    func paragraphStyle(_ isRightToLeft: Bool) -> CTParagraphStyle { directionStyles[isRightToLeft ? 1 : 0] }
 
     private static func makeFont(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> CTFont {
         var font = monospaced
@@ -170,22 +183,27 @@ public final class Typography: @unchecked Sendable {
     }
 
     /// A paragraph style with tab stops every `spaces` spaces of `font`, as
-    /// CSS `tab-size` sets them.
+    /// CSS `tab-size` sets them, left to right as code always is.
     private static func tabStops(every spaces: Int, of font: CTFont) -> CTParagraphStyle {
         var glyph = CGGlyph(0)
         var space = UniChar(0x20)
         CTFontGetGlyphsForCharacters(font, &space, &glyph, 1)
         var interval = CGFloat(spaces) * CGFloat(CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, nil, 1))
         var stops = [CTTextTab]() as CFArray
+        var direction = CTWritingDirection.leftToRight
         return withUnsafeBytes(of: &interval) { intervalBytes in
             withUnsafeBytes(of: &stops) { stopsBytes in
-                let settings = [
-                    CTParagraphStyleSetting(spec: .defaultTabInterval, valueSize: MemoryLayout<CGFloat>.size,
-                                            value: intervalBytes.baseAddress!),
-                    CTParagraphStyleSetting(spec: .tabStops, valueSize: MemoryLayout<CFArray>.size,
-                                            value: stopsBytes.baseAddress!)
-                ]
-                return CTParagraphStyleCreate(settings, settings.count)
+                withUnsafeBytes(of: &direction) { directionBytes in
+                    let settings = [
+                        CTParagraphStyleSetting(spec: .defaultTabInterval, valueSize: MemoryLayout<CGFloat>.size,
+                                                value: intervalBytes.baseAddress!),
+                        CTParagraphStyleSetting(spec: .tabStops, valueSize: MemoryLayout<CFArray>.size,
+                                                value: stopsBytes.baseAddress!),
+                        CTParagraphStyleSetting(spec: .baseWritingDirection, valueSize: MemoryLayout<CTWritingDirection>.size,
+                                                value: directionBytes.baseAddress!)
+                    ]
+                    return CTParagraphStyleCreate(settings, settings.count)
+                }
             }
         }
     }

@@ -248,8 +248,8 @@ extension MarkdownSnapshot {
                 // A selection that starts at the very end of the block still
                 // covers the separator to the next one.
                 guard from < to || (isLast && continuesToNextBlock && from == line.range.upperBound) else { continue }
-                let x1 = CTLineGetOffsetForStringIndex(line.line, from, nil)
-                let x2 = CTLineGetOffsetForStringIndex(line.line, to, nil)
+                let x1 = line.caretX(from)
+                let x2 = line.caretX(to)
                 let left = columnX + line.x - codeOffset(of: line, inBlock: index, codeOffsets)
                 var minX = left + min(x1, x2)
                 var maxX = left + max(x1, x2)
@@ -318,8 +318,7 @@ extension MarkdownSnapshot {
         }
         guard !layout.lines.isEmpty else { return nil }
         let line = layout.lines[layout.lineIndex(containing: position.offset, upstream: false)]
-        let x = CTLineGetOffsetForStringIndex(line.line, position.offset, nil)
-            - codeOffset(of: line, inBlock: position.block, codeOffsets)
+        let x = line.caretX(position.offset) - codeOffset(of: line, inBlock: position.block, codeOffsets)
         return (CGPoint(x: columnX + line.x + x, y: blockTops[position.block] + line.baseline),
                 layout.styleRun(at: position.offset))
     }

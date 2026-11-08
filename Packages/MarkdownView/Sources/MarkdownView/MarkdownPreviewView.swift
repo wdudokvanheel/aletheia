@@ -151,7 +151,13 @@ public final class MarkdownPreviewView: NSScrollView {
         guard visible != isShown else { return }
         isShown = visible
         canvas.images.setShown(visible)
-        if visible { scheduleUpdate() } else { resumeTask?.cancel(); resumeTask = nil }
+        if visible {
+            scheduleUpdate()
+            canvas.scheduleLinePrefetch()
+        } else {
+            resumeTask?.cancel()
+            resumeTask = nil
+        }
     }
 
     /// The top of the visible area as a fraction of the document height, for
@@ -296,10 +302,12 @@ public final class MarkdownPreviewView: NSScrollView {
         scheduleUpdate()
     }
 
-    /// Images coming into view are asked for once per turn of the run loop.
+    /// Images coming into view are asked for once per turn of the run loop,
+    /// and lines near it typeset again if they were dropped.
     public override func reflectScrolledClipView(_ clipView: NSClipView) {
         super.reflectScrolledClipView(clipView)
         canvas.images.schedulePass()
+        if isShown { canvas.scheduleLinePrefetch() }
     }
 
     // MARK: Updates
@@ -437,6 +445,7 @@ public final class MarkdownPreviewView: NSScrollView {
         // Nothing visible changed: there is no draw to wait for.
         if invalidated?.isEmpty == true, !revealed { didDraw(.zero) }
         canvas.images.didInstall(source: sourceGeneration)
+        if isShown { canvas.scheduleLinePrefetch() }
         onInstall?(snapshot)
     }
 
@@ -540,6 +549,7 @@ final class MarkdownDocumentView: NSView {
     var codeScrollerTimer: Timer?
     /// The images it draws, and their loading.
     private(set) lazy var images = ImageStore(view: self)
+    private var isLinePrefetchScheduled = false
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -559,6 +569,25 @@ final class MarkdownDocumentView: NSView {
         }
         if let codeScroller, !codeOffsets.keys.contains(codeScroller) { self.codeScroller = nil }
         snapshot = newSnapshot
+    }
+
+    /// Marks the lines within a screen above and two below the visible area
+    /// used, and typesets those that were dropped again off the main thread,
+    /// once per turn of the run loop. See `LineSet`.
+    func scheduleLinePrefetch() {
+        guard !isLinePrefetchScheduled else { return }
+        isLinePrefetchScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.prefetchLines() }
+        }
+    }
+
+    private func prefetchLines() {
+        isLinePrefetchScheduled = false
+        let visible = visibleRect
+        guard window != nil, !visible.isEmpty else { return }
+        LineCache.prefetch(snapshot.lineSets(intersecting: visible.minY - visible.height,
+                                             visible.maxY + 2 * visible.height))
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -790,7 +819,7 @@ extension BlockLayout {
                 context.saveGState()
                 context.clip(to: codeBlocks[Int(line.codeBlock)].rect.offsetBy(dx: origin.x, dy: origin.y))
             }
-            draw(line, x: x, top: origin.y, textOffset: 0, in: context, style: style)
+            draw(line, x: x, top: origin.y, textOffset: Int(line.base), in: context, style: style)
             if isClipped { context.restoreGState() }
         }
         forEachTable(intersecting: clip, at: origin, in: context, codeOffset: codeOffset) { table, tableOrigin in
@@ -853,10 +882,10 @@ extension BlockLayout {
             case .square:
                 context.setFillColor(style.text[Int(marker.color)])
                 context.fill(rect)
-            case .number(let line):
+            case .number(let number):
                 context.setFillColor(style.text[Int(marker.color)])
                 context.textPosition = CGPoint(x: rect.minX, y: origin.y + marker.baseline)
-                CTLineDraw(line, context)
+                CTLineDraw(MarkerNumbers.line(number, typography: Typography.standard), context)
             case .task(let checked):
                 drawTaskBox(in: rect, checked: checked, context: context, style: style)
             }

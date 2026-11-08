@@ -231,8 +231,11 @@ final class SelectionTests: XCTestCase {
         let start = CTLineGetOffsetForStringIndex(line.line, 0, nil)
         let end = CTLineGetOffsetForStringIndex(line.line, 4, nil)
         XCTAssertGreaterThan(start, end)
-        XCTAssertEqual(rects[0].minX, snapshot.columnX + end, accuracy: 0.01)
-        XCTAssertEqual(rects[0].maxX, snapshot.columnX + start, accuracy: 0.01)
+        // The paragraph reads right to left, so its line ends at the column's right edge.
+        let width = CTLineGetTypographicBounds(line.line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line.line)
+        XCTAssertEqual(line.x + width, snapshot.columnWidth, accuracy: 0.01)
+        XCTAssertEqual(rects[0].minX, snapshot.columnX + line.x + end, accuracy: 0.01)
+        XCTAssertEqual(rects[0].maxX, snapshot.columnX + line.x + start, accuracy: 0.01)
     }
 
     func testDirtyRectsCoverOnlyTheLinesBetweenMovedEnds() throws {
