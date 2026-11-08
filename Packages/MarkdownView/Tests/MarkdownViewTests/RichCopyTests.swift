@@ -185,6 +185,12 @@ final class RichCopyTests: XCTestCase {
         pasteboard.clearContents()
         pasteboard.writeObjects([item])
         XCTAssertTrue(try XCTUnwrap(pasteboard.string(forType: .html)).contains("first paragraph"))
+        // A plain-text editor, like the app's, takes the string flavor.
+        let editor = NSTextView()
+        editor.isRichText = false
+        let type = try XCTUnwrap(editor.preferredPasteboardType(from: pasteboard.types ?? [], restrictedToTypesFrom: nil))
+        XCTAssertTrue(editor.readSelection(from: pasteboard, type: type))
+        XCTAssertEqual(editor.string, "first paragraph")
 
         // A click inside the selection that does not drag selects nothing.
         dragged = []

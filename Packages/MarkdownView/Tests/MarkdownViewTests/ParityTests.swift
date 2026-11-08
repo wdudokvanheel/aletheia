@@ -115,6 +115,14 @@ final class ParityTests: XCTestCase {
         XCTAssertNil(snapshot.toolTip(at: CGPoint(x: snapshot.columnX + 1, y: snapshot.blockTops[0] - 5)))
     }
 
+    @MainActor func testElasticOverscrollShowsThePaletteBackground() {
+        let view = MarkdownPreviewView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        view.palette.background = .systemRed
+        XCTAssertTrue(view.drawsBackground)
+        XCTAssertEqual(view.backgroundColor, .systemRed)
+        XCTAssertNotEqual(view.verticalScrollElasticity, .none)
+    }
+
     @MainActor func testForceClickLooksUpTheSelectionOrTheWord() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled],
                               backing: .buffered, defer: false)
