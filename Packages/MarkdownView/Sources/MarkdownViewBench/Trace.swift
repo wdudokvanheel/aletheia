@@ -258,6 +258,7 @@ extension Runner {
         let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Markdown trace benchmark")
         defer { ProcessInfo.processInfo.endActivity(activity) }
         window.orderFrontRegardless()
+        if options.custom { imageProvider = await makeImageProvider(manifest: trace.manifest) }
         let baseline = Double(ProcessMetrics.ownFootprint()) / 1_048_576
         let firstOpen: Double
         if options.custom {
@@ -278,7 +279,7 @@ extension Runner {
             previewResources: options.custom ? nil : options.previewResources.path, machine: environment.machine,
             os: environment.os, build: environment.build, git: environment.git, webkit: environment.webkit,
             window: windowInfo(), firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),
-            helperAttribution: nil, watchdog: nil, definitions: Self.traceDefinitions)
+            helperAttribution: nil, watchdog: nil, definitions: Self.traceDefinitions, imageProvider: imageProviderInfo)
         let settings = TraceSettings(
             mode: trace.interval > 0 ? "burst" : "sequential", intervalMs: trace.interval,
             updatePolicy: options.custom ? .init(budgetMs: Self.ms(policy.budget), pauseFactor: policy.pauseFactor,
@@ -298,7 +299,7 @@ extension Runner {
                 do {
                     for _ in 0..<options.repetitions {
                         let repetition = try await interval("trace") {
-                            options.custom ? try await replayCustom(loaded, interval: trace.interval)
+                            options.custom ? try await replayCustom(loaded, url: url, interval: trace.interval)
                                 : try await replayWebKit(loaded, url: url, interval: trace.interval)
                         }
                         result.repetitions.append(repetition)
@@ -347,8 +348,8 @@ extension Runner {
         return fired
     }
 
-    private func replayCustom(_ trace: Generator.Trace, interval: Double) async throws -> TraceRepetition {
-        let opened = try await openCustom(trace.base)
+    private func replayCustom(_ trace: Generator.Trace, url: URL, interval: Double) async throws -> TraceRepetition {
+        let opened = try await openCustom(trace.base, directory: url.deletingLastPathComponent())
         guard let preview = customPreview else { throw BenchError.navigation("no preview") }
         let scrollY = Double(scrollCustom(preview, to: trace.edits.first?.location ?? 0))
         try await Task.sleep(for: .milliseconds(300))

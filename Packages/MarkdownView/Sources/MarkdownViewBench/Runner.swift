@@ -17,6 +17,8 @@ struct RunOptions {
     var onscreen: Bool
     /// The run loop watchdog and the 1 s check; on for the smoke set.
     var watchdog: Bool
+    /// Custom: delay before each remote image is served, simulating the network.
+    var imageLatency = 0.0
     var custom: Bool { renderer == "custom" }
 }
 
@@ -111,6 +113,8 @@ struct DocumentResult: Codable {
     /// Custom: the library's Timings per repetition, by metric.
     var library: [String: [LibraryTimings]]?
     var scroll: ScrollResult?
+    /// Documents that asked for images.
+    var images: ImageResult?
     /// With the watchdog: the longest main run loop busy span while measuring this document.
     var blockedMs: Double?
 }
@@ -162,6 +166,8 @@ struct RunHeader: Codable {
     let helperAttribution: String?
     let watchdog: WatchdogSettings?
     let definitions: [String: String]
+    /// Custom: the bench's image provider.
+    var imageProvider: ImageProviderInfo? = nil
 }
 
 struct AggregateLatency: Codable {
@@ -274,7 +280,8 @@ final class ResultWriter {
 
 @MainActor
 final class Runner {
-    static let metrics = ["startup", "firstScreen", "open", "tabSwitch", "update", "updateWork", "updateMain", "scrollFrame"]
+    static let metrics = ["startup", "firstScreen", "open", "tabSwitch", "update", "updateWork", "updateMain", "scrollFrame",
+                          "imagesLoaded", "imagesShown"]
     /// The watchdog's limit for a busy main thread or an open.
     static let limitMs = 1000.0
     static let watchdogDefinition = "blockedMs: longest span the main thread spent between run loop activities (CFRunLoopObserver, waits excluded) while measuring the document; a document is over the limit when that or any open exceeds limitMs. A span over hangSeconds ends the run, marking the document hung"
@@ -287,7 +294,9 @@ final class Runner {
         "updateWork": "update from the end of the debounce until rendered",
         "memoryMiB": "phys_footprint after the settle and idle sample (right after the last update when idleSeconds is 0), with one preview showing the document: the bench (task_info TASK_VM_INFO) plus WebKit helpers (proc_pid_rusage)",
         "idleCPUPercent": "user+system CPU over idleSeconds, starting 1 s after the last update rendered, as percent of one core, bench and helpers",
-        "percentiles": "nearest rank over the repetitions; aggregate pools every repetition of every ok document"
+        "percentiles": "nearest rank over the repetitions; aggregate pools every repetition of every ok document",
+        "imagesLoaded": "per open of a page with images: new preview until every img element has loaded or failed (WebKit loads all of them, not only the visible ones); the app's page drops remote, absolute, data: and file: images before insertion, so they are not counted",
+        "images": "WebKit: img elements left in the page (requested), those that decoded (loaded) and the rest (failed), from the last open; served and refused count the scheme handler's image requests over the opens"
     ]
     static let otherText = """
         # Other tab
@@ -300,6 +309,8 @@ final class Runner {
     let window: NSWindow
     var preview: WebKitPreview?
     var customPreview: CustomPreview?
+    /// Custom: held here, since the view holds its provider weakly.
+    var imageProvider: BenchImageProvider?
     var timeout: Duration { .milliseconds(Int(options.timeout * 1000)) }
 
     init(options: RunOptions) {
@@ -325,6 +336,7 @@ final class Runner {
         defer { ProcessInfo.processInfo.endActivity(activity) }
         window.orderFrontRegardless()
 
+        if options.custom { imageProvider = await makeImageProvider(manifest: manifest) }
         let baseline = Double(ProcessMetrics.ownFootprint()) / 1_048_576
         // The first preview after launch: for WebKit it also starts the shared GPU and networking helpers.
         let firstOpen: Double
@@ -355,7 +367,8 @@ final class Runner {
             helperAttribution: options.custom ? nil : ProcessMetrics.attribution,
             watchdog: options.watchdog ? WatchdogSettings(limitMs: Self.limitMs, hangSeconds: options.timeout) : nil,
             definitions: (options.custom ? Self.customDefinitions : Self.definitions)
-                .merging(options.watchdog ? ["watchdog": Self.watchdogDefinition] : [:]) { $1 })
+                .merging(options.watchdog ? ["watchdog": Self.watchdogDefinition] : [:]) { $1 },
+            imageProvider: imageProviderInfo)
         let writer = try ResultWriter(options.output, header: header)
         Interruption.installHandlers()
         let watchdog = options.watchdog ? Watchdog(hangSeconds: options.timeout) : nil
@@ -396,7 +409,10 @@ final class Runner {
                 }
             }
             try writer.append(result)
-            if !quiet || result.status == "failed" || isOver { print(Self.row(result, custom: options.custom)) }
+            if !quiet || result.status == "failed" || isOver {
+                print(Self.row(result, custom: options.custom))
+                if let line = Self.imageRow(result) { print(line) }
+            }
             if quiet, (index + 1) % 500 == 0 {
                 print("  \(index + 1)/\(entries.count) documents, \(failures.count) failed, \(over.count) over 1 s, "
                       + String(format: "%.0f s", milliseconds(started, now()) / 1000))
@@ -452,7 +468,7 @@ final class Runner {
         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("markdown-bench-other.md")
     }
 
-    func open(_ document: BenchDocument, timeout: Duration? = nil) async throws -> (startup: Double, open: Double) {
+    func open(_ document: BenchDocument, timeout: Duration? = nil) async throws -> (startup: Double, open: Double, start: UInt64) {
         dispose()
         return try await interval("open") {
             let start = now()
@@ -462,7 +478,7 @@ final class Runner {
             preview.show(document)
             let timing = try await preview.nextRender(timeout: timeout ?? self.timeout)
             guard let ready = preview.readyAt else { throw BenchError.navigation("no didFinish") }
-            return (milliseconds(start, ready), milliseconds(start, timing.rendered))
+            return (milliseconds(start, ready), milliseconds(start, timing.rendered), start)
         }
     }
 
@@ -505,10 +521,24 @@ final class Runner {
                                   text: Self.otherText)
         var samples: [String: [Double]] = [:]
         do {
+            var served = 0, refused = 0
             for _ in 0..<options.repetitions {
                 let opened = try await open(document)
                 samples["startup", default: []].append(opened.startup)
                 samples["open", default: []].append(opened.open)
+                guard let preview else { throw BenchError.navigation("no preview") }
+                let images = try await interval("images") { try await preview.imagesSettled() }
+                if images.total > 0 {
+                    samples["imagesLoaded", default: []].append(round2(milliseconds(opened.start, now())))
+                    result.images = ImageResult(requested: images.total, loaded: images.loaded,
+                                                failed: images.total - images.loaded)
+                }
+                served += preview.resources.servedImages
+                refused += preview.resources.refusedImages
+            }
+            if result.images != nil {
+                result.images?.served = served
+                result.images?.refused = refused
             }
             guard let preview else { throw BenchError.navigation("no preview") }
             for _ in 0..<options.repetitions {
@@ -589,6 +619,28 @@ final class Runner {
             + pad(pair(ms["update"]), 16) + pad(ms["updateWork"].map { String(format: "%.1f", $0.p95) } ?? "-", 10)
             + pad(result.memoryMiB.map { String(format: "%.1f", $0.total) } ?? "-", 7)
             + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7) + blocked
+    }
+
+    /// A second line for documents with images.
+    static func imageRow(_ result: DocumentResult) -> String? {
+        guard let images = result.images else { return nil }
+        var parts = ["\(images.requested) requested", "\(images.loaded) loaded", "\(images.failed) failed"]
+        if let cancelled = images.cancelled, cancelled > 0 { parts.append("\(cancelled) cancelled") }
+        if let failures = images.failures, !failures.isEmpty {
+            parts.append("(" + failures.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ") + ")")
+        }
+        if let served = images.served { parts.append("served \(served), refused \(images.refused ?? 0)") }
+        var line = "    images: " + parts.joined(separator: ", ")
+        if let ms = result.ms?["imagesLoaded"] { line += "; loaded p50/p95 " + pair(ms) }
+        if let ms = result.ms?["imagesShown"] { line += ", shown " + pair(ms) }
+        if let count = images.retainedCount, let bytes = images.retainedBytes {
+            line += String(format: "; retained %d (%.1f MiB)", count, Double(bytes) / 1_048_576)
+            if let end = images.endRetainedCount, let endBytes = images.endRetainedBytes {
+                line += String(format: ", at end %d (%.1f MiB)", end, Double(endBytes) / 1_048_576)
+            }
+        }
+        if let total = images.documentRequests { line += ", \(total) requests in all" }
+        return line
     }
 
     static func summary(_ aggregate: Aggregate) -> String {

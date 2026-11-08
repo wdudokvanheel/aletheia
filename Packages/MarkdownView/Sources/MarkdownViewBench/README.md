@@ -11,6 +11,8 @@ swift run -c release MarkdownViewBench run --set curated            # WebKit, 20
 swift run -c release MarkdownViewBench run --set curated --renderer custom
 swift run -c release MarkdownViewBench run --set generated --renderer custom --filter 100k
 swift run -c release MarkdownViewBench run --set smoke --renderer custom --reps 1   # crash and hang check
+swift run -c release MarkdownViewBench run --set generated --renderer custom --filter images --reps 5
+swift run -c release MarkdownViewBench run --verify-images                        # image provider self-check
 swift run -c release MarkdownViewBench run --set own --limit 200 --reps 3 --idle-seconds 0
 swift run -c release MarkdownViewBench trace --renderer custom --trace all --reps 5   # typing traces
 swift run -c release MarkdownViewBench trace --renderer webkit --trace table-cell-1m --interval 50
@@ -33,6 +35,8 @@ Default paths are relative to the repository root:
 | `run --idle-seconds S` | `3` (`0` for smoke); `0` skips the settles, the idle sample and per-view memory |
 | `run --timeout S` | `300` (`30` for smoke) per render, and the watchdog's hang limit |
 | `run --onscreen` | off; shows the window and keeps WebKit's occlusion detection, like the app |
+| `run --image-latency MS` | `0`; custom only, delays each remote image to simulate the network (also for `trace`) |
+| `run --verify-images` | off; only runs the image provider self-check against `--manifest` (default the generated manifest) and exits 1 on a mismatch |
 | `trace --manifest PATH` | `build/markdown-corpus/generated/generated-manifest.json` (its `traces[]`) |
 | `trace --renderer` | `webkit`; `custom` |
 | `trace --trace` | `all`; or names separated by commas |
@@ -82,6 +86,37 @@ order: `document`, `source` (as written), `placement` (`block` or `inline`), `ki
 expects `blocked` because local images are raster only; HTTP, `data:`, `file:`, absolute
 paths, traversal and the escaping link are `blocked`.
 
+### Image provider (custom mode)
+
+The library never reads files itself, so custom mode gives every view `BenchImageProvider`
+(`BenchImageProvider.swift`), a small bench-only provider written to the plan's Phase 7 rules
+rather than importing the app's `PreviewImageLoader`:
+
+- **Local:** a source resolves against a per-request document base, as the WebKit page does,
+  so `..` out of the document's folder and absolute paths are `blocked`. The file is then
+  canonicalized (symlinks resolved) and must still be inside the canonical folder (`blocked`
+  otherwise, also for a dangling escaping link), exist as a regular file (`missing`) and have a
+  raster extension, PNG, JPEG, GIF, WebP or AVIF (`blocked`: local SVG).
+- **Remote:** HTTPS only, without credentials; `http:`, `data:`, `file:` and every other scheme
+  are `blocked`. `https://img.example.invalid/...` is served by `RemoteFixtures`, with no
+  network: `/fixtures/NAME` is `images/files/NAME`, and the other manifest references
+  (`/badge/...`, `/block/...`) are synthesized once at run start at the manifest's `width` and
+  `height`: PNG, JPEG and GIF by ImageIO, SVG and extensionless badges as a hand-written SVG,
+  and WebP as PNG bytes (ImageIO has no WebP encoder; the decoder sniffs the bytes). Any other
+  host is a `network` failure. `--image-latency MS` sleeps before serving each remote image
+  (cancellable), so loads overlap as they would on a network; local files have no delay.
+  Remote SVG is rasterized with AppKit's renderer at the display size, as the app does.
+- **Decoding** runs off the main thread: ImageIO reads the header, refuses over 50 M pixels
+  (`too-large`) or an image that does not decode completely (`corrupt`), and creates a thumbnail
+  at most the display box times the scale. Animated GIF and WebP keep their `CGImageSource` and
+  give the view `frameDelays` and a frame function. There is no decoded-image cache (the app has
+  a 64 MiB one), so every request decodes; remote bytes are in memory, like a warm disk cache.
+
+`run --verify-images` loads every reference in `images.references` (762, one per document and
+source) and checks the outcome against `expected`, the natural size of each `ok` image against
+`width` and `height`, the frame count of the animated files, and that a request for half the
+natural width at scale 1 comes back downsampled.
+
 Reruns are byte-identical on the same macOS (checked with `diff -r` on two runs); none of
 the encoders embeds a timestamp. ImageIO output can change between macOS versions.
 
@@ -113,6 +148,17 @@ pages, and a transparent window, or any window while the display sleeps, counts 
 - **rendered:** `commitPreview` has returned (the last point the app can observe), then one
   more `callAsyncJavaScript` forces style and layout and resolves after the next
   `requestAnimationFrame` plus a zero timeout. Images are not awaited.
+- **Images:** the bench's scheme handler is the app's, so local raster images inside the
+  document's canonical folder are served exactly as in the app, and everything else is refused.
+  **WebKit shows no remote images, by the owner's decision:** the app's page removes remote,
+  absolute, `data:` and `file:` images before insertion and its CSP allows only
+  `aletheia-preview://document`, so the badge and remote-block documents show no images there
+  while custom mode loads them from the fixtures. WebKit loads every image of the page, not
+  only the visible ones, and has no pixel cap (it decodes `huge-10000.png`).
+  **imagesLoaded:** after each open, new preview until every `img` element has loaded or failed.
+  `images`: `requested` is the `img` elements left in the page (block and inline references of
+  one file count twice), `loaded` those that decoded; `served` and `refused` count the scheme
+  handler's image requests over the opens.
 - **startup:** new preview (web view, configuration, scheme handler, `index.html`) to `didFinish`.
 - **open:** new preview to the document rendered; includes startup. Each repetition uses a new preview.
 - **tabSwitch:** a warm preview showing a small other document, `show(document)` to rendered.
@@ -164,6 +210,22 @@ app's 200 ms debounce to edits.
   right after the scroll passes. `view` is noisy for small documents, since the new view
   reuses pages freed earlier and can come out negative; `viewHeap` is the steadier measure.
 - **idleCPUPercent:** the bench's CPU over `idleSeconds`, from 1 s after the scroll passes.
+- **Images:** each view gets the bench's image provider, with the document's folder as the base
+  for relative sources. After every render that asked for images (opens, tab switches, updates
+  and the scroll passes) the bench waits until no request is in flight and neither the provider
+  nor the view did anything for 150 ms, then drops the relayout renders, so no measurement takes
+  an image relayout for its own render. That wait is not part of any other metric.
+  **imagesLoaded:** per open, new view until the last image load or failure reached the view.
+  The view asks only for the visible images and those within a screen below and above (at most
+  8 at a time, by source, so a block and an inline reference to one file are one request), and
+  may ask again at a sharper size once the natural size is known; all of those count.
+  **imagesShown:** per open with a loaded image, new view until its last complete draw by then:
+  the open's own render when every load finished before it, else the last relayout for image
+  sizes. `images` per document: `requested`, `loaded`, `failed`, `cancelled` and `failures` by
+  reason for the last open; `retainedCount` and `retainedBytes` (the view's
+  `retainedImageCount`/`retainedImageBytes`) once that open's images settled, `endRetained*` after
+  the scroll passes and the idle sample, and `documentRequests` over the whole measurement.
+  `memoryMiB` includes the decoded images the view keeps (16 MiB cap per view).
 
 ### Smoke set, watchdog and crashes
 
@@ -189,7 +251,9 @@ applies the edits to an `NSMutableString` as an editor would and hands the previ
 
 - **custom:** `setSource(text)` at once, no debounce; the view runs one update at a time,
   coalesces sources set meanwhile and pauses after slow updates (`UpdatePolicy.standard`,
-  recorded in the header). The scroll target comes from the snapshot's block tops,
+  recorded in the header). The view has the bench's image provider (relative sources resolve in
+  `traces/`; the current bases have no images), and the open waits for any images to settle
+  before the scroll. The scroll target comes from the snapshot's block tops,
   interpolated within the block, so a table row deep in one block is approximate.
 - **webkit:** the document text changes, then `contentChanged()`, with the app's 200 ms
   debounce. `workMs` starts after the debounce, as `updateWork` does in `run`. The scroll is
@@ -246,7 +310,8 @@ became optional.
            machine {model, cpu, cores, memoryGiB}, os {version, build}, build, git? {commit, dirty},
            webkit?, window {width, height, backingScale, screenRefreshHz, displayAsleep, placement,
            occluded, occlusionDetection?, scrollerStyle?}, firstPreviewMs, baselineMemoryMiB,
-           helperAttribution?, watchdog? {limitMs, hangSeconds}, definitions },
+           helperAttribution?, watchdog? {limitMs, hangSeconds}, definitions,
+           imageProvider? {provider, latencyMs, remoteFixtures} },
   "documents": [ { path, name?, bytes?, status: ok|failed|skipped|running|crashed|hung, error?,
                    edit? {offset, kind},
                    ms? {startup|firstScreen|open|tabSwitch|update|updateWork|updateMain|scrollFrame:
@@ -256,6 +321,8 @@ became optional.
                    library? {firstScreen|open|tabSwitch|update: [{blocks, complete, parse, layout,
                              install, draw}]},
                    scroll? {passes, frames, documentHeight, viewportHeight, over144Hz, over60Hz},
+                   images? {requested, loaded, failed, cancelled?, failures?, retainedCount?, retainedBytes?,
+                            endRetainedCount?, endRetainedBytes?, documentRequests?, served?, refused?},
                    blockedMs? } ],
   "aggregate": { documents, ok, failed, skipped, elapsedSeconds,
                  ms {metric: {n, p50, p95, max, worstP95, worstDocument}},
@@ -266,6 +333,10 @@ became optional.
   "interrupted"?: {document, index, reason: crashed|hung} }
 ```
 
+The image fields (`run.imageProvider`, `documents[].images`, and `imagesLoaded` and
+`imagesShown` under `ms` and the aggregate) are optional additions to version 2: documents
+without images and older readers are unaffected.
+
 `firstPreviewMs` is a warm-up open of a small document, the first preview or view after
 launch. Files the app would refuse (not UTF-8, control characters) are `skipped`. `failed`
 documents keep the samples taken before the failure.
@@ -273,7 +344,7 @@ documents keep the samples taken before the failure.
 ## Trace schema (`aletheia-markdown-bench/3`)
 
 Version 3 is the `trace` file; `run` still writes version 2, unchanged. The file is written
-once at the end. `run` is the version 2 header with `set: "traces"`, `documents` the number
+once at the end. `run` is the version 2 header (with `imageProvider` for custom) with `set: "traces"`, `documents` the number
 of traces, `filter` the `--trace` names, `debounceMs` 0 for custom, and the trace definitions.
 
 ```

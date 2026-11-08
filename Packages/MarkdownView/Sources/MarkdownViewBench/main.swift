@@ -8,8 +8,11 @@ let usage = """
       MarkdownViewBench run [--set curated|own|smoke|generated] [--renderer webkit|custom] [--reps N]
                             [--limit N] [--filter TEXT] [--skip N] [--manifest PATH] [--out PATH]
                             [--preview-resources DIR] [--idle-seconds S] [--timeout S] [--onscreen]
+                            [--image-latency MS]
+      MarkdownViewBench run --verify-images [--manifest PATH] [--image-latency MS]
       MarkdownViewBench trace [--renderer webkit|custom] [--trace NAME[,NAME...]|all] [--reps N] [--interval MS]
                               [--manifest PATH] [--out PATH] [--preview-resources DIR] [--timeout S]
+                              [--image-latency MS]
 
     Paths default to the repository that contains the working directory:
       generated files   build/markdown-corpus/generated/
@@ -19,6 +22,8 @@ let usage = """
       trace manifest    build/markdown-corpus/generated/generated-manifest.json
       preview resources Sources/Aletheia/Resources/Preview (WebKit only)
     The smoke set defaults to --idle-seconds 0 and --timeout 30 and runs the watchdog.
+    Custom mode loads images through the bench's provider; --image-latency delays each remote image.
+    run --verify-images checks the provider against the generated manifest's expected outcomes and exits.
     trace replays the generated typing traces, 5 repetitions; --interval 0 (the default) applies each
     edit once the previous one rendered, a positive interval fires edits on that schedule.
     Run in Release: swift run -c release MarkdownViewBench ...
@@ -86,8 +91,18 @@ case "run":
     do {
         let arguments = try Arguments(rest, options: ["--set", "--renderer", "--reps", "--limit", "--filter", "--skip",
                                                       "--manifest", "--out", "--preview-resources", "--idle-seconds",
-                                                      "--timeout"],
-                                      flags: ["--onscreen"])
+                                                      "--timeout", "--image-latency"],
+                                      flags: ["--onscreen", "--verify-images"])
+        if arguments.flag("--verify-images") {
+            let manifest = arguments.path("--manifest") ?? Paths.corpus.appendingPathComponent("generated/generated-manifest.json")
+            let latency = max(0, try arguments.number("--image-latency", default: 0.0))
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do { exit(try await ImageVerification.run(manifest: manifest, latencyMs: latency) ? 0 : 1) } catch { fail(error) }
+            }
+            app.run()
+        }
         let set = arguments.string("--set") ?? "curated"
         let renderer = arguments.string("--renderer") ?? "webkit"
         guard ["curated", "own", "smoke", "generated"].contains(set) else { throw BenchError.unavailable("unknown set \(set)") }
@@ -105,7 +120,8 @@ case "run":
             idleSeconds: try arguments.number("--idle-seconds", default: smoke ? 0 : 3.0),
             timeout: try arguments.number("--timeout", default: smoke ? 30 : 300.0),
             onscreen: arguments.flag("--onscreen"),
-            watchdog: smoke)
+            watchdog: smoke,
+            imageLatency: max(0, try arguments.number("--image-latency", default: 0.0)))
         guard renderer == "custom"
                 || FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
             throw BenchError.unavailable("no index.html in \(options.previewResources.path); pass --preview-resources")
@@ -126,7 +142,7 @@ case "trace":
     let trace: TraceOptions
     do {
         let arguments = try Arguments(rest, options: ["--renderer", "--trace", "--reps", "--interval", "--manifest", "--out",
-                                                      "--preview-resources", "--timeout"])
+                                                      "--preview-resources", "--timeout", "--image-latency"])
         let renderer = arguments.string("--renderer") ?? "webkit"
         guard ["webkit", "custom"].contains(renderer) else { throw BenchError.unavailable("unknown renderer \(renderer)") }
         let interval = max(0, try arguments.number("--interval", default: 0.0))
@@ -141,7 +157,8 @@ case "trace":
             limit: nil, filter: nil, skip: 0,
             previewResources: arguments.path("--preview-resources")
                 ?? Paths.repository.appendingPathComponent("Sources/Aletheia/Resources/Preview"),
-            idleSeconds: 0, timeout: try arguments.number("--timeout", default: 60.0), onscreen: false, watchdog: false)
+            idleSeconds: 0, timeout: try arguments.number("--timeout", default: 60.0), onscreen: false, watchdog: false,
+            imageLatency: max(0, try arguments.number("--image-latency", default: 0.0)))
         guard renderer == "custom"
                 || FileManager.default.fileExists(atPath: options.previewResources.appendingPathComponent("index.html").path) else {
             throw BenchError.unavailable("no index.html in \(options.previewResources.path); pass --preview-resources")

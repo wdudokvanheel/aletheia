@@ -31,6 +31,9 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
     var directory: URL?
     var token = UUID().uuidString
     var base: String { "aletheia-preview://document/\(token)/" }
+    /// Bench: document image requests the handler served and refused.
+    private(set) var servedImages = 0
+    private(set) var refusedImages = 0
 
     init(bundleDirectory: URL) {
         self.bundleDirectory = bundleDirectory
@@ -60,6 +63,7 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
             mime = file.flatMap(PreviewFilePolicy.imageType)
         }
         guard let file, let mime else {
+            if url.host != "bundle" { refusedImages += 1 } // Bench
             task.didFailWithError(URLError(.noPermissionsToReadFile)); return
         }
         let id = ObjectIdentifier(task)
@@ -74,6 +78,7 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
             requests[id] = nil
             switch result {
             case .success(let data):
+                if url.host != "bundle" { servedImages += 1 } // Bench
                 task.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count,
                     textEncodingName: mime.hasPrefix("text/") ? "utf-8" : nil))
                 task.didReceive(data)
@@ -355,6 +360,22 @@ final class WebKitPreview: NSObject, WKNavigationDelegate {
         let timing = RenderTiming(start: start, committed: committed, rendered: now(), visibility: state, revision: revision)
         onRendered?(timing)
         finish(.success(timing))
+    }
+
+    /// Waits until every image in the page has loaded or failed (WebKit loads them all, not only
+    /// the visible ones), and returns how many there are and how many decoded.
+    func imagesSettled() async throws -> (total: Int, loaded: Int) {
+        let result = try await webView.callAsyncJavaScript("""
+            const images = [...document.images];
+            await Promise.race([
+                Promise.all(images.map(image => image.complete ? null : new Promise(resolve => {
+                    image.addEventListener('load', resolve, { once: true });
+                    image.addEventListener('error', resolve, { once: true });
+                }))),
+                new Promise(resolve => setTimeout(resolve, 30000))]);
+            return [images.length, images.filter(image => image.complete && image.naturalWidth > 0).length];
+            """, in: nil, contentWorld: .page) as? [Int]
+        return (result?.first ?? 0, result?.last ?? 0)
     }
 
     /// Scrolls the page so `fraction` of its height is 30% down the viewport; returns the scroll offset.
