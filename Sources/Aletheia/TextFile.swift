@@ -34,7 +34,7 @@ struct TextFile: Sendable {
         var errorDescription: String? {
             switch self {
             case .notText: return "This file is not supported UTF-8 text. Binary files and other encodings cannot be edited."
-            case .notRegular: return "Only existing regular text files can be opened."
+            case .notRegular: return "Only existing regular files can be opened."
             case .changed: return "The file changed outside Aletheia, or its path now points to another file. Your edits have not been saved."
             }
         }

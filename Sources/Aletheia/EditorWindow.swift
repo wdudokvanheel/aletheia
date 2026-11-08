@@ -37,7 +37,7 @@ private final class EditorHostView: NSView {
 }
 
 @MainActor
-final class EditorWindow: NSWindowController, NSWindowDelegate {
+final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private let tree = FolderTree()
     private let tabs = NSStackView()
     private let tabScroll = NSScrollView()
@@ -66,6 +66,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private var restoring = false
     private var closingSession: WindowSession?
     var projectURL: URL? { rootURL }
+    var canEditSelected: Bool { selected?.isEditable == true && !closing && !closed && !restoring }
     var onActivate: (() -> Void)?
     var onClose: ((WindowSession) -> Void)?
 
@@ -100,9 +101,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                 } else { skipped.append(path) }
             }
             // Read in snapshot order and install together, so completion timing cannot reorder tabs.
-            var files: [TextFile] = []
+            var files: [DocumentFile] = []
             for path in state.filePaths {
-                do { files.append(try TextFile.read(URL(fileURLWithPath: path))) }
+                do { files.append(try DocumentFile.read(URL(fileURLWithPath: path))) }
                 catch { skipped.append("\(path): \(error.localizedDescription)") }
             }
             let restoredRoot = root
@@ -203,7 +204,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             self?.preview?.setSearch(query: query, sourceRange: range)
         }
         findBar.onClose = { [weak self] in
-            guard let self, let document = self.selected else { return }
+            guard let self, let document = self.selected, document.isEditable else { return }
             self.window?.makeFirstResponder(document.isMarkdown && document.markdownMode == .preview
                 ? self.preview?.webView : document.editor)
         }
@@ -252,7 +253,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         }
         let inheritedMarkdownMode = lastMarkdownMode
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try TextFile.read(url) }
+            let result = Result { try DocumentFile.read(url) }
             DispatchQueue.main.async {
                 guard !self.closed, !self.closing else { return }
                 switch result {
@@ -278,6 +279,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         document.onChange = { [weak self] in self?.refreshTabs(); self?.updateTitle() }
         document.onContentChange = { [weak self, weak document] in
             guard let self, let document, self.selected === document else { return }
+            if !document.isEditable { self.layoutEditor(); return }
             self.findBar.contentChanged()
             if document.isMarkdown, document.markdownMode != .editor { self.preview?.contentChanged() }
         }
@@ -286,9 +288,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private func select(_ document: EditorDocument?) {
         selected?.setSourceVisible(false)
         selected?.setHighlightingActive(false)
-        selected?.scroll.removeFromSuperview()
+        selected?.detachContent()
         selected = document
-        findBar.bind(document)
+        findBar.bind(document?.isEditable == true ? document : nil)
+        if document?.isEditable != true { findBar.closeSearch(nil) }
         if let document, document.isMarkdown { lastMarkdownMode = document.markdownMode }
         layoutEditor()
         refreshTabs()
@@ -312,11 +315,17 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         markdownSplit.removeFromSuperview()
         NSLayoutConstraint.deactivate(contentConstraints)
         contentConstraints.removeAll()
-        selected?.scroll.removeFromSuperview()
+        selected?.detachContent()
         preview?.webView.removeFromSuperview()
         placeholder.isHidden = selected != nil
         modeControl.isHidden = selected?.isMarkdown != true
         guard let document = selected else { preview?.show(nil); return }
+        if !document.isEditable {
+            preview?.show(nil)
+            installContent(document.contentView)
+            window?.makeFirstResponder(document.contentView)
+            return
+        }
         let mode = document.isMarkdown ? document.markdownMode : .editor
         modeControl.selectedSegment = MarkdownMode.allCases.firstIndex(of: mode)!
         guard !previewSuspended else { return }
@@ -336,6 +345,20 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
             preview!.webView.isHidden = false
             content = markdownSplit
         }
+        installContent(content)
+        if mode == .split {
+            markdownSplit.addArrangedSubview(document.scroll)
+            markdownSplit.addArrangedSubview(preview!.webView)
+            markdownSplit.applyPreferredSize()
+        }
+        document.setHighlightingActive(mode != .preview)
+        window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
+        editorHost.layoutSubtreeIfNeeded()
+        document.setSourceVisible(mode != .preview)
+        findBar.synchronize()
+    }
+
+    private func installContent(_ content: NSView) {
         content.isHidden = false
         content.translatesAutoresizingMaskIntoConstraints = false
         editorHost.addSubview(content)
@@ -347,16 +370,6 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         ]
         NSLayoutConstraint.activate(contentConstraints)
         editorHost.layoutSubtreeIfNeeded()
-        if mode == .split {
-            markdownSplit.addArrangedSubview(document.scroll)
-            markdownSplit.addArrangedSubview(preview!.webView)
-            markdownSplit.applyPreferredSize()
-        }
-        document.setHighlightingActive(mode != .preview)
-        window?.makeFirstResponder(mode == .preview ? preview!.webView : document.editor)
-        editorHost.layoutSubtreeIfNeeded()
-        document.setSourceVisible(mode != .preview)
-        findBar.synchronize()
     }
 
     private func refreshTabs() {
@@ -454,8 +467,21 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         window?.isDocumentEdited = documents.contains(where: \.isDirty)
     }
 
-    @objc func showFind(_ sender: Any?) { findBar.show(replacing: false) }
-    @objc func showReplace(_ sender: Any?) { findBar.show(replacing: true) }
+    @objc func showFind(_ sender: Any?) {
+        guard selected?.isEditable == true else { return }
+        findBar.show(replacing: false)
+    }
+    @objc func showReplace(_ sender: Any?) {
+        guard selected?.isEditable == true else { return }
+        findBar.show(replacing: true)
+    }
+
+    func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(showFind(_:)) || item.action == #selector(showReplace(_:)) {
+            return canEditSelected
+        }
+        return true
+    }
 
     @objc private func selectTab(_ sender: NSButton) { select(documents[sender.tag]) }
     @objc private func closeTabButton(_ sender: NSButton) { close(documents[sender.tag]) }
@@ -500,7 +526,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func save(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
-        guard !document.busy else { completion(false); return }
+        guard document.isEditable, !document.busy else { completion(false); return }
         guard document.isDirty else { completion(true); return }
         document.editor.breakUndoCoalescing()
         document.busy = true
@@ -557,7 +583,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
                       !document.busy else { self.diskCheckPending = true; break }
                 let baseline = document.file
                 let result = await Task.detached(priority: .utility) {
-                    Result { try TextFile.read(baseline.requestedURL) }
+                    Result { try baseline.reread() }
                 }.value
                 guard !self.closed, !self.closing, self.window?.attachedSheet == nil, !document.busy,
                       self.documents.contains(where: { $0 === document }),
@@ -600,9 +626,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     private func resolveConflict(_ document: EditorDocument, completion: @escaping @MainActor (Bool) -> Void) {
         document.busy = true
         document.editor.isEditable = false
-        let url = document.file.requestedURL
+        let baseline = document.file
         Task {
-            let result = await Task.detached(priority: .userInitiated) { Result { try TextFile.read(url) } }.value
+            let result = await Task.detached(priority: .userInitiated) { Result { try baseline.reread() } }.value
             document.busy = false
             document.editor.isEditable = !closing
             switch result {
@@ -612,7 +638,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func offerConflict(_ document: EditorDocument, current: TextFile,
+    private func offerConflict(_ document: EditorDocument, current: DocumentFile,
                                completion: @escaping @MainActor (Bool) -> Void) {
         document.busy = true
         document.editor.isEditable = false
@@ -640,7 +666,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
         guard !closing, !restoring, !documents.contains(where: \.busy) else { NSSound.beep(); completion(false); return }
         closing = true
         // Freeze all buffers during a multi-document decision, so earlier approvals stay valid.
-        documents.forEach { $0.editor.isEditable = false }
+        documents.filter(\.isEditable).forEach { $0.editor.isEditable = false }
         confirmNext(documents, index: 0) { allowed in
             if !allowed { self.cancelPreparedClose() }
             completion(allowed)
@@ -650,7 +676,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate {
     func cancelPreparedClose() {
         closing = false
         checkDiskChanges()
-        documents.forEach { $0.editor.isEditable = !$0.busy }
+        documents.filter(\.isEditable).forEach { $0.editor.isEditable = !$0.busy }
         refreshTabs()
     }
 

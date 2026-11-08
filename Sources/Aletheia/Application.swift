@@ -13,7 +13,7 @@ struct Aletheia {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private(set) var windows: [EditorWindow] = []
     private var terminating = false
     private var launched = false
@@ -94,6 +94,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func save(_ sender: Any?) { if !terminating && !restoring { current?.saveSelected(sender) } }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(save(_:)) {
+            return !terminating && !restoring && current?.canEditSelected == true
+        }
+        return true
+    }
     @objc private func closeTab(_ sender: Any?) { if !terminating && !restoring { current?.closeSelectedTab(sender) } }
     @objc private func closeWindow(_ sender: Any?) { if !terminating && !restoring { current?.window?.performClose(sender) } }
 

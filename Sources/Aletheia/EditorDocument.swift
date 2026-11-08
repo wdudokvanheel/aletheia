@@ -2,15 +2,30 @@ import AppKit
 
 @MainActor
 final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
-    var file: TextFile { didSet { updateDirty() } }
+    var file: DocumentFile { didSet { updateDirty() } }
     private let undo = UndoManager()
-    let editor = NSTextView()
-    let scroll = NSScrollView()
+    lazy var editor = NSTextView()
+    lazy var scroll = NSScrollView()
+    private(set) var nativePreview: NativePreview?
+    var isEditable: Bool { file.isText }
+    var contentView: NSView {
+        if case .preview(let file) = file {
+            if nativePreview == nil { nativePreview = NativePreview(file: file) }
+            return nativePreview!.view
+        }
+        return scroll
+    }
+
+    func detachContent() {
+        if isEditable { scroll.removeFromSuperview() }
+        else { nativePreview?.view.removeFromSuperview() }
+    }
     private var pendingSourcePosition: CGPoint?
     private var sourceVisible = false
     var previewPosition: CGPoint = .zero
     var scrollPosition: FileScrollPosition {
-        FileScrollPosition(source: pendingSourcePosition ?? scroll.contentView.bounds.origin,
+        guard isEditable else { return FileScrollPosition() }
+        return FileScrollPosition(source: pendingSourcePosition ?? scroll.contentView.bounds.origin,
                            preview: previewPosition)
     }
 
@@ -25,6 +40,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     func setSourceVisible(_ visible: Bool) {
+        guard isEditable else { return }
         if !visible, sourceVisible, pendingSourcePosition == nil {
             pendingSourcePosition = Self.validPosition(scroll.contentView.bounds.origin)
         }
@@ -49,6 +65,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     func revealSearchMatch(_ range: NSRange) {
+        guard isEditable else { return }
         pendingSourcePosition = nil
         editor.setSelectedRange(range)
         if sourceVisible { editor.scrollRangeToVisible(range) }
@@ -57,7 +74,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     var diskUnavailable = false { didSet { updateDirty() } }
     var busy = false
     var markdownMode = MarkdownMode.split
-    var isMarkdown: Bool { file.url.pathExtension.lowercased() == "md" }
+    var isMarkdown: Bool { isEditable && file.url.pathExtension.lowercased() == "md" }
     var onContentChange: (() -> Void)?
     var onChange: (() -> Void)?
     private var convertingNewlines = false
@@ -72,6 +89,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     deinit { highlightingTask?.cancel() }
 
     func setHighlightingActive(_ active: Bool) {
+        guard isEditable else { return }
         guard active != highlightingActive else { return }
         highlightingActive = active
         if active { scheduleHighlighting() }
@@ -141,9 +159,12 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
 
     private(set) var isDirty = false
 
-    init(file: TextFile) {
+    convenience init(file: TextFile) { self.init(file: .text(file)) }
+
+    init(file: DocumentFile) {
         self.file = file
         super.init()
+        guard file.isText else { return }
         editor.isRichText = false
         editor.importsGraphics = false
         editor.allowsUndo = true
@@ -176,6 +197,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     func applyTheme() {
+        guard isEditable else { nativePreview?.applyTheme(); return }
         let palette = AppSettings.shared.palette
         editor.backgroundColor = palette.background
         editor.textColor = palette.foreground
@@ -198,7 +220,7 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
     }
 
     private func updateDirty() {
-        let dirty = diskUnavailable || !editor.string.utf8.elementsEqual(file.text.utf8)
+        let dirty = isEditable && (diskUnavailable || !editor.string.utf8.elementsEqual(file.text.utf8))
         guard dirty != isDirty else { return }
         isDirty = dirty
         onChange?()
@@ -217,7 +239,15 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         return false
     }
 
-    func reload(_ file: TextFile) {
+    func reload(_ file: DocumentFile) {
+        guard isEditable, file.isText else {
+            nativePreview?.view.removeFromSuperview()
+            nativePreview = nil
+            self.file = file
+            diskUnavailable = false
+            onContentChange?()
+            return
+        }
         let selection = editor.selectedRange()
         let position = scrollPosition
         diskUnavailable = false

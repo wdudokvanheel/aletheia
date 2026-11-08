@@ -97,7 +97,7 @@ final class TextFileTests: XCTestCase {
         document.editor.insertText("local ", replacementRange: NSRange(location: 0, length: 0))
         document.editor.breakUndoCoalescing()
         try Data("external".utf8).write(to: url, options: .atomic)
-        document.file = try TextFile.read(url)
+        document.file = .text(try TextFile.read(url))
         XCTAssertEqual(document.editor.string, "local original")
         XCTAssertTrue(document.isDirty)
         XCTAssertTrue(document.editor.undoManager!.canUndo)
