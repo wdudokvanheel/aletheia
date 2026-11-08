@@ -207,15 +207,37 @@ extension MarkdownSnapshot {
     }
 
     /// Where the text at `position` sits: its baseline origin in view
-    /// coordinates and its role, for showing a definition over it.
-    func baselineOrigin(of position: TextPosition) -> (point: CGPoint, role: TextRole)? {
+    /// coordinates and its style, for showing a definition over it.
+    func baselineOrigin(of position: TextPosition) -> (point: CGPoint, style: StyleRun)? {
         guard position.block < layouts.count else { return nil }
         let layout = layouts[position.block]
         guard !layout.lines.isEmpty else { return nil }
         let line = layout.lines[layout.lineIndex(containing: position.offset, upstream: false)]
         let x = CTLineGetOffsetForStringIndex(line.line, position.offset, nil)
         return (CGPoint(x: columnX + layout.textInset + x, y: blockTops[position.block] + line.baseline),
-                layout.role(at: position.offset))
+                layout.styleRun(at: position.offset))
+    }
+
+    // MARK: Links
+
+    /// The destination of the link whose text is under `point`, in view
+    /// coordinates: within a line box, between the link's glyph edges.
+    func linkDestination(at point: CGPoint) -> String? {
+        let index = firstBlock(endingBelow: point.y)
+        guard index < layouts.count, blockTops[index] <= point.y else { return nil }
+        let layout = layouts[index]
+        let links = document.blocks[index].links
+        guard !links.isEmpty else { return nil }
+        let y = point.y - blockTops[index]
+        let lineIndex = layout.firstLine(endingBelow: y)
+        guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
+        let x = point.x - columnX - layout.textInset
+        for decoration in layout.lines[lineIndex].decorations where decoration.kind == .underline {
+            if decoration.rect.minX <= x, x < decoration.rect.maxX, links.indices.contains(Int(decoration.tag)) {
+                return links[Int(decoration.tag)].destination
+            }
+        }
+        return nil
     }
 
     // MARK: Copy

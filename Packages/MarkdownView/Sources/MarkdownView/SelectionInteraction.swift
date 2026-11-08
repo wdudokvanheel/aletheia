@@ -6,25 +6,61 @@ import AppKit
 extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations, @preconcurrency NSServicesMenuRequestor {
     // MARK: Mouse
 
+    /// How far the pointer may move during a click on a link before the
+    /// click becomes a drag that selects.
+    static let linkDragDistance: CGFloat = 4
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         dragLocation = event.locationInWindow
-        beginSelection(at: convert(event.locationInWindow, from: nil), clickCount: event.clickCount,
-                       extending: event.modifierFlags.contains(.shift))
+        let point = convert(event.locationInWindow, from: nil)
+        let extending = event.modifierFlags.contains(.shift)
+        // Only a plain single click opens; double and triple clicks select.
+        pressedLink = event.clickCount == 1 && !extending
+            ? snapshot.linkDestination(at: point).map { ($0, point) } : nil
+        beginSelection(at: point, clickCount: event.clickCount, extending: extending)
     }
 
     override func mouseDragged(with event: NSEvent) {
         dragLocation = event.locationInWindow
-        extendSelection(to: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        if let pressedLink {
+            guard hypot(point.x - pressedLink.point.x, point.y - pressedLink.point.y) >= Self.linkDragDistance else { return }
+            self.pressedLink = nil
+        }
+        extendSelection(to: point)
         updateAutoscroll()
     }
 
     override func mouseUp(with event: NSEvent) {
         stopAutoscroll()
+        guard let pressedLink else { return }
+        self.pressedLink = nil
+        onOpenLink?(pressedLink.destination)
     }
 
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .iBeam)
+    // MARK: Cursor
+
+    /// One tracking area following the visible rect: the cursor is a
+    /// pointing hand over link text and an I-beam elsewhere, decided by a
+    /// binary search per mouse move.
+    func addCursorTracking() {
+        guard trackingAreas.isEmpty else { return }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateCursor(for: event)
+    }
+
+    private func updateCursor(for event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        (snapshot.linkDestination(at: point) != nil ? NSCursor.pointingHand : NSCursor.iBeam).set()
     }
 
     /// Starts a selection at `point`: a click selects nothing, a double-click
@@ -133,6 +169,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
+        addCursorTracking()
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(keyWindowChanged(_:)), name: name, object: window)
         }
@@ -162,9 +199,9 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
 
     @objc func lookUpSelection(_ sender: Any?) {
         guard let selection, let origin = snapshot.baselineOrigin(of: selection.lowerBound) else { return }
-        let font = snapshot.typography.fonts[Int(origin.role.rawValue)] as NSFont
-        let string = NSAttributedString(string: snapshot.text(in: selection),
-                                        attributes: [.font: font, .foregroundColor: palette.color(for: origin.role)])
+        let font = snapshot.typography.font(origin.style.role, origin.style.styles) as NSFont
+        let color = palette.color(for: origin.style.role, styles: origin.style.styles)
+        let string = NSAttributedString(string: snapshot.text(in: selection), attributes: [.font: font, .foregroundColor: color])
         showDefinition(for: string, at: origin.point)
     }
 

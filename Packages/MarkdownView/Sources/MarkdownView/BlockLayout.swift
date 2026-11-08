@@ -10,14 +10,34 @@ struct LineLayout {
     let top: CGFloat
     let height: CGFloat
     let baseline: CGFloat
-    /// The single role of the whole line, or `nil` when roles are mixed and
+    /// The `ColorIndex` of the whole line, or `nil` when colors are mixed and
     /// runs are colored one by one.
-    let role: TextRole?
+    let color: UInt8?
     /// Whether the line ends with a `\n` from a hard break or block separator.
     let endsWithNewline: Bool
+    /// Inline code backgrounds, link underlines, and strikethroughs, in run order.
+    let decorations: [Decoration]
 
     /// The last caret offset on the line: before its newline, if it has one.
     var caretEnd: Int { endsWithNewline ? range.upperBound - 1 : range.upperBound }
+}
+
+/// A rectangle drawn with a line's text. x is relative to the text's left
+/// edge and y to the block's top, like the line itself.
+struct Decoration {
+    enum Kind: UInt8 {
+        case codeBackground, underline, strikethrough
+    }
+
+    static let styles: InlineStyle = [.code, .link, .strikethrough]
+
+    let kind: Kind
+    var rect: CGRect
+    /// The `ColorIndex` of an underline or strikethrough.
+    let color: UInt8
+    /// For an underline, the link's index in the block's links; for a code
+    /// background, its style run's index.
+    let tag: Int32
 }
 
 /// A block laid out at one column width with Core Text. Immutable, so it can
@@ -108,22 +128,29 @@ public final class BlockLayout: @unchecked Sendable {
             var leading: CGFloat = 0
             CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
 
-            // Roles in this line, from the style runs (which are in order).
+            // Roles and styles in this line, from the style runs (which are in order).
             let runs = block.styleRuns
             while runIndex < runs.count - 1, runs[runIndex].range.upperBound <= range.lowerBound { runIndex += 1 }
-            var role: TextRole? = runs.isEmpty ? .body : runs[runIndex].role
-            var lineHeight = typography.lineHeight(role ?? .body)
+            let first = runs.isEmpty ? StyleRun(range: 0..<length, role: .body) : runs[runIndex]
+            var color: UInt8? = ColorIndex.of(first.role, first.styles)
+            var lineHeight = typography.lineHeight(first.role)
+            var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
             var index = runIndex + 1
             while index < runs.count, runs[index].range.lowerBound < range.upperBound {
-                if runs[index].role != role { role = nil }
-                lineHeight = max(lineHeight, typography.lineHeight(runs[index].role))
+                let run = runs[index]
+                if ColorIndex.of(run.role, run.styles) != color { color = nil }
+                lineHeight = max(lineHeight, typography.lineHeight(run.role))
+                isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
                 index += 1
             }
 
             let halfLeading = (lineHeight - (ascent + descent)) / 2
-            lines.append(LineLayout(line: line, range: range, top: y, height: lineHeight,
-                                    baseline: y + halfLeading + ascent, role: role,
-                                    endsWithNewline: CFStringGetCharacterAtIndex(characters, range.upperBound - 1) == 0x0A))
+            let baseline = y + halfLeading + ascent
+            lines.append(LineLayout(line: line, range: range, top: y, height: lineHeight, baseline: baseline,
+                                    color: color,
+                                    endsWithNewline: CFStringGetCharacterAtIndex(characters, range.upperBound - 1) == 0x0A,
+                                    decorations: isDecorated ? decorations(of: line, baseline: baseline, block: block,
+                                                                           typography: typography) : []))
             y += lineHeight
             start = range.upperBound
         }
@@ -137,9 +164,9 @@ public final class BlockLayout: @unchecked Sendable {
         }
         guard let string else { return nil }
         let runs = block.styleRuns
-        if runs.count <= 1 {
-            let attributes = typography.attributes[Int((runs.first?.role ?? .body).rawValue)]
-            return CFAttributedStringCreate(nil, string, attributes)
+        if runs.count <= 1, runs.first?.styles.contains(.code) != true {
+            let run = runs.first
+            return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? []))
         }
         guard let attributed = CFAttributedStringCreateMutable(nil, 0) else { return nil }
         CFAttributedStringReplaceString(attributed, CFRange(location: 0, length: 0), string)
@@ -147,22 +174,101 @@ public final class BlockLayout: @unchecked Sendable {
         let length = CFStringGetLength(string)
         for run in runs where run.range.lowerBound < length {
             let range = CFRange(location: run.range.lowerBound, length: min(run.range.upperBound, length) - run.range.lowerBound)
-            CFAttributedStringSetAttributes(attributed, range, typography.attributes[Int(run.role.rawValue)], true)
+            CFAttributedStringSetAttributes(attributed, range, typography.attributes(run.role, run.styles), true)
+        }
+        // Room for the padding beside inline code, as kerning after the
+        // character before it and after its last character.
+        let padding = typography.inlineCodePadding as NSNumber
+        for run in runs where run.styles.contains(.code) && run.range.upperBound <= length {
+            let before = run.range.lowerBound - 1
+            if before >= 0, CFStringGetCharacterAtIndex(string, before) != 0x0A {
+                CFAttributedStringSetAttribute(attributed, CFRange(location: before, length: 1), kCTKernAttributeName, padding)
+            }
+            CFAttributedStringSetAttribute(attributed, CFRange(location: run.range.upperBound - 1, length: 1),
+                                           kCTKernAttributeName, padding)
         }
         CFAttributedStringEndEditing(attributed)
         return attributed
     }
 
-    /// The role at a UTF-16 offset of the display text.
-    func role(at offset: Int) -> TextRole {
+    /// The decorations of one line, from its glyph runs, so they follow the
+    /// glyphs' visual positions. Nothing is decorated under the trailing
+    /// whitespace of a wrapped line.
+    private static func decorations(of line: CTLine, baseline: CGFloat, block: MarkdownBlock,
+                                    typography: Typography) -> [Decoration] {
+        let visibleWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line))
+        var decorations: [Decoration] = []
+        for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] where CTRunGetGlyphCount(run) > 0 {
+            let location = CTRunGetStringRange(run).location
+            let styleIndex = styleRunIndex(in: block.styleRuns, at: location)
+            guard styleIndex < block.styleRuns.count else { continue }
+            let style = block.styleRuns[styleIndex]
+            guard !style.styles.isDisjoint(with: Decoration.styles) else { continue }
+            var origin = CGPoint.zero
+            CTRunGetPositions(run, CFRange(location: 0, length: 1), &origin)
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            let width = CGFloat(CTRunGetTypographicBounds(run, CFRange(), &ascent, &descent, nil))
+            let minX = origin.x
+            let maxX = min(origin.x + width, visibleWidth)
+            guard maxX > minX else { continue }
+            let base = typography.fonts[Int(style.role.rawValue)]
+            let thickness = max(CTFontGetUnderlineThickness(base), 1)
+            if style.styles.contains(.code) {
+                let padding = typography.inlineCodePadding
+                let left = location == style.range.lowerBound ? minX - padding : minX
+                let rect = CGRect(x: left, y: baseline - ascent - padding / 2, width: maxX - left,
+                                  height: ascent + descent + padding)
+                if let last = decorations.last, last.kind == .codeBackground, last.tag == Int32(styleIndex),
+                   abs(last.rect.maxX - left) < 0.5 {
+                    decorations[decorations.count - 1].rect = last.rect.union(rect)
+                } else {
+                    decorations.append(Decoration(kind: .codeBackground, rect: rect, color: 0, tag: Int32(styleIndex)))
+                }
+            }
+            if style.styles.contains(.link), let link = linkIndex(in: block.links, at: location) {
+                let y = baseline - CTFontGetUnderlinePosition(base) - thickness / 2
+                decorations.append(Decoration(kind: .underline, rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),
+                                              color: ColorIndex.link, tag: Int32(link)))
+            }
+            if style.styles.contains(.strikethrough) {
+                let y = baseline - CTFontGetXHeight(typography.font(style.role, style.styles)) / 2 - thickness / 2
+                decorations.append(Decoration(kind: .strikethrough, rect: CGRect(x: minX, y: y, width: maxX - minX, height: thickness),
+                                              color: ColorIndex.of(style.role, style.styles), tag: -1))
+            }
+        }
+        return decorations
+    }
+
+    /// The index of the style run holding a UTF-16 offset, or the count.
+    private static func styleRunIndex(in runs: [StyleRun], at offset: Int) -> Int {
         var low = 0
-        var high = styleRuns.count
+        var high = runs.count
         while low < high {
             let mid = (low + high) / 2
-            if styleRuns[mid].range.upperBound <= offset { low = mid + 1 } else { high = mid }
+            if runs[mid].range.upperBound <= offset { low = mid + 1 } else { high = mid }
         }
-        return low < styleRuns.count ? styleRuns[low].role : .body
+        return low
     }
+
+    private static func linkIndex(in links: [MarkdownLink], at offset: Int) -> Int? {
+        var low = 0
+        var high = links.count
+        while low < high {
+            let mid = (low + high) / 2
+            if links[mid].range.upperBound <= offset { low = mid + 1 } else { high = mid }
+        }
+        return low < links.count && links[low].range.contains(offset) ? low : nil
+    }
+
+    /// The style run at a UTF-16 offset of the display text.
+    func styleRun(at offset: Int) -> StyleRun {
+        let index = Self.styleRunIndex(in: styleRuns, at: offset)
+        return index < styleRuns.count ? styleRuns[index] : StyleRun(range: offset..<offset, role: .body)
+    }
+
+    /// The role at a UTF-16 offset of the display text.
+    func role(at offset: Int) -> TextRole { styleRun(at: offset).role }
 
     /// The index of the first line whose box ends below `y` (block coordinates).
     func firstLine(endingBelow y: CGFloat) -> Int {

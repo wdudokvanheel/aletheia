@@ -18,6 +18,12 @@ public final class MarkdownPreviewView: NSScrollView {
     /// Called on the main thread right after each snapshot installs, before it
     /// draws. A pending scroll position has been applied by then.
     public var onInstall: (@MainActor (MarkdownSnapshot) -> Void)?
+    /// Called with a link's destination, as written in the source, when a
+    /// click on its text ends without a drag. The host decides what opens.
+    public var onOpenLink: (@MainActor (String) -> Void)? {
+        get { canvas.onOpenLink }
+        set { canvas.onOpenLink = newValue }
+    }
     public private(set) var lastTimings: Timings?
     /// Whether updates run. Hidden previews keep their content.
     public private(set) var isShown = true
@@ -266,6 +272,7 @@ final class MarkdownDocumentView: NSView {
         didSet { needsDisplay = true }
     }
     var onDraw: (@MainActor (Duration) -> Void)?
+    var onOpenLink: (@MainActor (String) -> Void)?
 
     /// Never empty; nil when nothing is selected.
     var selection: Range<TextPosition>?
@@ -275,6 +282,8 @@ final class MarkdownDocumentView: NSView {
     /// The pointer during a drag, in window coordinates.
     var dragLocation = NSPoint.zero
     var autoscrollTimer: Timer?
+    /// The link a click started on, until the pointer moves too far to open it.
+    var pressedLink: (destination: String, point: CGPoint)?
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -313,6 +322,12 @@ final class MarkdownDocumentView: NSView {
         let clip = dirtyRect.insetBy(dx: 0, dy: -8)
         let range = snapshot.blockRange(intersecting: clip.minY, clip.maxY)
         guard !range.isEmpty else { return }
+        // Backgrounds, then the selection over them, then text.
+        let codeBackground = palette.codeBackground.cgColor
+        for index in range {
+            snapshot.layouts[index].drawBackgrounds(in: context, at: origin(of: index, in: snapshot), clip: clip,
+                                                    color: codeBackground)
+        }
         if let selection {
             let rects = snapshot.selectionRects(for: selection, minY: dirtyRect.minY, maxY: dirtyRect.maxY)
             if !rects.isEmpty {
@@ -321,13 +336,15 @@ final class MarkdownDocumentView: NSView {
                 context.fillPath()
             }
         }
-        let colors = TextRole.allCases.map { palette.color(for: $0).cgColor }
-        let codeBackground = palette.codeBackground.cgColor
+        let colors = palette.cgColors
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         for index in range {
-            snapshot.layouts[index].draw(in: context, at: CGPoint(x: snapshot.columnX, y: snapshot.blockTops[index]),
-                                         clip: clip, colors: colors, codeBackground: codeBackground)
+            snapshot.layouts[index].drawText(in: context, at: origin(of: index, in: snapshot), clip: clip, colors: colors)
         }
+    }
+
+    private func origin(of block: Int, in snapshot: MarkdownSnapshot) -> CGPoint {
+        CGPoint(x: snapshot.columnX, y: snapshot.blockTops[block])
     }
 
     override func keyDown(with event: NSEvent) {
@@ -367,30 +384,54 @@ final class MarkdownDocumentView: NSView {
 }
 
 extension BlockLayout {
-    /// Draws the lines that intersect `clip`, coloring each run by role. The
-    /// context's text matrix must already flip glyphs for a flipped view.
-    func draw(in context: CGContext, at origin: CGPoint, clip: CGRect, colors: [CGColor], codeBackground: CGColor) {
+    /// Fills the code block's box and inline code backgrounds on the lines
+    /// that intersect `clip`.
+    func drawBackgrounds(in context: CGContext, at origin: CGPoint, clip: CGRect, color: CGColor) {
         if drawsCodeBackground {
             let rect = CGRect(x: origin.x, y: origin.y, width: columnWidth, height: height)
-            context.setFillColor(codeBackground)
+            context.setFillColor(color)
             context.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
             context.fillPath()
         }
-        var index = firstLine(endingBelow: clip.minY - origin.y)
-        while index < lines.count, origin.y + lines[index].top < clip.maxY {
-            let line = lines[index]
+        forEachLine(intersecting: clip, at: origin) { line in
+            for decoration in line.decorations where decoration.kind == .codeBackground {
+                let rect = decoration.rect.offsetBy(dx: origin.x + textInset, dy: origin.y)
+                context.setFillColor(color)
+                context.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
+                context.fillPath()
+            }
+        }
+    }
+
+    /// Draws the lines that intersect `clip`, coloring each run by its role
+    /// and styles, then their underlines and strikethroughs. The context's
+    /// text matrix must already flip glyphs for a flipped view.
+    func drawText(in context: CGContext, at origin: CGPoint, clip: CGRect, colors: [CGColor]) {
+        forEachLine(intersecting: clip, at: origin) { line in
             let position = CGPoint(x: origin.x + textInset, y: origin.y + line.baseline)
-            if let role = line.role {
-                context.setFillColor(colors[Int(role.rawValue)])
+            if let color = line.color {
+                context.setFillColor(colors[Int(color)])
                 context.textPosition = position
                 CTLineDraw(line.line, context)
             } else {
                 for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
-                    context.setFillColor(colors[Int(role(at: CTRunGetStringRange(run).location).rawValue)])
+                    let style = styleRun(at: CTRunGetStringRange(run).location)
+                    context.setFillColor(colors[Int(ColorIndex.of(style.role, style.styles))])
                     context.textPosition = position
                     CTRunDraw(run, context, CFRange())
                 }
             }
+            for decoration in line.decorations where decoration.kind != .codeBackground {
+                context.setFillColor(colors[Int(decoration.color)])
+                context.fill(decoration.rect.offsetBy(dx: origin.x + textInset, dy: origin.y))
+            }
+        }
+    }
+
+    private func forEachLine(intersecting clip: CGRect, at origin: CGPoint, _ body: (LineLayout) -> Void) {
+        var index = firstLine(endingBelow: clip.minY - origin.y)
+        while index < lines.count, origin.y + lines[index].top < clip.maxY {
+            body(lines[index])
             index += 1
         }
     }

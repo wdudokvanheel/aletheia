@@ -54,7 +54,10 @@ final class MarkdownParserTests: XCTestCase {
         let block = try XCTUnwrap(MarkdownDocument.parse(markdown).blocks.first)
         XCTAssertEqual(block.kind, .table)
         XCTAssertEqual(block.text, "Name\tValue\npi\t3.14\ne\t2.71")
-        XCTAssertEqual(block.styleRuns, [StyleRun(range: 0..<25, role: .body)])
+        XCTAssertEqual(block.styleRuns, [StyleRun(range: 0..<11, role: .body),
+                                         StyleRun(range: 11..<13, role: .body, styles: .emphasis),
+                                         StyleRun(range: 13..<21, role: .body),
+                                         StyleRun(range: 21..<25, role: .body, styles: .code)])
     }
 
     func testImageDisplaysAltTextAndHTMLIsDropped() throws {

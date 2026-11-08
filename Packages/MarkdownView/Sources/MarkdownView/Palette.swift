@@ -11,15 +11,18 @@ public struct Palette: Sendable, Equatable {
     public var codeBackground: NSColor
     /// Block quote text and status messages.
     public var mutedText: NSColor
+    /// Link text and its underline.
+    public var link: NSColor
 
     public init(background: NSColor, text: NSColor, headingText: NSColor, codeText: NSColor,
-                codeBackground: NSColor, mutedText: NSColor) {
+                codeBackground: NSColor, mutedText: NSColor, link: NSColor = .linkColor) {
         self.background = background
         self.text = text
         self.headingText = headingText
         self.codeText = codeText
         self.codeBackground = codeBackground
         self.mutedText = mutedText
+        self.link = link
     }
 
     /// System colors that follow light and dark mode.
@@ -34,7 +37,8 @@ public struct Palette: Sendable, Equatable {
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             return NSColor(white: isDark ? 1 : 0, alpha: 0.07)
         },
-        mutedText: .secondaryLabelColor
+        mutedText: .secondaryLabelColor,
+        link: .linkColor
     )
 
     func color(for role: TextRole) -> NSColor {
@@ -44,5 +48,25 @@ public struct Palette: Sendable, Equatable {
         case .code: codeText
         case .quote: mutedText
         }
+    }
+
+    /// The color of text in `role` with `styles`. Inline code keeps the color
+    /// around it, as in the WebKit stylesheet.
+    func color(for role: TextRole, styles: InlineStyle) -> NSColor {
+        styles.contains(.link) ? link : color(for: role)
+    }
+
+    /// Draw-time colors indexed by `ColorIndex`: one per role, then links.
+    var cgColors: [CGColor] {
+        TextRole.allCases.map { color(for: $0).cgColor } + [link.cgColor]
+    }
+}
+
+/// An index into `Palette.cgColors`.
+enum ColorIndex {
+    static let link = UInt8(TextRole.allCases.count)
+
+    static func of(_ role: TextRole, _ styles: InlineStyle) -> UInt8 {
+        styles.contains(.link) ? link : role.rawValue
     }
 }
