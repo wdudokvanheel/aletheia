@@ -8,37 +8,31 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     let preview = MarkdownPreviewView(frame: .zero)
     var view: NSView { preview }
     var focusView: NSView { preview.documentView ?? preview }
-    /// Links arrive in Phase 3.
     var onOpen: ((URL) -> Void)?
+    /// Opens web and mail links; replaced in tests.
+    var openInSystem: (URL) -> Void = { NSWorkspace.shared.open($0) }
     private weak var document: EditorDocument?
     private var pending: Task<Void, Never>?
     /// The buffer changed since it was last pushed.
     private var stale = false
     private var visible = true
     private var nextFraction: Double?
-    /// The installed snapshot's generation when the document was shown. Until
-    /// another snapshot installs, scroll positions belong to the old content.
-    private var awaitingGeneration: UInt64?
-    /// The stored offset to apply once the shown document has installed.
-    private var restoreY: CGFloat?
+    /// From showing a document until its complete snapshot installs, scroll
+    /// positions belong to the old content and are not recorded.
+    private var restoring = false
     /// The diagnostics overlay: the last update's phase times.
     let timingsLabel = NSTextField(labelWithString: "")
 
     override init() {
         super.init()
         preview.contentView.postsBoundsChangedNotifications = true
-        preview.documentView?.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged),
             name: NSView.boundsDidChangeNotification, object: preview.contentView)
-        NotificationCenter.default.addObserver(self, selector: #selector(frameChanged),
-            name: NSView.frameDidChangeNotification, object: preview.documentView)
         NotificationCenter.default.addObserver(self, selector: #selector(updateTimingsOverlay),
             name: AppSettings.previewTimingsDidChange, object: nil)
-        preview.onTimings = { [weak self] _ in
-            guard let self else { return }
-            _ = self.settle()
-            self.updateTimingsOverlay()
-        }
+        preview.onTimings = { [weak self] _ in self?.updateTimingsOverlay() }
+        preview.onInstall = { [weak self] snapshot in self?.didInstall(snapshot) }
+        preview.onOpenLink = { [weak self] destination in self?.openLink(destination) }
         timingsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         timingsLabel.textColor = .white
         timingsLabel.drawsBackground = true
@@ -60,30 +54,24 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
         pending = nil
         guard let document else {
             nextFraction = nil
-            awaitingGeneration = nil
-            restoreY = nil
+            restoring = false
             stale = false
+            preview.clearSelection()
             preview.setSource("")
             return
         }
         guard changed || stale else { return }
         stale = false
-        let installed = preview.snapshot.generation
         preview.setSource(document.editor.string)
         guard changed else { return }
-        awaitingGeneration = installed
-        restoreY = nil
-        // Set after the source, so it waits for that source's snapshot.
+        preview.clearSelection()
+        restoring = true
+        // Set after the source, so it applies to that source's snapshot.
         if let fraction = nextFraction {
             nextFraction = nil
             preview.scrollFraction = fraction
         } else {
-            let y = document.previewPosition.y
-            let height = preview.documentView?.frame.height ?? 0
-            restoreY = y > 0 ? y : nil
-            // The library takes fractions only. This is exact when the new height
-            // matches the old one; otherwise `settle` corrects it on install.
-            preview.scrollFraction = y <= 0 ? 0 : height > 0 ? Double(y / height) : 1
+            preview.setScrollOffset(document.previewPosition.y)
         }
     }
 
@@ -114,7 +102,8 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
         // The System scheme follows the view's appearance with dynamic colors.
         preview.palette = palette.isDark == nil ? .standard : Palette(
             background: palette.background, text: palette.foreground, headingText: palette.foreground,
-            codeText: palette.foreground, codeBackground: palette.surface, mutedText: palette.muted)
+            codeText: palette.foreground, codeBackground: palette.surface, mutedText: palette.muted,
+            link: palette.accent)
     }
 
     /// Find in the preview arrives in Phase 8.
@@ -134,32 +123,37 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing {
     }
 
     func scrollFraction() async -> Double? {
-        guard document != nil, restoreY == nil else { return nil }
+        guard document != nil, !restoring else { return nil }
         return preview.scrollFraction
     }
 
     func setScrollFraction(_ fraction: Double) { nextFraction = fraction }
 
-    /// Returns whether the shown document has installed, applying its stored
-    /// offset the first time. Install changes the document frame and clip
-    /// bounds before it draws, so this runs before the first frame is shown.
-    private func settle() -> Bool {
-        guard let awaiting = awaitingGeneration else { return true }
-        guard preview.snapshot.generation != awaiting else { return false }
-        awaitingGeneration = nil
-        let y = restoreY
-        restoreY = nil
-        if let y, let height = preview.documentView?.frame.height, height > 0 {
-            preview.scrollFraction = Double(y / height)
-        }
-        return true
+    /// The library applies the position set in `show(_:)` on the shown
+    /// document's complete snapshot, before this runs and before it draws.
+    private func didInstall(_ snapshot: MarkdownSnapshot) {
+        guard restoring, snapshot.isComplete else { return }
+        restoring = false
+        recordPosition()
     }
 
-    @objc private func frameChanged() { _ = settle() }
-
     @objc private func boundsChanged() {
-        guard settle(), let document else { return }
-        document.previewPosition = EditorDocument.validPosition(preview.contentView.bounds.origin)
+        guard !restoring else { return }
+        recordPosition()
+    }
+
+    private func recordPosition() {
+        document?.previewPosition = EditorDocument.validPosition(preview.contentView.bounds.origin)
+    }
+
+    /// The WebKit preview's click rules, through the same shared function.
+    private func openLink(_ destination: String) {
+        guard let document else { return }
+        switch PreviewLink.action(forDestination: destination, directory: document.file.url.deletingLastPathComponent()) {
+        case .system(let url): openInSystem(url)
+        case .editor(let file): onOpen?(file)
+        case nil: break
+        }
     }
 
     @objc private func updateTimingsOverlay() {

@@ -9,13 +9,10 @@ final class PreviewResources: NSObject, WKURLSchemeHandler {
     private var requests: [ObjectIdentifier: Task<Void, Never>] = [:]
     var directory: URL?
     var token = UUID().uuidString
-    var base: String { "aletheia-preview://document/\(token)/" }
+    var base: String { PreviewLink.base(token: token).absoluteString }
 
     func localURL(_ url: URL) -> URL? {
-        guard url.scheme == "aletheia-preview", url.host == "document",
-              let directory, url.pathComponents.count >= 3,
-              url.pathComponents[1] == token else { return nil }
-        return PreviewFilePolicy.localURL(for: url.pathComponents.dropFirst(2).joined(separator: "/"), in: directory)
+        PreviewLink.localFile(url, token: token, directory: directory)
     }
 
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
@@ -264,10 +261,10 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
         }
         decisionHandler(.cancel)
         guard action.navigationType == .linkActivated else { return }
-        if ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {
-            NSWorkspace.shared.open(url)
-        } else if let local = resources.localURL(url) {
-            onOpen?(local)
+        switch PreviewLink.action(for: url, token: resources.token, directory: resources.directory) {
+        case .system(let url): NSWorkspace.shared.open(url)
+        case .editor(let file): onOpen?(file)
+        case nil: break
         }
     }
 }

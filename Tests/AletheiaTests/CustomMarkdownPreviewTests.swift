@@ -119,6 +119,70 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         preview.prepareForRelease()
     }
 
+    @MainActor func testLinkClicksFollowTheWebKitRules() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let folder = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let page = folder.appendingPathComponent("page.md")
+        try Data("# Page".utf8).write(to: page)
+        try Data("other".utf8).write(to: folder.appendingPathComponent("other notes.md"))
+        try Data("nested".utf8).write(to: folder.appendingPathComponent("sub/nested.txt"))
+        try Data("outside".utf8).write(to: root.appendingPathComponent("outside.md"))
+        let document = EditorDocument(file: try TextFile.read(page))
+        let preview = CustomMarkdownPreview()
+        var system: [URL] = []
+        var editor: [URL] = []
+        preview.openInSystem = { system.append($0) }
+        preview.onOpen = { editor.append($0) }
+        let click = try XCTUnwrap(preview.preview.onOpenLink)
+        click("https://example.com/a")
+        XCTAssertTrue(system.isEmpty, "no document shown yet")
+        preview.show(document)
+
+        // Web and mail links open in the system.
+        for destination in ["https://example.com/a?b=1#c", "HTTP://example.com", "mailto:someone@example.com"] {
+            click(destination)
+        }
+        XCTAssertEqual(system.map(\.absoluteString),
+                       ["https://example.com/a?b=1#c", "HTTP://example.com", "mailto:someone@example.com"])
+
+        // Relative files inside the document's folder open in the editor.
+        let canonical = folder.resolvingSymlinksInPath()
+        for destination in ["other%20notes.md", "other notes.md", "sub/nested.txt#part", "sub/../other%20notes.md"] {
+            click(destination)
+        }
+        XCTAssertEqual(editor.map(\.path), [canonical.appendingPathComponent("other notes.md").path,
+                                            canonical.appendingPathComponent("other notes.md").path,
+                                            canonical.appendingPathComponent("sub/nested.txt").path,
+                                            canonical.appendingPathComponent("other notes.md").path])
+
+        // Everything else is ignored.
+        for destination in ["../outside.md", "/etc/hosts", "file:///etc/hosts", "missing.md", "sub", "#heading",
+                            "javascript:alert(1)", "ftp://example.com/x", "aletheia-preview://document/x/page.md", ""] {
+            click(destination)
+        }
+        XCTAssertEqual(system.count, 3)
+        XCTAssertEqual(editor.count, 4)
+        preview.prepareForRelease()
+    }
+
+    @MainActor func testShowingAnotherDocumentClearsTheSelection() async throws {
+        _ = NSApplication.shared
+        let first = try temporaryMarkdown("# Same\n\nShared words.")
+        let second = try temporaryMarkdown("# Same\n\nShared words.")
+        defer { [first, second].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let preview = CustomMarkdownPreview()
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        preview.show(EditorDocument(file: try TextFile.read(first)))
+        try await eventually { preview.preview.snapshot.document.blocks.count == 2 }
+        preview.preview.documentView?.selectAll(nil)
+        XCTAssertNotNil(preview.preview.selection)
+        preview.show(EditorDocument(file: try TextFile.read(second)))
+        XCTAssertNil(preview.preview.selection)
+        preview.prepareForRelease()
+    }
+
     @MainActor func testTimingsOverlayShowsTheLastUpdate() async throws {
         _ = NSApplication.shared
         let settings = AppSettings.shared
