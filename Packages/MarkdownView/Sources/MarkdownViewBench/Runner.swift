@@ -124,6 +124,9 @@ struct WindowInfo: Codable {
     let displayAsleep: Bool
     /// `transparent`: alpha 0 and click-through on the main screen; `onscreen`: visible.
     let placement: String
+    /// At the start of the run. AppKit displays an occluded window at a slower cadence than the
+    /// screen's refresh, which lengthens every custom latency that waits for a draw.
+    let occluded: Bool
     /// WebKit only.
     let occlusionDetection: Bool?
     /// Custom only: `overlay` or `legacy`, which takes width from the text column.
@@ -352,6 +355,7 @@ final class Runner {
                                screenRefreshHz: window.screen?.maximumFramesPerSecond ?? 0,
                                displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
                                placement: options.onscreen ? "onscreen" : "transparent",
+                               occluded: !window.occlusionState.contains(.visible),
                                occlusionDetection: options.custom ? nil : options.onscreen,
                                scrollerStyle: options.custom ? (NSScroller.preferredScrollerStyle == .overlay ? "overlay" : "legacy") : nil),
             firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),

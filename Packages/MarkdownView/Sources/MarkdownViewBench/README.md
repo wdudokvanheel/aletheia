@@ -47,8 +47,10 @@ UTF-16 and apply in order, each to the text left by the previous edit.
 
 Both renderers use the same window: 900 x 1200 pt on the main screen, transparent and
 click-through (`--onscreen` shows it). The header records the backing scale, the screen's
-refresh rate, whether the display was asleep and, for custom, the scroller style (legacy
-scrollers take 15 pt from the text column).
+refresh rate, whether the display was asleep, whether the window was occluded and, for
+custom, the scroller style (legacy scrollers take 15 pt from the text column). A transparent
+window, or any window while the display sleeps, is occluded, and AppKit then displays it at
+about 60 Hz instead of the screen's rate; custom latencies that wait for a draw include that.
 
 ### WebKit
 
@@ -99,8 +101,8 @@ app's 200 ms debounce to edits.
   from the library's `Timings`: its main-thread time.
 - **scrollFrame:** passes from top to bottom in viewport-height steps. Each frame is
   `NSView.scroll`, `setNeedsDisplay(visibleRect)`, `window.displayIfNeeded()` and
-  `CATransaction.flush()`, so every frame draws a full screen; the run loop turns between
-  frames. Passes repeat up to `--reps`, stopping after 5,000 frames once a pass is complete.
+  `CATransaction.flush()`; the flush commits and draws, so every frame draws a full screen
+  without waiting for AppKit's display cycle. The run loop turns between frames. Passes repeat up to `--reps`, stopping after 5,000 frames once a pass is complete.
   `scroll.over144Hz` counts frames over 1000/144 ms, `scroll.over60Hz` frames over 16.7 ms.
 - **library:** the `Timings` of each repetition (`parse`, `layout`, `install`, `draw` in ms,
   `blocks`, `complete`) under `firstScreen`, `open`, `tabSwitch` and `update`. On an open,
@@ -110,7 +112,8 @@ app's 200 ms debounce to edits.
   and settled for 1 s, minus the footprint before it was created (no other view, a 0.5 s
   settle, `malloc_zone_pressure_relief`). `viewHeap` is the malloc `size_in_use` difference
   over the same span. There are no helper processes. With `--idle-seconds 0`, `process` only,
-  right after the scroll passes.
+  right after the scroll passes. `view` is noisy for small documents, since the new view
+  reuses pages freed earlier and can come out negative; `viewHeap` is the steadier measure.
 - **idleCPUPercent:** the bench's CPU over `idleSeconds`, from 1 s after the scroll passes.
 
 ### Smoke set, watchdog and crashes
@@ -142,7 +145,7 @@ became optional.
            idleSeconds, debounceMs, previewResources?,
            machine {model, cpu, cores, memoryGiB}, os {version, build}, build, git? {commit, dirty},
            webkit?, window {width, height, backingScale, screenRefreshHz, displayAsleep, placement,
-           occlusionDetection?, scrollerStyle?}, firstPreviewMs, baselineMemoryMiB,
+           occluded, occlusionDetection?, scrollerStyle?}, firstPreviewMs, baselineMemoryMiB,
            helperAttribution?, watchdog? {limitMs, hangSeconds}, definitions },
   "documents": [ { path, name?, bytes?, status: ok|failed|skipped|running|crashed|hung, error?,
                    edit? {offset, kind},
