@@ -78,12 +78,16 @@ final class LiveUpdateViewTests: XCTestCase {
     }
 
     func testSlowUpdatePausesTheNextSource() {
-        // Every update is over budget, so the next one waits its cost, at least 150 ms here.
+        // Every update is over budget, so the next one waits its excess, at least 150 ms here.
         view.updatePolicy = UpdatePolicy(budget: .zero, pauseFactor: 1000, maximumPause: .milliseconds(150))
         XCTAssertEqual(view.updatePolicy.pause(after: .milliseconds(1)), .milliseconds(150))
+        // The standard policy waits for the excess over 16 ms, up to 500 ms.
         XCTAssertEqual(UpdatePolicy.standard.pause(after: .milliseconds(10)), .zero)
-        XCTAssertEqual(UpdatePolicy.standard.pause(after: .milliseconds(40)), .milliseconds(80))
+        XCTAssertEqual(UpdatePolicy.standard.pause(after: .milliseconds(16)), .zero)
+        XCTAssertEqual(UpdatePolicy.standard.pause(after: .milliseconds(18)), .milliseconds(2))
+        XCTAssertEqual(UpdatePolicy.standard.pause(after: .milliseconds(40)), .milliseconds(24))
         XCTAssertEqual(UpdatePolicy.standard.pause(after: .seconds(2)), .milliseconds(500))
+        XCTAssertEqual(UpdatePolicy(pauseFactor: 2).pause(after: .milliseconds(40)), .milliseconds(48))
         var installed: [ContinuousClock.Instant] = []
         view.onInstall = { _ in installed.append(.now) }
         load("# First\n\nBody.")

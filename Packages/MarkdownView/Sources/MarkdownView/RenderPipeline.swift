@@ -44,17 +44,20 @@ public struct Timings: Sendable, Equatable {
 /// is running. At most one update is in flight; sources set meanwhile
 /// coalesce, and only the newest is processed once it finishes, so nothing
 /// queues up. After an update whose wall time (submission to the end of its
-/// install, `Timings.wall`) exceeds `budget`, the next one waits
-/// `min(pauseFactor × wall, maximumPause)` from the end of that install. Very
-/// large documents then update at a bounded rate instead of keeping a core
-/// busy while the user types. Showing another document (`setSource` followed
-/// by a scroll position) does not wait.
+/// install, `Timings.wall`) exceeds `budget`, the next one waits for the
+/// excess, `pauseFactor × (wall − budget)` clamped to `0...maximumPause`,
+/// from the end of that install. An update just over budget then delays the
+/// next one only a little, while very large documents still update at a
+/// bounded rate instead of keeping a core busy while the user types: a 1 MiB
+/// document whose updates take 18 ms waits 2 ms, not 36. Showing another
+/// document (`setSource` followed by a scroll position) does not wait.
 public struct UpdatePolicy: Sendable, Equatable {
     public var budget: Duration
+    /// How many times the excess over `budget` the next update waits.
     public var pauseFactor: Double
     public var maximumPause: Duration
 
-    public init(budget: Duration = .milliseconds(16), pauseFactor: Double = 2,
+    public init(budget: Duration = .milliseconds(16), pauseFactor: Double = 1,
                 maximumPause: Duration = .milliseconds(500)) {
         self.budget = budget
         self.pauseFactor = pauseFactor
@@ -65,7 +68,7 @@ public struct UpdatePolicy: Sendable, Equatable {
 
     /// The pause an update that took `wall` imposes on the next one.
     public func pause(after wall: Duration) -> Duration {
-        wall > budget ? min(wall * max(pauseFactor, 0), maximumPause) : .zero
+        wall > budget ? min((wall - budget) * max(pauseFactor, 0), maximumPause) : .zero
     }
 }
 
