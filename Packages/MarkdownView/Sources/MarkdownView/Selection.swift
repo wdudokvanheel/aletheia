@@ -44,14 +44,15 @@ extension MarkdownSnapshot {
 
     // MARK: Hit-testing
 
-    /// The caret position nearest to `point`, in view coordinates. Points left
-    /// or right of a line resolve to its ends, points in the gap between two
-    /// blocks to the nearer block edge, and points above or below all text to
-    /// its start or end. Nil when nothing is selectable.
-    func position(at point: CGPoint) -> TextPosition? {
+    /// The caret position nearest to `point`, in view coordinates, with code
+    /// blocks scrolled by `codeOffsets`. Points left or right of a line
+    /// resolve to its ends, points between lines or blocks to the nearer one,
+    /// and points above or below all text to its start or end. Nil when
+    /// nothing is selectable.
+    func position(at point: CGPoint, codeOffsets: CodeOffsets = [:]) -> TextPosition? {
         let index = firstBlock(endingBelow: point.y)
         if index < layouts.count, blockTops[index] <= point.y, isSelectable(index) {
-            return position(inBlock: index, at: point)
+            return position(inBlock: index, at: point, codeOffsets: codeOffsets)
         }
         let above = layouts.indices[..<index].last(where: isSelectable)
         let below = layouts.indices[index...].first(where: isSelectable)
@@ -68,26 +69,41 @@ extension MarkdownSnapshot {
         }
     }
 
-    private func position(inBlock index: Int, at point: CGPoint) -> TextPosition {
+    private func position(inBlock index: Int, at point: CGPoint, codeOffsets: CodeOffsets) -> TextPosition {
         let layout = layouts[index]
         guard !layout.lines.isEmpty else {
             // An estimate that is not laid out yet.
             return point.y < blockTops[index] + layout.height / 2 ? start(of: index) : end(of: index)
         }
-        let lineIndex = min(layout.firstLine(endingBelow: point.y - blockTops[index]), layout.lines.count - 1)
-        let x = point.x - columnX - layout.textInset
-        return TextPosition(block: index, offset: layout.offset(on: layout.lines[lineIndex], atX: x))
+        let y = point.y - blockTops[index]
+        var lineIndex = min(layout.firstLine(endingBelow: y), layout.lines.count - 1)
+        // Between two lines, as between list items or paragraphs in a quote.
+        if lineIndex > 0, y < layout.lines[lineIndex].top {
+            let above = layout.lines[lineIndex - 1]
+            if y - (above.top + above.height) < layout.lines[lineIndex].top - y { lineIndex -= 1 }
+        }
+        let line = layout.lines[lineIndex]
+        let x = point.x - columnX - line.x + codeOffset(of: line, inBlock: index, codeOffsets)
+        return TextPosition(block: index, offset: layout.offset(on: line, atX: x))
     }
 
-    /// Whether `point` is over a line of selectable text rather than a margin.
+    /// How far `line` of block `index` is scrolled left: its code block's offset.
+    func codeOffset(of line: LineLayout, inBlock index: Int, _ codeOffsets: CodeOffsets) -> CGFloat {
+        guard line.codeBlock >= 0, !codeOffsets.isEmpty else { return 0 }
+        return codeOffsets[CodeBlockID(block: index, code: Int(line.codeBlock))] ?? 0
+    }
+
+    /// Whether `point` is over a line of selectable text rather than a margin
+    /// or a list marker.
     func isOverText(_ point: CGPoint) -> Bool {
         let index = firstBlock(endingBelow: point.y)
-        guard index < layouts.count, blockTops[index] <= point.y, isSelectable(index),
-              point.x >= columnX, point.x < columnX + columnWidth else { return false }
+        guard index < layouts.count, blockTops[index] <= point.y, isSelectable(index) else { return false }
         let layout = layouts[index]
         let y = point.y - blockTops[index]
-        let line = layout.firstLine(endingBelow: y)
-        return line < layout.lines.count && layout.lines[line].top <= y
+        let lineIndex = layout.firstLine(endingBelow: y)
+        guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return false }
+        let line = layout.lines[lineIndex]
+        return point.x >= columnX + line.x && point.x < columnX + line.maxX
     }
 
     // MARK: Words and paragraphs
@@ -134,9 +150,11 @@ extension MarkdownSnapshot {
 
     /// Highlight rectangles for `range` in the blocks that intersect
     /// `minY..<maxY`: one per line at full line height, between the caret
-    /// offsets of its ends, and reaching the text's right edge on lines the
-    /// selection continues past.
-    func selectionRects(for range: Range<TextPosition>, minY: CGFloat, maxY: CGFloat) -> [CGRect] {
+    /// offsets of its ends, and reaching the right edge of the line's text
+    /// area on lines the selection continues past. Lines of code blocks
+    /// scrolled by `codeOffsets` move with them and are clipped to the box.
+    func selectionRects(for range: Range<TextPosition>, minY: CGFloat, maxY: CGFloat,
+                        codeOffsets: CodeOffsets = [:]) -> [CGRect] {
         let visible = blockRange(intersecting: minY, maxY)
         let first = max(visible.lowerBound, range.lowerBound.block)
         let last = min(visible.upperBound - 1, range.upperBound.block)
@@ -148,8 +166,6 @@ extension MarkdownSnapshot {
             let start = index == range.lowerBound.block ? range.lowerBound.offset : 0
             let end = index == range.upperBound.block ? range.upperBound.offset : Int.max
             let continuesToNextBlock = index < range.upperBound.block
-            let left = columnX + layout.textInset
-            let right = columnX + layout.columnWidth - layout.textInset
             var lineIndex = layout.firstLine(endingBelow: minY - top)
             while lineIndex < layout.lines.count, top + layout.lines[lineIndex].top < maxY {
                 let line = layout.lines[lineIndex]
@@ -162,9 +178,16 @@ extension MarkdownSnapshot {
                 guard from < to || (isLast && continuesToNextBlock && from == line.range.upperBound) else { continue }
                 let x1 = CTLineGetOffsetForStringIndex(line.line, from, nil)
                 let x2 = CTLineGetOffsetForStringIndex(line.line, to, nil)
-                let minX = left + min(x1, x2)
+                let left = columnX + line.x - codeOffset(of: line, inBlock: index, codeOffsets)
+                var minX = left + min(x1, x2)
                 var maxX = left + max(x1, x2)
-                if end > line.range.upperBound || (isLast && continuesToNextBlock) { maxX = max(maxX, right) }
+                if end > line.range.upperBound || (isLast && continuesToNextBlock) { maxX = max(maxX, columnX + line.maxX) }
+                if line.codeBlock >= 0 {
+                    let box = layout.codeBlocks[Int(line.codeBlock)].rect
+                    minX = max(minX, columnX + box.minX)
+                    maxX = min(maxX, columnX + box.maxX)
+                    guard maxX > minX else { continue }
+                }
                 rects.append(CGRect(x: minX, y: top + line.top, width: maxX - minX, height: line.height))
             }
         }
@@ -208,13 +231,14 @@ extension MarkdownSnapshot {
 
     /// Where the text at `position` sits: its baseline origin in view
     /// coordinates and its style, for showing a definition over it.
-    func baselineOrigin(of position: TextPosition) -> (point: CGPoint, style: StyleRun)? {
+    func baselineOrigin(of position: TextPosition, codeOffsets: CodeOffsets = [:]) -> (point: CGPoint, style: StyleRun)? {
         guard position.block < layouts.count else { return nil }
         let layout = layouts[position.block]
         guard !layout.lines.isEmpty else { return nil }
         let line = layout.lines[layout.lineIndex(containing: position.offset, upstream: false)]
         let x = CTLineGetOffsetForStringIndex(line.line, position.offset, nil)
-        return (CGPoint(x: columnX + layout.textInset + x, y: blockTops[position.block] + line.baseline),
+            - codeOffset(of: line, inBlock: position.block, codeOffsets)
+        return (CGPoint(x: columnX + line.x + x, y: blockTops[position.block] + line.baseline),
                 layout.styleRun(at: position.offset))
     }
 
@@ -231,7 +255,8 @@ extension MarkdownSnapshot {
         let y = point.y - blockTops[index]
         let lineIndex = layout.firstLine(endingBelow: y)
         guard lineIndex < layout.lines.count, layout.lines[lineIndex].top <= y else { return nil }
-        let x = point.x - columnX - layout.textInset
+        // Code blocks have no links, so scrolling never moves one.
+        let x = point.x - columnX - layout.lines[lineIndex].x
         for decoration in layout.lines[lineIndex].decorations where decoration.kind == .underline {
             if decoration.rect.minX <= x, x < decoration.rect.maxX, links.indices.contains(Int(decoration.tag)) {
                 return links[Int(decoration.tag)].destination

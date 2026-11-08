@@ -402,6 +402,14 @@ final class MarkdownDocumentView: NSView {
     var autoscrollTimer: Timer?
     /// The link a click started on, until the pointer moves too far to open it.
     var pressedLink: (destination: String, point: CGPoint)?
+    /// How far each code block wider than its box is scrolled left.
+    var codeOffsets: CodeOffsets = [:]
+    /// Which way the current scroll gesture goes: decided by its first
+    /// movement, and kept through its momentum.
+    var codeScrollGesture = CodeScrollGesture.none
+    /// The code block showing its overlay scroller, until the timer hides it.
+    var codeScroller: CodeBlockID?
+    var codeScrollerTimer: Timer?
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -410,12 +418,16 @@ final class MarkdownDocumentView: NSView {
     /// Replaces the snapshot. When the source changed, the selection is
     /// mapped onto the new blocks; a relayout of the same source keeps it.
     func install(_ newSnapshot: MarkdownSnapshot, sourceChanged: Bool) {
+        let old = snapshot
         if sourceChanged {
-            let old = snapshot
             selection = selection.flatMap { newSnapshot.mapRange($0, from: old) }.flatMap { $0.isEmpty ? nil : $0 }
             selectionAnchor = selectionAnchor.flatMap { newSnapshot.mapRange($0, from: old) }
                 ?? selection.map { $0.lowerBound..<$0.lowerBound }
         }
+        if !codeOffsets.isEmpty {
+            codeOffsets = newSnapshot.mapCodeOffsets(codeOffsets, from: old, sourceChanged: sourceChanged)
+        }
+        if let codeScroller, !codeOffsets.keys.contains(codeScroller) { self.codeScroller = nil }
         snapshot = newSnapshot
     }
 
@@ -440,25 +452,30 @@ final class MarkdownDocumentView: NSView {
         let clip = dirtyRect.insetBy(dx: 0, dy: -8)
         let range = snapshot.blockRange(intersecting: clip.minY, clip.maxY)
         guard !range.isEmpty else { return }
-        // Backgrounds, then the selection over them, then text.
-        let codeBackground = palette.codeBackground.cgColor
+        // Backgrounds, bars, and rules, then the selection over them, then
+        // text, markers, and task boxes.
+        let style = DrawStyle(palette, snapshot.typography)
         for index in range {
             snapshot.layouts[index].drawBackgrounds(in: context, at: origin(of: index, in: snapshot), clip: clip,
-                                                    color: codeBackground)
+                                                    style: style)
         }
         if let selection {
-            let rects = snapshot.selectionRects(for: selection, minY: dirtyRect.minY, maxY: dirtyRect.maxY)
+            let rects = snapshot.selectionRects(for: selection, minY: dirtyRect.minY, maxY: dirtyRect.maxY,
+                                                codeOffsets: codeOffsets)
             if !rects.isEmpty {
                 context.setFillColor(selectionColor.cgColor)
                 context.addRects(rects)
                 context.fillPath()
             }
         }
-        let colors = palette.cgColors
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        let offsets = codeOffsets
         for index in range {
-            snapshot.layouts[index].drawText(in: context, at: origin(of: index, in: snapshot), clip: clip, colors: colors)
+            snapshot.layouts[index].drawText(in: context, at: origin(of: index, in: snapshot), clip: clip, style: style) {
+                offsets.isEmpty ? 0 : offsets[CodeBlockID(block: index, code: $0)] ?? 0
+            }
         }
+        if let codeScroller, range.contains(codeScroller.block) { drawScroller(of: codeScroller, in: context) }
     }
 
     private func origin(of block: Int, in snapshot: MarkdownSnapshot) -> CGPoint {
@@ -501,20 +518,62 @@ final class MarkdownDocumentView: NSView {
     }
 }
 
+/// Colors for one draw, resolved for the view's appearance, and corner radii.
+struct DrawStyle {
+    /// Indexed by `ColorIndex`.
+    let text: [CGColor]
+    let codeBackground: CGColor
+    /// Quote bars, rules, and task boxes.
+    let muted: CGColor
+    /// The check mark in a checked task box.
+    let background: CGColor
+    let codeBlockCornerRadius: CGFloat
+    let taskBoxCornerRadius: CGFloat
+
+    init(_ palette: Palette, _ typography: Typography) {
+        text = palette.cgColors
+        codeBackground = Self.composite(palette.codeBackground, over: palette.background)
+        muted = palette.mutedText.cgColor
+        background = palette.background.cgColor
+        codeBlockCornerRadius = typography.codeBlockCornerRadius
+        taskBoxCornerRadius = typography.taskBoxCornerRadius
+    }
+
+    /// A translucent color as the opaque color it shows over an opaque
+    /// background. Code backgrounds only ever cover the background, and
+    /// filling large areas opaquely skips blending every pixel.
+    static func composite(_ color: NSColor, over background: NSColor) -> CGColor {
+        guard let top = color.usingColorSpace(.sRGB), top.alphaComponent < 1,
+              let bottom = background.usingColorSpace(.sRGB), bottom.alphaComponent == 1 else { return color.cgColor }
+        let alpha = top.alphaComponent
+        func mix(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a * alpha + b * (1 - alpha) }
+        return NSColor(srgbRed: mix(top.redComponent, bottom.redComponent), green: mix(top.greenComponent, bottom.greenComponent),
+                       blue: mix(top.blueComponent, bottom.blueComponent), alpha: 1).cgColor
+    }
+}
+
 extension BlockLayout {
-    /// Fills the code block's box and inline code backgrounds on the lines
-    /// that intersect `clip`.
-    func drawBackgrounds(in context: CGContext, at origin: CGPoint, clip: CGRect, color: CGColor) {
-        if drawsCodeBackground {
-            let rect = CGRect(x: origin.x, y: origin.y, width: columnWidth, height: height)
-            context.setFillColor(color)
-            context.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
-            context.fillPath()
+    /// Fills code block backgrounds, quote bars, rules, and the inline code
+    /// backgrounds on the lines that intersect `clip`.
+    func drawBackgrounds(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle) {
+        for box in boxes {
+            let rect = box.rect.offsetBy(dx: origin.x, dy: origin.y)
+            guard rect.intersects(clip) else { continue }
+            switch box.kind {
+            case .codeBackground:
+                context.setFillColor(style.codeBackground)
+                let radius = style.codeBlockCornerRadius
+                context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+                context.fillPath()
+            case .quoteBar, .rule:
+                context.setFillColor(style.muted)
+                context.fill(rect)
+            }
         }
         forEachLine(intersecting: clip, at: origin) { line in
             for decoration in line.decorations where decoration.kind == .codeBackground {
-                let rect = decoration.rect.offsetBy(dx: origin.x + textInset, dy: origin.y)
-                context.setFillColor(color)
+                let rect = decoration.rect.offsetBy(dx: origin.x + line.x, dy: origin.y)
+                context.setFillColor(style.codeBackground)
                 context.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
                 context.fillPath()
             }
@@ -522,27 +581,101 @@ extension BlockLayout {
     }
 
     /// Draws the lines that intersect `clip`, coloring each run by its role
-    /// and styles, then their underlines and strikethroughs. The context's
-    /// text matrix must already flip glyphs for a flipped view.
-    func drawText(in context: CGContext, at origin: CGPoint, clip: CGRect, colors: [CGColor]) {
+    /// and styles, then their underlines and strikethroughs, then list
+    /// markers. Lines of a code block wider than its box move left by
+    /// `codeOffset` of its index and are clipped to the box; Core Graphics
+    /// skips clipped glyphs cheaply, so even a 4,842-character line costs
+    /// little to draw. The context's text matrix must already flip glyphs
+    /// for a flipped view.
+    func drawText(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle,
+                  codeOffset: (Int) -> CGFloat) {
         forEachLine(intersecting: clip, at: origin) { line in
-            let position = CGPoint(x: origin.x + textInset, y: origin.y + line.baseline)
+            var x = origin.x + line.x
+            let isClipped = line.codeBlock >= 0 && codeBlocks[Int(line.codeBlock)].maxOffset > 0
+            if isClipped {
+                x -= codeOffset(Int(line.codeBlock))
+                context.saveGState()
+                context.clip(to: codeBlocks[Int(line.codeBlock)].rect.offsetBy(dx: origin.x, dy: origin.y))
+            }
+            let position = CGPoint(x: x, y: origin.y + line.baseline)
             if let color = line.color {
-                context.setFillColor(colors[Int(color)])
+                context.setFillColor(style.text[Int(color)])
                 context.textPosition = position
                 CTLineDraw(line.line, context)
             } else {
                 for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
-                    let style = styleRun(at: CTRunGetStringRange(run).location)
-                    context.setFillColor(colors[Int(ColorIndex.of(style.role, style.styles))])
+                    let runStyle = styleRun(at: CTRunGetStringRange(run).location)
+                    context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles))])
                     context.textPosition = position
                     CTRunDraw(run, context, CFRange())
                 }
             }
             for decoration in line.decorations where decoration.kind != .codeBackground {
-                context.setFillColor(colors[Int(decoration.color)])
-                context.fill(decoration.rect.offsetBy(dx: origin.x + textInset, dy: origin.y))
+                context.setFillColor(style.text[Int(decoration.color)])
+                context.fill(decoration.rect.offsetBy(dx: x, dy: origin.y))
             }
+            if isClipped { context.restoreGState() }
+        }
+        drawMarkers(in: context, at: origin, clip: clip, style: style)
+    }
+
+    /// Bullets, numbers, and task boxes beside the lines that intersect `clip`.
+    private func drawMarkers(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle) {
+        guard !markers.isEmpty else { return }
+        // No marker reaches farther than a line from its baseline.
+        let reach: CGFloat = 32
+        var low = 0
+        var high = markers.count
+        while low < high {
+            let mid = (low + high) / 2
+            if origin.y + markers[mid].baseline + reach < clip.minY { low = mid + 1 } else { high = mid }
+        }
+        for marker in markers[low...] {
+            guard origin.y + marker.baseline - reach < clip.maxY else { break }
+            let rect = marker.rect.offsetBy(dx: origin.x, dy: origin.y)
+            guard rect.intersects(clip) else { continue }
+            switch marker.kind {
+            case .disc:
+                context.setFillColor(style.text[Int(marker.color)])
+                context.fillEllipse(in: rect)
+            case .circle:
+                context.setStrokeColor(style.text[Int(marker.color)])
+                context.setLineWidth(1)
+                context.strokeEllipse(in: rect.insetBy(dx: 0.5, dy: 0.5))
+            case .square:
+                context.setFillColor(style.text[Int(marker.color)])
+                context.fill(rect)
+            case .number(let line):
+                context.setFillColor(style.text[Int(marker.color)])
+                context.textPosition = CGPoint(x: rect.minX, y: origin.y + marker.baseline)
+                CTLineDraw(line, context)
+            case .task(let checked):
+                drawTaskBox(in: rect, checked: checked, context: context, style: style)
+            }
+        }
+    }
+
+    /// A display-only checkbox: an outline, or filled with a check mark.
+    private func drawTaskBox(in rect: CGRect, checked: Bool, context: CGContext, style: DrawStyle) {
+        let radius = min(style.taskBoxCornerRadius, rect.width / 2)
+        if checked {
+            context.setFillColor(style.muted)
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.fillPath()
+            context.setStrokeColor(style.background)
+            context.setLineWidth(max(rect.width / 8, 1.5))
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.move(to: CGPoint(x: rect.minX + rect.width * 0.26, y: rect.minY + rect.height * 0.53))
+            context.addLine(to: CGPoint(x: rect.minX + rect.width * 0.43, y: rect.minY + rect.height * 0.71))
+            context.addLine(to: CGPoint(x: rect.minX + rect.width * 0.75, y: rect.minY + rect.height * 0.31))
+            context.strokePath()
+        } else {
+            context.setStrokeColor(style.muted)
+            context.setLineWidth(1)
+            let inset = rect.insetBy(dx: 0.5, dy: 0.5)
+            context.addPath(CGPath(roundedRect: inset, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.strokePath()
         }
     }
 

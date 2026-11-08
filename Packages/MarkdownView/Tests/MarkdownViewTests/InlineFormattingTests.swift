@@ -255,7 +255,7 @@ final class InlineFormattingTests: XCTestCase {
         let line = layout.lines[0]
         func point(at offset: Int) -> CGPoint {
             let x = CTLineGetOffsetForStringIndex(line.line, offset, nil)
-            return CGPoint(x: snapshot.columnX + layout.textInset + x + 2, y: snapshot.blockTops[0] + line.top + 2)
+            return CGPoint(x: snapshot.columnX + line.x + x + 2, y: snapshot.blockTops[0] + line.top + 2)
         }
         XCTAssertEqual(snapshot.linkDestination(at: point(at: 6)), "https://example.com")
         XCTAssertEqual(snapshot.linkDestination(at: point(at: 13)), "https://example.com")

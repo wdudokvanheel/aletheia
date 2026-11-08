@@ -68,7 +68,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     /// end of the current selection away from the point stays put.
     func beginSelection(at point: CGPoint, clickCount: Int, extending: Bool) {
         granularity = clickCount >= 3 ? .paragraph : clickCount == 2 ? .word : .character
-        guard let position = snapshot.position(at: point) else {
+        guard let position = snapshot.position(at: point, codeOffsets: codeOffsets) else {
             selectionAnchor = nil
             return setSelection(nil)
         }
@@ -89,7 +89,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     /// Selects from the anchor to `point`, by the granularity of the click
     /// that started the drag.
     func extendSelection(to point: CGPoint) {
-        guard let anchor = selectionAnchor, let position = snapshot.position(at: point) else { return }
+        guard let anchor = selectionAnchor, let position = snapshot.position(at: point, codeOffsets: codeOffsets) else { return }
         let unit = snapshot.unitRange(at: position, granularity: granularity, forward: position >= anchor.upperBound)
         setSelection(min(anchor.lowerBound, unit.lowerBound)..<max(anchor.upperBound, unit.upperBound))
     }
@@ -198,7 +198,8 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     }
 
     @objc func lookUpSelection(_ sender: Any?) {
-        guard let selection, let origin = snapshot.baselineOrigin(of: selection.lowerBound) else { return }
+        guard let selection, let origin = snapshot.baselineOrigin(of: selection.lowerBound, codeOffsets: codeOffsets)
+        else { return }
         let font = snapshot.typography.font(origin.style.role, origin.style.styles) as NSFont
         let color = palette.color(for: origin.style.role, styles: origin.style.styles)
         let string = NSAttributedString(string: snapshot.text(in: selection), attributes: [.font: font, .foregroundColor: color])
@@ -224,7 +225,7 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
     override func menu(for event: NSEvent) -> NSMenu? {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        if let position = snapshot.position(at: point),
+        if let position = snapshot.position(at: point, codeOffsets: codeOffsets),
            !(selection.map { $0.lowerBound <= position && position <= $0.upperBound } ?? false) {
             let word = snapshot.unitRange(at: position, granularity: .word)
             let isWord = snapshot.isOverText(point) && snapshot.text(in: word).contains { !$0.isWhitespace }

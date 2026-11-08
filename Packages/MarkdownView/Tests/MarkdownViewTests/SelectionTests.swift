@@ -16,7 +16,7 @@ final class SelectionTests: XCTestCase {
         let layout = snapshot.layouts[block]
         let line = layout.lines[layout.lineIndex(containing: offset, upstream: false)]
         let x = CTLineGetOffsetForStringIndex(line.line, offset, nil)
-        return CGPoint(x: snapshot.columnX + layout.textInset + x + dx, y: snapshot.blockTops[block] + line.top + line.height / 2)
+        return CGPoint(x: snapshot.columnX + line.x + x + dx, y: snapshot.blockTops[block] + line.top + line.height / 2)
     }
 
     private func bottom(_ snapshot: MarkdownSnapshot, _ block: Int) -> CGFloat {

@@ -2,11 +2,18 @@ import CoreGraphics
 import CoreText
 import Foundation
 
-/// One laid-out line, positioned relative to its block's top.
+/// One laid-out line, positioned relative to its block's top and the text
+/// column's left edge.
 struct LineLayout {
     let line: CTLine
     /// The line's UTF-16 range in the block's display text.
     let range: Range<Int>
+    /// Where the text starts: the indent of its lists and quotes, plus a code
+    /// block's padding. A scrolled code block moves its lines left of this.
+    let x: CGFloat
+    /// The right edge of the line's text area, which a selection continuing
+    /// past the line reaches.
+    let maxX: CGFloat
     let top: CGFloat
     let height: CGFloat
     let baseline: CGFloat
@@ -15,6 +22,8 @@ struct LineLayout {
     let color: UInt8?
     /// Whether the line ends with a `\n` from a hard break or block separator.
     let endsWithNewline: Bool
+    /// The line's code block in `BlockLayout.codeBlocks`, or -1.
+    let codeBlock: Int32
     /// Inline code backgrounds, link underlines, and strikethroughs, in run order.
     let decorations: [Decoration]
 
@@ -22,8 +31,8 @@ struct LineLayout {
     var caretEnd: Int { endsWithNewline ? range.upperBound - 1 : range.upperBound }
 }
 
-/// A rectangle drawn with a line's text. x is relative to the text's left
-/// edge and y to the block's top, like the line itself.
+/// A rectangle drawn with a line's text. x is relative to the line's `x` and
+/// y to the block's top, like the line itself.
 struct Decoration {
     enum Kind: UInt8 {
         case codeBackground, underline, strikethrough
@@ -40,22 +49,71 @@ struct Decoration {
     let tag: Int32
 }
 
+/// A rectangle drawn behind a block's text, relative to the block's top and
+/// the column's left edge: a code block's background, a quote's bar, or a
+/// thematic break.
+struct BlockBox {
+    enum Kind: UInt8 {
+        case codeBackground, quoteBar, rule
+    }
+
+    let kind: Kind
+    let rect: CGRect
+}
+
+/// A list item's bullet, number, or task box beside its first line, relative
+/// to the block's top and the column's left edge. Never part of the text.
+struct MarkerLayout {
+    enum Kind {
+        case disc, circle, square
+        case number(CTLine)
+        case task(checked: Bool)
+    }
+
+    let kind: Kind
+    /// The shape, or a number's typographic bounds.
+    let rect: CGRect
+    /// The baseline of the item's first line.
+    let baseline: CGFloat
+    /// The `ColorIndex` of a bullet or number.
+    let color: UInt8
+}
+
+/// A code block's background box, relative to the block's top and the
+/// column's left edge. Its lines never wrap; when the widest is wider than
+/// the box, the view scrolls the block horizontally on its own.
+struct CodeBlockLayout {
+    let rect: CGRect
+    /// The widest line plus the padding on both sides.
+    let contentWidth: CGFloat
+
+    /// How far the lines can scroll left.
+    var maxOffset: CGFloat { max((contentWidth - rect.width).rounded(.up), 0) }
+}
+
 /// A block laid out at one column width with Core Text. Immutable, so it can
-/// be built off the main thread and shared between snapshots.
+/// be built off the main thread and shared between snapshots. It depends only
+/// on the block, the width, and the typography, so unchanged blocks keep it
+/// across edits.
 public final class BlockLayout: @unchecked Sendable {
     /// The text column width this layout was made for.
     public let columnWidth: CGFloat
     /// The height of the block's box, without margins.
     public let height: CGFloat
+    /// The margins above and below, each the largest of the margins that meet
+    /// there, as CSS collapses them through lists and quotes.
     public let marginTop: CGFloat
     public let marginBottom: CGFloat
-    /// Line positions are relative to the block's top; x is this inset.
+    /// Line positions are relative to the block's top, in display order.
     let lines: [LineLayout]
-    let textInset: CGFloat
+    let boxes: [BlockBox]
+    /// In display order, so their baselines never decrease.
+    let markers: [MarkerLayout]
+    /// In display order, top to bottom.
+    let codeBlocks: [CodeBlockLayout]
     /// The length of the block's display text in UTF-16 units.
     let textLength: Int
     let styleRuns: [StyleRun]
-    let drawsCodeBackground: Bool
     /// Dropped blocks (raw HTML) take no space and do not separate margins.
     let isDropped: Bool
     /// A placeholder with an estimated height and no lines, used for blocks
@@ -67,97 +125,39 @@ public final class BlockLayout: @unchecked Sendable {
     /// Whether this layout can be drawn and reused at `columnWidth`.
     func isFinal(for columnWidth: CGFloat) -> Bool { !isEstimate && self.columnWidth == columnWidth }
 
-    /// Lays out `block` with `CTTypesetter` line breaking and CSS-style line
-    /// boxes. Cost is proportional to the block's text.
+    /// Lays out `block`: paragraphs and headings with `CTTypesetter` line
+    /// breaking and CSS-style line boxes, code blocks one line per source
+    /// line, inside the indents of their lists and quotes and with collapsed
+    /// margins between them. Cost is proportional to the block's text.
     public convenience init(block: MarkdownBlock, columnWidth: CGFloat, typography: Typography) {
-        let padding = block.kind == .codeBlock ? typography.codeBlockPadding : 0
-        let lines = block.kind == .htmlBlock ? [] : Self.lines(for: block, width: max(columnWidth - 2 * padding, 1),
-                                                               top: padding, typography: typography)
-        self.init(block: block, columnWidth: columnWidth, typography: typography, lines: lines,
-                  height: (lines.last.map { $0.top + $0.height } ?? padding) + padding, isEstimate: false)
+        self.init(block: block, columnWidth: columnWidth, typography: typography, isEstimate: false)
     }
 
     /// A placeholder whose height is estimated from the text length, at a
     /// small fraction of the cost of a real layout.
     static func estimate(for block: MarkdownBlock, columnWidth: CGFloat, typography: Typography) -> BlockLayout {
-        let padding = block.kind == .codeBlock ? typography.codeBlockPadding : 0
-        var height = block.kind == .htmlBlock ? 0 : 2 * padding
-        if !block.text.isEmpty, block.kind != .htmlBlock {
-            let role = block.styleRuns.first?.role ?? .body
-            let averageCharacterWidth = CTFontGetSize(typography.fonts[Int(role.rawValue)]) * (role == .code ? 0.6 : 0.5)
-            let utf8 = block.text.utf8
-            let newlines = utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
-            let wrapped = CGFloat(utf8.count) * averageCharacterWidth / max(columnWidth - 2 * padding, 1)
-            height += CGFloat(newlines + 1 + Int(wrapped)) * typography.lineHeight(role)
-        }
-        return BlockLayout(block: block, columnWidth: columnWidth, typography: typography, lines: [],
-                           height: height, isEstimate: true)
+        BlockLayout(block: block, columnWidth: columnWidth, typography: typography, isEstimate: true)
     }
 
-    private init(block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, lines: [LineLayout],
-                 height: CGFloat, isEstimate: Bool) {
+    private init(block: MarkdownBlock, columnWidth: CGFloat, typography: Typography, isEstimate: Bool) {
         self.columnWidth = columnWidth
         styleRuns = block.styleRuns
         isDropped = block.kind == .htmlBlock
-        let margins = isDropped ? (top: 0, bottom: 0) : typography.margins(for: block.kind)
-        marginTop = margins.top
-        marginBottom = margins.bottom
-        drawsCodeBackground = block.kind == .codeBlock
-        textInset = drawsCodeBackground ? typography.codeBlockPadding : 0
-        self.lines = lines
-        self.height = height
-        self.isEstimate = isEstimate
         textLength = block.text.utf16.count
+        self.isEstimate = isEstimate
+        var builder = BlockLayoutBuilder(block: block, textLength: textLength, columnWidth: columnWidth,
+                                         typography: typography, isEstimate: isEstimate)
+        let metrics = isDropped ? (height: 0, top: 0, bottom: 0) : builder.build()
+        height = metrics.height
+        marginTop = metrics.top
+        marginBottom = metrics.bottom
+        lines = builder.lines
+        boxes = builder.boxes
+        markers = builder.markers
+        codeBlocks = builder.codeBlocks
     }
 
-    private static func lines(for block: MarkdownBlock, width: CGFloat, top: CGFloat, typography: Typography) -> [LineLayout] {
-        guard !block.text.isEmpty, let string = makeString(block, typography: typography) else { return [] }
-        let typesetter = CTTypesetterCreateWithAttributedString(string)
-        let length = CFAttributedStringGetLength(string)
-        let characters = CFAttributedStringGetString(string)
-        var lines: [LineLayout] = []
-        var start = 0
-        var y = top
-        var runIndex = 0
-        while start < length {
-            let count = max(CTTypesetterSuggestLineBreak(typesetter, start, Double(width)), 1)
-            let range = start..<min(start + count, length)
-            let line = CTTypesetterCreateLine(typesetter, CFRange(location: range.lowerBound, length: range.count))
-            var ascent: CGFloat = 0
-            var descent: CGFloat = 0
-            var leading: CGFloat = 0
-            CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
-
-            // Roles and styles in this line, from the style runs (which are in order).
-            let runs = block.styleRuns
-            while runIndex < runs.count - 1, runs[runIndex].range.upperBound <= range.lowerBound { runIndex += 1 }
-            let first = runs.isEmpty ? StyleRun(range: 0..<length, role: .body) : runs[runIndex]
-            var color: UInt8? = ColorIndex.of(first.role, first.styles)
-            var lineHeight = typography.lineHeight(first.role)
-            var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
-            var index = runIndex + 1
-            while index < runs.count, runs[index].range.lowerBound < range.upperBound {
-                let run = runs[index]
-                if ColorIndex.of(run.role, run.styles) != color { color = nil }
-                lineHeight = max(lineHeight, typography.lineHeight(run.role))
-                isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
-                index += 1
-            }
-
-            let halfLeading = (lineHeight - (ascent + descent)) / 2
-            let baseline = y + halfLeading + ascent
-            lines.append(LineLayout(line: line, range: range, top: y, height: lineHeight, baseline: baseline,
-                                    color: color,
-                                    endsWithNewline: CFStringGetCharacterAtIndex(characters, range.upperBound - 1) == 0x0A,
-                                    decorations: isDecorated ? decorations(of: line, baseline: baseline, block: block,
-                                                                           typography: typography) : []))
-            y += lineHeight
-            start = range.upperBound
-        }
-        return lines
-    }
-
-    private static func makeString(_ block: MarkdownBlock, typography: Typography) -> CFAttributedString? {
+    static func makeString(_ block: MarkdownBlock, typography: Typography) -> CFAttributedString? {
         var text = block.text
         let string: CFString? = text.withUTF8 { bytes in
             CFStringCreateWithBytes(nil, bytes.baseAddress, bytes.count, CFStringBuiltInEncodings.UTF8.rawValue, false)
@@ -194,8 +194,8 @@ public final class BlockLayout: @unchecked Sendable {
     /// The decorations of one line, from its glyph runs, so they follow the
     /// glyphs' visual positions. Nothing is decorated under the trailing
     /// whitespace of a wrapped line.
-    private static func decorations(of line: CTLine, baseline: CGFloat, block: MarkdownBlock,
-                                    typography: Typography) -> [Decoration] {
+    static func decorations(of line: CTLine, baseline: CGFloat, block: MarkdownBlock,
+                            typography: Typography) -> [Decoration] {
         let visibleWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line))
         var decorations: [Decoration] = []
         for run in CTLineGetGlyphRuns(line) as? [CTRun] ?? [] where CTRunGetGlyphCount(run) > 0 {
@@ -241,7 +241,7 @@ public final class BlockLayout: @unchecked Sendable {
     }
 
     /// The index of the style run holding a UTF-16 offset, or the count.
-    private static func styleRunIndex(in runs: [StyleRun], at offset: Int) -> Int {
+    static func styleRunIndex(in runs: [StyleRun], at offset: Int) -> Int {
         var low = 0
         var high = runs.count
         while low < high {

@@ -42,7 +42,7 @@ final class LinkViewTests: XCTestCase {
         let layout = snapshot.layouts[0]
         let line = layout.lines[layout.lineIndex(containing: offset, upstream: false)]
         let x = CTLineGetOffsetForStringIndex(line.line, offset, nil)
-        return CGPoint(x: snapshot.columnX + layout.textInset + x + dx, y: snapshot.blockTops[0] + line.top + line.height / 2)
+        return CGPoint(x: snapshot.columnX + line.x + x + dx, y: snapshot.blockTops[0] + line.top + line.height / 2)
     }
 
     private func event(_ type: NSEvent.EventType, at point: CGPoint, clicks: Int = 1,
