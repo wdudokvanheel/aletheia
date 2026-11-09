@@ -125,6 +125,8 @@ struct RenderRequest: Sendable {
     /// The natural sizes of the images loaded so far. A relayout of the same
     /// source with new sizes lays out only the blocks whose images changed.
     var images: ImageSizes = .none
+    /// The highlighter for the code of the blocks a new source changes.
+    var highlighting: CodeHighlighting?
 }
 
 enum RenderOutcome: Sendable {
@@ -193,7 +195,8 @@ final class RenderWorker: @unchecked Sendable {
             let parsed: MarkdownDocument.ParseResult
             do {
                 parsed = try signposter.withIntervalSignpost("parse") {
-                    try MarkdownDocument.parse(request.source, reusing: request.base.document)
+                    try MarkdownDocument.parse(request.source, reusing: request.base.document,
+                                               highlighting: request.highlighting)
                 }
             } catch {
                 post(.failure(generation: generation, message: "\(error)"))
@@ -375,18 +378,20 @@ final class RenderPipeline {
     /// Queues a request and returns its generation, which supersedes every
     /// earlier one. A new source is diffed against `base`, which should be
     /// the installed snapshot, and lays out first what `plan` says by the
-    /// time it is parsed; without a plan, the top when `visibleFirst`.
+    /// time it is parsed; without a plan, the top when `visibleFirst`. The
+    /// code of the blocks it changes is highlighted with `highlighting`.
     @discardableResult
     func submit(sourceGeneration: UInt64, source: String, width: CGFloat, scrollFraction: CGFloat,
                 viewportHeight: CGFloat, visibleFirst: Bool, complete: Bool,
-                base: MarkdownSnapshot = .empty, plan: RenderPlan? = nil, images: ImageSizes = .none) -> UInt64 {
+                base: MarkdownSnapshot = .empty, plan: RenderPlan? = nil, images: ImageSizes = .none,
+                highlighting: CodeHighlighting? = nil) -> UInt64 {
         generation += 1
         isCancelled = false
         worker.latestGeneration.store(generation, ordering: .relaxed)
         let request = RenderRequest(generation: generation, sourceGeneration: sourceGeneration, source: source,
                                     width: width, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
                                     plan: plan ?? RenderPlan(visibleFirst ? .offset(0) : .everything),
-                                    complete: complete, base: base, images: images)
+                                    complete: complete, base: base, images: images, highlighting: highlighting)
         let post: @Sendable (RenderOutcome) -> Void = { [weak self] outcome in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.receive(outcome) }

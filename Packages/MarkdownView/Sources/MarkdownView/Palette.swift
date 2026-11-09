@@ -13,6 +13,17 @@ public struct Palette: Sendable, Equatable {
     public var mutedText: NSColor
     /// Link text and its underline.
     public var link: NSColor
+    /// Code block text by the kind of token the view's `codeHighlighter`
+    /// reported for it; each starts as `codeText`. Text outside tokens keeps
+    /// `codeText`, or in a block quote `mutedText`.
+    public var codeComment: NSColor
+    public var codeString: NSColor
+    public var codeKeyword: NSColor
+    public var codeNumber: NSColor
+    public var codeName: NSColor
+    public var codeProperty: NSColor
+    public var codeMarkup: NSColor
+    public var codeInvalid: NSColor
 
     public init(background: NSColor, text: NSColor, headingText: NSColor, codeText: NSColor,
                 codeBackground: NSColor, mutedText: NSColor, link: NSColor = .linkColor) {
@@ -23,6 +34,14 @@ public struct Palette: Sendable, Equatable {
         self.codeBackground = codeBackground
         self.mutedText = mutedText
         self.link = link
+        codeComment = codeText
+        codeString = codeText
+        codeKeyword = codeText
+        codeNumber = codeText
+        codeName = codeText
+        codeProperty = codeText
+        codeMarkup = codeText
+        codeInvalid = codeText
     }
 
     /// System colors that follow light and dark mode.
@@ -59,9 +78,24 @@ public struct Palette: Sendable, Equatable {
             : styles.contains(.link) ? link : color(for: styles.contains(.quoted) ? .quote : role)
     }
 
-    /// Draw-time colors indexed by `ColorIndex`: one per role, then links.
+    func color(for token: CodeTokenKind) -> NSColor {
+        switch token {
+        case .comment: codeComment
+        case .string: codeString
+        case .keyword: codeKeyword
+        case .number: codeNumber
+        case .name: codeName
+        case .property: codeProperty
+        case .markup: codeMarkup
+        case .invalid: codeInvalid
+        }
+    }
+
+    /// Draw-time colors indexed by `ColorIndex`: one per role, then links,
+    /// then one per token kind.
     var cgColors: [CGColor] {
         TextRole.allCases.map { color(for: $0).cgColor } + [link.cgColor]
+            + CodeTokenKind.allCases.map { color(for: $0).cgColor }
     }
 }
 
@@ -69,8 +103,13 @@ public struct Palette: Sendable, Equatable {
 enum ColorIndex {
     static let link = UInt8(TextRole.allCases.count)
 
-    static func of(_ role: TextRole, _ styles: InlineStyle) -> UInt8 {
-        styles.contains(.image) ? TextRole.quote.rawValue
+    static func token(_ kind: CodeTokenKind) -> UInt8 { link + 1 + kind.rawValue }
+
+    /// Code block text in a token takes the token's color, in a block quote
+    /// too; only code block text has tokens.
+    static func of(_ role: TextRole, _ styles: InlineStyle, _ token: CodeTokenKind? = nil) -> UInt8 {
+        if let token, role == .code { return Self.token(token) }
+        return styles.contains(.image) ? TextRole.quote.rawValue
             : styles.contains(.link) ? link : styles.contains(.quoted) ? TextRole.quote.rawValue : role.rawValue
     }
 }

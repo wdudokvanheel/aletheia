@@ -47,11 +47,16 @@ public struct StyleRun: Sendable, Equatable {
     public var range: Range<Int>
     public var role: TextRole
     public var styles: InlineStyle
+    /// In code block text (the `code` role), the kind of the token the
+    /// host's `MarkdownCodeHighlighter` reported here, which picks its color;
+    /// nil for text outside tokens and without a highlighter.
+    public var token: CodeTokenKind?
 
-    public init(range: Range<Int>, role: TextRole, styles: InlineStyle = []) {
+    public init(range: Range<Int>, role: TextRole, styles: InlineStyle = [], token: CodeTokenKind? = nil) {
         self.range = range
         self.role = role
         self.styles = styles
+        self.token = token
     }
 }
 
@@ -322,6 +327,11 @@ public struct MarkdownBlock: Sendable, Equatable {
     /// The grid of each table in the block, in display order: one for a
     /// table block, any number in a list or quote.
     var tables: [TableStructure] = []
+    /// The info string of each code segment in the block, in display order,
+    /// without the whitespace around it: one for a code block, any number in
+    /// a list or quote. Empty strings for indented code and front matter
+    /// shown as code.
+    public internal(set) var codeInfo: [String] = []
     /// Front matter at the top of the file: a key/value `table`, or a
     /// `codeBlock` when its lines are not all simple `key: value` pairs.
     var isFrontMatter = false
@@ -363,6 +373,8 @@ public struct MarkdownDocument: Sendable, Equatable {
     /// which the display text of every block can depend on. Nil for
     /// documents built by hand, which never match a parse.
     private(set) var definitions: [UInt8]?
+    /// The highlighter the code blocks' tokens came from.
+    private(set) var highlighting: CodeHighlighting?
 
     public init(blocks: [MarkdownBlock]) {
         self.blocks = blocks
@@ -378,9 +390,14 @@ public struct MarkdownDocument: Sendable, Equatable {
     /// `previous`: blocks equal to one of `previous` keep that block's display
     /// content instead of building it again, unless the link reference
     /// definitions differ, since every block's display text depends on them.
-    static func parse(_ source: String, reusing previous: MarkdownDocument?) throws -> ParseResult {
+    /// The code of the blocks built again is highlighted with `highlighting`;
+    /// when `previous` was highlighted with another, blocks with code are
+    /// built again too.
+    static func parse(_ source: String, reusing previous: MarkdownDocument?,
+                      highlighting: CodeHighlighting? = nil) throws -> ParseResult {
         let source = withoutNUL(contiguousUTF8(source))
-        if let previous, previous.definitions != nil, isSameText(previous.source, source) {
+        if let previous, previous.definitions != nil, previous.highlighting == highlighting,
+           isSameText(previous.source, source) {
             // Unchanged, as when a document is shown again: nothing to parse.
             let count = previous.blocks.count
             let match = BlockMatch(oldCount: count, newCount: count, equal: { $0 == $1 }, oldHash: { $0 }, newHash: { $0 })
@@ -388,7 +405,7 @@ public struct MarkdownDocument: Sendable, Equatable {
             return ParseResult(document: previous, match: match, edit: SourceEdit(old: end..<end, new: end..<end))
         }
         let result = try source.utf8.withContiguousStorageIfAvailable { bytes in
-            try MarkdownParser.parse(utf8: bytes, previous: previous)
+            try MarkdownParser.parse(utf8: bytes, previous: previous, highlighting: highlighting)
         }
         guard var result else { throw MarkdownError.parserUnavailable }
         result.document.source = source
@@ -451,10 +468,11 @@ public struct MarkdownDocument: Sendable, Equatable {
         var edit: SourceEdit
     }
 
-    init(blocks: [MarkdownBlock], sourceUTF16Count: Int, definitions: [UInt8]) {
+    init(blocks: [MarkdownBlock], sourceUTF16Count: Int, definitions: [UInt8], highlighting: CodeHighlighting?) {
         self.blocks = blocks
         self.sourceUTF16Count = sourceUTF16Count
         self.definitions = definitions
+        self.highlighting = highlighting
     }
 }
 

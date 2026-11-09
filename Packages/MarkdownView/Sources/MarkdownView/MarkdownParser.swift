@@ -28,9 +28,11 @@ enum MarkdownParser {
     /// Parses UTF-8 Markdown with source positions into top-level blocks.
     /// Blocks equal to one of `previous` (same kind, indentation, and source
     /// text) take its display content instead of building it again, as long
-    /// as both have the same link reference definitions.
-    static func parse(utf8 bytes: UnsafeBufferPointer<UInt8>,
-                      previous: MarkdownDocument?) throws -> MarkdownDocument.ParseResult {
+    /// as both have the same link reference definitions, and for blocks with
+    /// code, the same highlighting. The code of blocks built again is
+    /// highlighted with `highlighting`.
+    static func parse(utf8 bytes: UnsafeBufferPointer<UInt8>, previous: MarkdownDocument?,
+                      highlighting: CodeHighlighting?) throws -> MarkdownDocument.ParseResult {
         cmark_gfm_core_extensions_ensure_registered()
         guard let parser = cmark_parser_new(CMARK_OPT_SOURCEPOS) else { throw MarkdownError.parserUnavailable }
         defer { cmark_parser_free(parser) }
@@ -88,20 +90,24 @@ enum MarkdownParser {
         let definitions = Self.definitions(in: bytes, spans: spans)
         var match: BlockMatch?
         if let previous, let old = previous.definitions, old == definitions {
+            // Tokens come from the highlighter: another one colors code anew.
+            let keepsCode = previous.highlighting == highlighting
             match = BlockMatch(oldCount: previous.blocks.count, newCount: spans.count,
-                               equal: { isEqual(previous.blocks[$0], spans[$1], bytes) },
+                               equal: { (keepsCode || previous.blocks[$0].codeInfo.isEmpty)
+                                   && isEqual(previous.blocks[$0], spans[$1], bytes) },
                                oldHash: { hash(previous.blocks[$0]) },
                                newHash: { hash(spans[$0], bytes) })
         }
 
         // Blocks the diff did not match get their display content built,
-        // in parallel when there are several: each walks only its own
-        // subtree, and the only thing cmark changes during a walk is the
-        // cached C string of a node in that subtree.
+        // and their code highlighted, in parallel when there are several:
+        // each walks only its own subtree, and the only thing cmark changes
+        // during a walk is the cached C string of a node in that subtree.
         let unmatched = spans.indices.filter { match?.oldIndex(ofNew: $0) == nil }
         let built = UnsafeMutableBufferPointer<MarkdownBlock>.allocate(capacity: unmatched.count)
         defer { built.deallocate() }
-        let context = BuildContext(bytes: bytes, lines: lines, spans: spans, unmatched: unmatched, built: built)
+        let context = BuildContext(bytes: bytes, lines: lines, spans: spans, unmatched: unmatched, built: built,
+                                   highlighter: highlighting?.highlighter)
         if unmatched.count < 8 {
             for slot in unmatched.indices { context.build(slot) }
         } else {
@@ -121,7 +127,8 @@ enum MarkdownParser {
             }
         }
         return MarkdownDocument.ParseResult(
-            document: MarkdownDocument(blocks: blocks, sourceUTF16Count: lines.utf16Count, definitions: definitions),
+            document: MarkdownDocument(blocks: blocks, sourceUTF16Count: lines.utf16Count, definitions: definitions,
+                                       highlighting: highlighting),
             match: match,
             edit: sourceEdit(from: previous, to: bytes, lines: lines))
     }
@@ -164,9 +171,12 @@ enum MarkdownParser {
         let spans: [Span]
         let unmatched: [Int]
         let built: UnsafeMutableBufferPointer<MarkdownBlock>
+        let highlighter: (any MarkdownCodeHighlighter)?
 
         func build(_ slot: Int) {
-            (built.baseAddress! + slot).initialize(to: MarkdownParser.block(for: spans[unmatched[slot]], bytes, lines))
+            var block = MarkdownParser.block(for: spans[unmatched[slot]], bytes, lines)
+            if let highlighter { block.highlightCode(with: highlighter) }
+            (built.baseAddress! + slot).initialize(to: block)
         }
     }
 
@@ -196,6 +206,7 @@ enum MarkdownParser {
         block.segments = display.segments
         block.containers = display.containers
         block.tables = display.tables
+        block.codeInfo = display.codeInfo
         block.images = display.images
         return block
     }
@@ -436,6 +447,7 @@ enum FrontMatter {
                                   sourceMap: SourceMap(anchors: anchors, displayLength: utf16Count, sourceLength: sourceLength))
         block.isFrontMatter = true
         if isKeyValue, !structure.cells.isEmpty { block.tables = [structure] }
+        if !isKeyValue { block.codeInfo = [""] }
         return block
     }
 
@@ -573,6 +585,7 @@ private struct DisplayText {
     private(set) var segments: [BlockSegment] = []
     private(set) var containers: [BlockContainer] = []
     private(set) var tables: [TableStructure] = []
+    private(set) var codeInfo: [String] = []
     private(set) var images: [InlineImage] = []
     private(set) var utf16Count = 0
     private var role = TextRole.body
@@ -712,6 +725,11 @@ private struct DisplayText {
                     endSegment(.heading, level: UInt8(min(max(level, 1), 6)))
                 }
             case CMARK_NODE_CODE_BLOCK:
+                // Indented code has an empty info string.
+                var info = Substring(cmark_node_get_fence_info(node).map { String(cString: $0) } ?? "")
+                while info.first?.isWhitespace == true { info.removeFirst() }
+                while info.last?.isWhitespace == true { info.removeLast() }
+                codeInfo.append(String(info))
                 beginSegment()
                 role = .code
                 appendCodeBlock(node)

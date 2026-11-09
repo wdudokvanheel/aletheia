@@ -203,8 +203,9 @@ extension MarkdownSnapshot {
     /// `MarkdownDocument.parse(source)` from scratch.
     static func updating(_ base: MarkdownSnapshot, to source: String, width: CGFloat,
                          typography: Typography = .standard, generation: UInt64 = 0,
-                         images: ImageSizes = .none) throws -> (snapshot: MarkdownSnapshot, reused: Int, laidOut: Int) {
-        let parsed = try MarkdownDocument.parse(source, reusing: base.document)
+                         images: ImageSizes = .none, highlighting: CodeHighlighting? = nil) throws
+        -> (snapshot: MarkdownSnapshot, reused: Int, laidOut: Int) {
+        let parsed = try MarkdownDocument.parse(source, reusing: base.document, highlighting: highlighting)
         let columnWidth = typography.column(forWidth: width).width
         let (reused, hints) = reusableLayouts(from: base, match: parsed.match, blocks: parsed.document.blocks,
                                               columnWidth: columnWidth, typography: typography, images: images)

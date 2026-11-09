@@ -399,21 +399,33 @@ public final class BlockLayout: @unchecked Sendable {
     /// kerning unless `kerned`, with `images` in their places, and with the
     /// base writing direction of each paragraph in `directions`, which
     /// others leave to Core Text: the direction of its first strong character.
+    ///
+    /// Runs that differ only in their code token get the same attributes, so
+    /// code shapes in as few glyph runs as without tokens; the view colors
+    /// tokens within a glyph run when it draws.
     static func makeString(_ string: CFString, runs: [StyleRun], typography: Typography,
                            kerned: Bool = true, images: ImageText? = nil,
                            directions: [ParagraphDirection] = []) -> CFAttributedString? {
-        if runs.count <= 1, runs.first?.styles.contains(.code) != true, runs.first?.styles.contains(.image) != true,
-           directions.isEmpty {
-            let run = runs.first
-            return CFAttributedStringCreate(nil, string, typography.attributes(run?.role ?? .body, run?.styles ?? [],
+        let first = runs.first
+        if first?.styles.contains(.code) != true, first?.styles.contains(.image) != true, directions.isEmpty,
+           runs.dropFirst().allSatisfy({ $0.role == first?.role && $0.styles == first?.styles }) {
+            return CFAttributedStringCreate(nil, string, typography.attributes(first?.role ?? .body, first?.styles ?? [],
                                                                                kerned: kerned))
         }
         guard let attributed = CFAttributedStringCreateMutable(nil, 0) else { return nil }
         CFAttributedStringReplaceString(attributed, CFRange(location: 0, length: 0), string)
         CFAttributedStringBeginEditing(attributed)
         let length = CFStringGetLength(string)
-        for run in runs where run.range.lowerBound < length {
-            let range = CFRange(location: run.range.lowerBound, length: min(run.range.upperBound, length) - run.range.lowerBound)
+        var index = 0
+        while index < runs.count, runs[index].range.lowerBound < length {
+            let run = runs[index]
+            var end = run.range.upperBound
+            while index + 1 < runs.count, runs[index + 1].role == run.role, runs[index + 1].styles == run.styles {
+                index += 1
+                end = runs[index].range.upperBound
+            }
+            index += 1
+            let range = CFRange(location: run.range.lowerBound, length: min(end, length) - run.range.lowerBound)
             CFAttributedStringSetAttributes(attributed, range, typography.attributes(run.role, run.styles, kerned: kerned), true)
             if run.styles.contains(.image) {
                 CFAttributedStringSetAttribute(attributed, range, Typography.imageAttribute, kCFBooleanTrue)
@@ -467,13 +479,13 @@ public final class BlockLayout: @unchecked Sendable {
         // Roles and styles in this line, from the style runs (which are in order).
         while runIndex < runs.count - 1, runs[runIndex].range.upperBound <= range.lowerBound { runIndex += 1 }
         let first = runs.isEmpty ? StyleRun(range: range, role: .body) : runs[runIndex]
-        var color: UInt8? = ColorIndex.of(first.role, first.styles)
+        var color: UInt8? = ColorIndex.of(first.role, first.styles, first.token)
         var lineHeight = typography.lineHeight(first.role)
         var isDecorated = !first.styles.isDisjoint(with: Decoration.styles)
         var next = runIndex + 1
         while next < runs.count, runs[next].range.lowerBound < range.upperBound {
             let run = runs[next]
-            if ColorIndex.of(run.role, run.styles) != color { color = nil }
+            if ColorIndex.of(run.role, run.styles, run.token) != color { color = nil }
             lineHeight = max(lineHeight, typography.lineHeight(run.role))
             isDecorated = isDecorated || !run.styles.isDisjoint(with: Decoration.styles)
             next += 1

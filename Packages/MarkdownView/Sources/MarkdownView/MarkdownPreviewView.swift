@@ -47,6 +47,26 @@ public final class MarkdownPreviewView: NSScrollView {
         set { canvas.images.setProvider(newValue) }
     }
 
+    /// Where code blocks get their tokens, which take the palette's token
+    /// colors. Without one, code is plain. See `MarkdownCodeHighlighter` for
+    /// what the view asks for and when. Tokens are part of the layout, so
+    /// setting or clearing it re-renders the blocks with code, as an edit
+    /// does; the rest keep their layouts.
+    public var codeHighlighter: (any MarkdownCodeHighlighter)? {
+        get { highlighting?.highlighter }
+        set {
+            highlighting = newValue.map(CodeHighlighting.init)
+            guard sourceGeneration > 0 else { return }
+            // The same source again, now parsed with the new highlighter.
+            sourceGeneration += 1
+            if let base = reusedBase, base.sourceGeneration == sourceGeneration - 1 {
+                reusedBase = (sourceGeneration, base.snapshot)
+            }
+            scheduleUpdate()
+            if !isShown || canvas.frame.width < 1 { cancelUpdates() }
+        }
+    }
+
     /// The decoded images the view keeps, and their bytes. See `ImageStore`
     /// for the limits.
     public var retainedImageCount: Int { canvas.images.retainedCount }
@@ -56,6 +76,7 @@ public final class MarkdownPreviewView: NSScrollView {
     private let canvas = MarkdownDocumentView(frame: .zero)
     private let messageLabel = NSTextField(labelWithString: "")
     private var source = ""
+    private var highlighting: CodeHighlighting?
     private var sourceGeneration: UInt64 = 0
     private var installedSourceGeneration: UInt64 = 0
     private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, plan: RenderPlan,
@@ -340,7 +361,8 @@ public final class MarkdownPreviewView: NSScrollView {
         let generation = pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width,
                                          scrollFraction: CGFloat(scrollFraction),
                                          viewportHeight: contentView.bounds.height, visibleFirst: false,
-                                         complete: complete, base: base, plan: plan, images: images)
+                                         complete: complete, base: base, plan: plan, images: images,
+                                         highlighting: highlighting)
         inFlight = (generation, .now)
     }
 
@@ -850,17 +872,58 @@ extension BlockLayout {
             CTLineDraw(line.line, context)
         } else {
             for run in CTLineGetGlyphRuns(line.line) as? [CTRun] ?? [] {
-                let runStyle = styleRun(at: textOffset + CTRunGetStringRange(run).location)
+                let range = CTRunGetStringRange(run)
+                let runStyle = styleRun(at: textOffset + range.location)
                 // An image's place: drawn with the images.
                 if runStyle.styles.contains(.image), ImageText.box(of: run) != nil { continue }
-                context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles))])
                 context.textPosition = position
-                CTRunDraw(run, context, CFRange())
+                if runStyle.range.upperBound >= textOffset + range.location + range.length {
+                    context.setFillColor(style.text[Int(ColorIndex.of(runStyle.role, runStyle.styles, runStyle.token))])
+                    CTRunDraw(run, context, CFRange())
+                } else {
+                    drawTokens(of: run, textOffset: textOffset, in: context, style: style)
+                }
             }
         }
         for decoration in line.decorations where decoration.kind != .codeBackground {
             context.setFillColor(style.text[Int(decoration.color)])
             context.fill(decoration.rect.offsetBy(dx: x, dy: top))
+        }
+    }
+
+    /// Draws a glyph run of code that holds several tokens, which share its
+    /// attributes, as stretches of glyphs of one color each.
+    private func drawTokens(of run: CTRun, textOffset: Int, in context: CGContext, style: DrawStyle) {
+        let count = CTRunGetGlyphCount(run)
+        guard count > 0 else { return }
+        withUnsafeTemporaryAllocation(of: CFIndex.self, capacity: count) { buffer in
+            let indices: UnsafePointer<CFIndex>
+            if let pointer = CTRunGetStringIndicesPtr(run) {
+                indices = pointer
+            } else {
+                CTRunGetStringIndices(run, CFRange(), buffer.baseAddress!)
+                indices = UnsafePointer(buffer.baseAddress!)
+            }
+            var runIndex = Self.styleRunIndex(in: styleRuns, at: textOffset + indices[0])
+            func color(_ glyph: Int) -> UInt8 {
+                let offset = textOffset + indices[glyph]
+                if runIndex >= styleRuns.count || !styleRuns[runIndex].range.contains(offset) {
+                    runIndex = Self.styleRunIndex(in: styleRuns, at: offset)
+                }
+                guard runIndex < styleRuns.count else { return TextRole.body.rawValue }
+                let run = styleRuns[runIndex]
+                return ColorIndex.of(run.role, run.styles, run.token)
+            }
+            var start = 0
+            var current = color(0)
+            for glyph in 1...count {
+                let next = glyph < count ? color(glyph) : current
+                guard glyph == count || next != current else { continue }
+                context.setFillColor(style.text[Int(current)])
+                CTRunDraw(run, context, CFRange(location: start, length: glyph - start))
+                start = glyph
+                current = next
+            }
         }
     }
 

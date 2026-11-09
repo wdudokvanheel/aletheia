@@ -575,8 +575,9 @@ struct TextWindow {
             let lower = max(run.range.lowerBound, range.lowerBound)
             let upper = min(run.range.upperBound, range.upperBound)
             if lower < upper {
-                sliced.append(StyleRun(range: (lower - range.lowerBound)..<(upper - range.lowerBound), role: run.role,
-                                       styles: run.styles))
+                var piece = run
+                piece.range = (lower - range.lowerBound)..<(upper - range.lowerBound)
+                sliced.append(piece)
             }
             index += 1
         }
