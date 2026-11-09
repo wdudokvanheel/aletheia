@@ -69,9 +69,19 @@ enum SyntaxHighlighting {
             }
             return utf16Offset
         }
+        // Few scopes recur across many tokens. Resolve each once: `isWithin`
+        // takes the scope registry's lock per step and interns string literals.
+        var styles: [Scope: SyntaxStyle?] = [:]
         var result: [SyntaxRun] = []
         for token in tokens {
-            guard let style = SyntaxStyle(token.scope) else { continue }
+            let style: SyntaxStyle?
+            if let known = styles[token.scope] {
+                style = known
+            } else {
+                style = SyntaxStyle(token.scope)
+                styles.updateValue(style, forKey: token.scope)
+            }
+            guard let style else { continue }
             let start = advance(to: token.range.lowerBound)
             let end = advance(to: token.range.upperBound)
             result.append(SyntaxRun(range: NSRange(location: start, length: end - start), style: style))
