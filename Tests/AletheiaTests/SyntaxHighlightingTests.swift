@@ -1,4 +1,6 @@
 import AppKit
+import MarkdownView
+import SwiftHighlight
 import XCTest
 @testable import Aletheia
 
@@ -26,6 +28,31 @@ final class SyntaxHighlightingTests: XCTestCase {
             let range = (text as NSString).range(of: needle)
             XCTAssertTrue(runs.contains { $0.style == style && NSIntersectionRange($0.range, range).length == range.length }, language)
             for run in runs { XCTAssertLessThanOrEqual(NSMaxRange(run.range), text.utf16.count) }
+        }
+    }
+
+    func testFencedCodeTakesTheKindsTheEditorGivesTheSameFile() throws {
+        let highlighter = PreviewCodeHighlighter()
+        let fixtures = [
+            ("ts", "a.ts", "// 😀 note\nconst greeting: string = \"héllo\";\nexport function f() { return 42; }", "const", CodeTokenKind.keyword),
+            ("json", "a.json", "{\"😀\": 42, \"list\": [true, null, \"x\"]}", "42", .number),
+            ("sh", "a.sh", "# config 😀\nexport API_KEY=\"hello\"\necho $HOME | grep -c x", "\"hello\"", .string),
+            ("java title=\"Main.java\"", "Main.java",
+             "// 😀\npublic class Main {\n    public static void main(String[] args) { System.out.println(\"hi\" + 42); }\n}",
+             "class", .keyword)
+        ]
+        for (info, file, code, needle, kind) in fixtures {
+            let language = try XCTUnwrap(SyntaxHighlighting.languageID(for: URL(fileURLWithPath: file)), file)
+            let editor = SyntaxHighlighting.runs(in: code, languageID: language)
+            XCTAssertGreaterThan(Set(editor.map { "\($0.style)" }).count, 1, info)
+            let tokens = try XCTUnwrap(highlighter.tokens(for: code, info: info), info)
+            XCTAssertEqual(tokens.map { "\($0.range) \($0.kind)" },
+                           editor.map { "\($0.range.location..<NSMaxRange($0.range)) \($0.style)" }, info)
+            let range = (code as NSString).range(of: needle)
+            XCTAssertTrue(tokens.contains { $0.kind == kind && $0.range == range.location..<NSMaxRange(range) }, info)
+        }
+        for info in ["", "unknown-language", "mermaid"] {
+            XCTAssertNil(highlighter.tokens(for: "const x = 42;", info: info), info)
         }
     }
 
@@ -180,5 +207,82 @@ final class SyntaxHighlightingTests: XCTestCase {
         print("HIGHLIGHT native color application median=\(renderSamples[10])ms p95=\(renderSamples[18])ms max=\(renderSamples[19])ms")
         samples.sort()
         print("HIGHLIGHT 1MiB 20 repeats median=\(samples[10])ms p95=\(samples[18])ms max=\(samples[19])ms")
+    }
+
+    /// A 100 KiB fence of each language, through the preview's highlighter:
+    /// SwiftHighlight's tokenizing and the shared mapping to kinds.
+    func testFenceTimingWhenRequested() throws {
+        guard ProcessInfo.processInfo.environment["ALETHEIA_HIGHLIGHT_BENCHMARK"] == "1" else { throw XCTSkip("Opt-in Release measurement") }
+        let snippets = [
+            ("ts", """
+            /** A cache of parsed records, keyed by id. */
+            export interface Entry<T> { id: string; value: T; updated: Date }
+            export class Cache<T> {
+              private readonly items = new Map<string, Entry<T>>();
+              constructor(private limit = 128) {}
+              get(id: string): T | undefined {
+                const item = this.items.get(id);
+                return item?.value; // may be undefined
+              }
+              set(id: string, value: T): void {
+                if (this.items.size >= this.limit) this.items.clear();
+                this.items.set(id, { id, value, updated: new Date() });
+              }
+            }
+            console.log(`cached ${new Cache<number>(42).get("answer")} at ${Date.now()}`);
+
+            """),
+            ("java", """
+            /**
+             * Routes requests to their handlers.
+             */
+            public final class Router implements Handler {
+                private static final int LIMIT = 128;
+                private final Map<String, Handler> routes = new HashMap<>();
+
+                @Override
+                public Response handle(Request request) throws IOException {
+                    Handler handler = routes.getOrDefault(request.path(), NOT_FOUND);
+                    if (routes.size() > LIMIT) { throw new IllegalStateException("too many: " + routes.size()); }
+                    return handler.handle(request); // delegate
+                }
+            }
+
+            """),
+            ("json", """
+            {"id": 42, "name": "router", "enabled": true, "ratio": 0.75, "tags": ["a", "b"], "owner": null},
+
+            """),
+            ("sh", """
+            # Install the dependencies, then build.
+            export PREFIX="${HOME}/.local"
+            if [ ! -d "$PREFIX/bin" ]; then mkdir -p "$PREFIX/bin"; fi
+            for file in src/*.c; do cc -O2 -c "$file" -o "${file%.c}.o" || exit 1; done
+            echo "built $(ls src/*.o | wc -l) objects" | tee -a build.log
+
+            """)
+        ]
+        let highlighter = PreviewCodeHighlighter()
+        for (info, snippet) in snippets {
+            let code = String(repeating: snippet, count: 100 * 1024 / snippet.utf16.count + 1)
+            let language = try XCTUnwrap(LanguageRegistry.shared.language(named: info))
+            func median(_ body: () -> Int) -> (Double, Double) {
+                _ = body()
+                var samples: [Double] = []
+                for _ in 0..<21 {
+                    let start = ContinuousClock.now
+                    XCTAssertGreaterThan(body(), 0)
+                    let elapsed = start.duration(to: .now).components
+                    samples.append(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+                }
+                samples.sort()
+                return (samples[10], samples[19])
+            }
+            let tokenize = median { language.tokenize(code).count }
+            let total = median { highlighter.tokens(for: code, info: info)?.count ?? 0 }
+            let count = highlighter.tokens(for: code, info: info)?.count ?? 0
+            print("HIGHLIGHT fence \(info) \(code.utf16.count / 1024) KiB, \(count) kinds: tokenize median=\(tokenize.0)ms p95=\(tokenize.1)ms;"
+                  + " with mapping median=\(total.0)ms p95=\(total.1)ms")
+        }
     }
 }

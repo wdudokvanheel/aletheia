@@ -10,7 +10,8 @@ import MarkdownView
 ///
 /// It is the view's image provider: `PreviewImageLoader` loads images
 /// relative to the shown document's folder under `PreviewFilePolicy`, and
-/// HTTPS images under its remote rules.
+/// HTTPS images under its remote rules. Fenced code is highlighted by
+/// `PreviewCodeHighlighter` in the scheme's syntax colors.
 @MainActor
 final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImageProvider {
     let preview = MarkdownPreviewView(frame: .zero)
@@ -61,6 +62,7 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         preview.onTimings = { [weak self] _ in self?.updateTimingsOverlay() }
         preview.onInstall = { [weak self] snapshot in self?.didInstall(snapshot) }
         preview.onOpenLink = { [weak self] destination in self?.openLink(destination) }
+        preview.codeHighlighter = PreviewCodeHighlighter()
         timingsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         timingsLabel.textColor = .white
         timingsLabel.drawsBackground = true
@@ -132,13 +134,25 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         sendSearch()
     }
 
+    /// Code blocks take the scheme's syntax colors, as files in the editor do.
     func applyTheme() {
-        let palette = AppSettings.shared.palette
+        let scheme = AppSettings.shared.selectedScheme
+        let colors = scheme.palette
         // The System scheme follows the view's appearance with dynamic colors.
-        preview.palette = palette.isDark == nil ? .standard : Palette(
-            background: palette.background, text: palette.foreground, headingText: palette.foreground,
-            codeText: palette.foreground, codeBackground: palette.surface, mutedText: palette.muted,
-            link: palette.accent)
+        var palette = colors.isDark == nil ? Palette.standard : Palette(
+            background: colors.background, text: colors.foreground, headingText: colors.foreground,
+            codeText: colors.foreground, codeBackground: colors.surface, mutedText: colors.muted,
+            link: colors.accent)
+        let syntax = scheme.syntaxPalette
+        palette.codeComment = syntax.comment
+        palette.codeString = syntax.string
+        palette.codeKeyword = syntax.keyword
+        palette.codeNumber = syntax.number
+        palette.codeName = syntax.name
+        palette.codeProperty = syntax.property
+        palette.codeMarkup = syntax.markup
+        palette.codeInvalid = syntax.invalid
+        preview.palette = palette
     }
 
     /// The find bar matches in the source buffer and passes its query and

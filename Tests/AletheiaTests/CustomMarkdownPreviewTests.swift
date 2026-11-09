@@ -292,7 +292,59 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         XCTAssertEqual(preview.preview.palette.mutedText, palette.muted)
         settings.selectScheme(id: "system")
         preview.applyTheme()
-        XCTAssertEqual(preview.preview.palette, .standard)
+        var plain = preview.preview.palette
+        for (token, _) in Self.tokenColors { plain[keyPath: token] = plain.codeText }
+        XCTAssertEqual(plain, .standard)
+    }
+
+    /// The preview palette's token colors and the syntax roles they show.
+    @MainActor private static let tokenColors: [(WritableKeyPath<Palette, NSColor>, KeyPath<SyntaxPalette, NSColor>)] = [
+        (\.codeComment, \.comment), (\.codeString, \.string), (\.codeKeyword, \.keyword), (\.codeNumber, \.number),
+        (\.codeName, \.name), (\.codeProperty, \.property), (\.codeMarkup, \.markup), (\.codeInvalid, \.invalid)
+    ]
+
+    @MainActor func testApplyThemeGivesCodeTheSchemesSyntaxColors() {
+        let settings = AppSettings.shared
+        let previous = settings.selectedSchemeID
+        defer { settings.selectScheme(id: previous) }
+        let preview = CustomMarkdownPreview()
+        for scheme in AppSettings.schemes {
+            settings.selectScheme(id: scheme.id)
+            preview.applyTheme()
+            for (token, role) in Self.tokenColors {
+                XCTAssertEqual(preview.preview.palette[keyPath: token], scheme.syntaxPalette[keyPath: role], "\(scheme.id) \(token)")
+            }
+        }
+        // The System scheme's syntax colors are dynamic system colors.
+        settings.selectScheme(id: "system")
+        preview.applyTheme()
+        XCTAssertEqual(preview.preview.palette.codeKeyword, .systemPurple)
+    }
+
+    @MainActor func testFencedCodeIsHighlightedByItsInfoString() async throws {
+        _ = NSApplication.shared
+        let code = "public class Main {\n    int answer = 42; // note\n}"
+        let url = try temporaryMarkdown("# Code\n\n```java\n\(code)\n```\n\n```\n\(code)\n```\n")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = EditorDocument(file: try TextFile.read(url))
+        let preview = CustomMarkdownPreview()
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        preview.show(document)
+        try await eventually { preview.preview.snapshot.document.blocks.count == 3 && preview.preview.snapshot.isComplete }
+        let blocks = preview.preview.snapshot.document.blocks
+        XCTAssertEqual(blocks[1].text, code)
+        // The kind at each offset; adjacent runs of one kind merge in the view.
+        func kinds(_ tokens: [CodeToken]) -> [CodeTokenKind?] {
+            var kinds = [CodeTokenKind?](repeating: nil, count: code.utf16.count)
+            for token in tokens { for offset in token.range { kinds[offset] = token.kind } }
+            return kinds
+        }
+        let expected = try XCTUnwrap(PreviewCodeHighlighter().tokens(for: code, info: "java"))
+        let java = blocks[1].styleRuns.compactMap { run in run.token.map { CodeToken(range: run.range, kind: $0) } }
+        XCTAssertEqual(kinds(java), kinds(expected))
+        XCTAssertEqual(kinds(java)[0..<6], ArraySlice(repeating: .keyword, count: 6))
+        XCTAssertTrue(blocks[2].styleRuns.allSatisfy { $0.token == nil })
+        preview.prepareForRelease()
     }
 
     @MainActor func testSwitchingRendererSwapsPreviewAndKeepsEditingState() async throws {

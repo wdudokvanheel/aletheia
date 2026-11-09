@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownView
 import SwiftHighlight
 
 /// Tokens are display attributes only: never rewrite the document's text storage.
@@ -20,6 +21,20 @@ enum SyntaxStyle: Sendable, CaseIterable {
         else if scope.isWithin("markup") || scope.isWithin(.listMarker) { self = .markup }
         else if scope.isWithin(.invalid) { self = .invalid }
         else { return nil }
+    }
+
+    /// The Markdown preview's name for the same style.
+    var tokenKind: CodeTokenKind {
+        switch self {
+        case .comment: .comment
+        case .string: .string
+        case .keyword: .keyword
+        case .number: .number
+        case .name: .name
+        case .property: .property
+        case .markup: .markup
+        case .invalid: .invalid
+        }
     }
 
     @MainActor func color(_ palette: SyntaxPalette) -> NSColor {
@@ -87,5 +102,23 @@ enum SyntaxHighlighting {
             result.append(SyntaxRun(range: NSRange(location: start, length: end - start), style: style))
         }
         return result
+    }
+}
+
+/// Colors fenced code in the Custom preview as the editor colors a file in the
+/// fence's language: the info string names the language (`java`, `ts`,
+/// `{python}`), and any grammar SwiftHighlight ships applies. Unknown or
+/// empty info stays plain.
+///
+/// The preview calls it on its render queue, possibly from several threads
+/// and while the editor tokenizes. SwiftHighlight 1.0.0 tokenizes with
+/// per-call state, and its language and scope registries take locks, so the
+/// calls need no queue of their own.
+struct PreviewCodeHighlighter: MarkdownCodeHighlighter {
+    func tokens(for code: String, info: String) -> [CodeToken]? {
+        guard !info.isEmpty, let language = LanguageRegistry.shared.language(named: info) else { return nil }
+        return SyntaxHighlighting.runs(in: code, language: language).map {
+            CodeToken(range: $0.range.location..<NSMaxRange($0.range), kind: $0.style.tokenKind)
+        }
     }
 }
