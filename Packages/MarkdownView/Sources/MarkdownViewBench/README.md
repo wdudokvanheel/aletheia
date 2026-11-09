@@ -1,7 +1,7 @@
 # MarkdownViewBench
 
 Headless corpus generator and preview benchmark for `docs/custom-markdown-view-plan.md`
-(Phases 0, 1 and 4). It measures the app's WebKit preview path or the `MarkdownView` library.
+(Phases 0, 1, 4 and 10). It measures the app's WebKit preview path or the `MarkdownView` library.
 Run it in Release from anywhere inside the repository:
 
 ```sh
@@ -15,6 +15,7 @@ swift run -c release MarkdownViewBench run --set generated --renderer custom --f
 swift run -c release MarkdownViewBench run --verify-images                        # image provider self-check
 swift run -c release MarkdownViewBench run --set own --limit 200 --reps 3 --idle-seconds 0
 swift run -c release MarkdownViewBench trace --renderer custom --trace all --reps 5   # typing traces
+swift run -c release MarkdownViewBench trace --renderer custom --trace code-block-typing --highlighter none
 swift run -c release MarkdownViewBench trace --renderer webkit --trace table-cell-1m --interval 50
 ```
 
@@ -36,6 +37,7 @@ Default paths are relative to the repository root:
 | `run --timeout S` | `300` (`30` for smoke) per render, and the watchdog's hang limit |
 | `run --onscreen` | off; shows the window and keeps WebKit's occlusion detection, like the app |
 | `run --image-latency MS` | `0`; custom only, delays each remote image to simulate the network (also for `trace`) |
+| `run --highlighter` | `fake`; custom only, highlights code blocks with `FakeCodeHighlighter`; `none` leaves them plain (also for `trace`) |
 | `run --verify-images` | off; only runs the image provider self-check against `--manifest` (default the generated manifest) and exits 1 on a mismatch |
 | `trace --manifest PATH` | `build/markdown-corpus/generated/generated-manifest.json` (its `traces[]`) |
 | `trace --renderer` | `webkit`; `custom` |
@@ -125,7 +127,10 @@ UTF-16 and apply in order, each to the text left by the previous edit. There are
 `sizes/mixed-100k.md` and `tables/rows-1500-cols-4.md` (row 750), and the same five with a
 `-1m` suffix on `sizes/mixed-1m.md` and a 7,200-row, 4-column table of about 1 MiB (row 3,600;
 seeded as `rows-7200-cols-4`, only written as the trace's base) for the Phase 4 exit. The `-1m`
-traces left the 100 KiB traces and every other file byte-identical.
+traces left the 100 KiB traces and every other file byte-identical. Phase 10 adds
+`code-block-typing`, which types a new line of 26 keystrokes inside the first fenced block with
+a language after the middle of `sizes/code-100k.md` (a `bash` block); it left every other file
+byte-identical.
 
 ## What is measured
 
@@ -227,6 +232,24 @@ app's 200 ms debounce to edits.
   the scroll passes and the idle sample, and `documentRequests` over the whole measurement.
   `memoryMiB` includes the decoded images the view keeps (16 MiB cap per view).
 
+### Code highlighting (Phase 10)
+
+Custom mode gives every view `FakeCodeHighlighter` (`FakeCodeHighlighter.swift`) as its
+`codeHighlighter` unless `--highlighter none`; the header's `codeHighlighter` says which. The
+bench does not depend on SwiftHighlight, which would put it in the package's `Package.swift` and
+`Package.resolved` for every consumer, so the fake stands in for the app's tokenizer: in a block
+with an info string, two of every three words (text between spaces, tabs and line breaks) are a
+token, of each kind in turn, and blocks without one stay plain, as the app leaves them. The
+`code` documents then measure the library's own cost: splitting style runs at tokens, and
+drawing code lines in stretches of glyphs of one color each.
+The fake's own time is small, and it runs in `parse`. The standard palette gives every token
+kind `codeText`, so highlighted code looks plain, but its lines still draw token by token. The real
+tokenizer's cost is measured in the app with the timings overlay.
+
+- **scrollDraw:** after each `scrollFrame`, the view drawing the same visible area into a bitmap
+  (`cacheDisplay`), timed alone: the draw of a screen without the commit. `displayIfNeeded`
+  cannot be timed for this, since a layer-backed view draws at the transaction flush.
+
 ### Smoke set, watchdog and crashes
 
 The smoke set runs a watchdog: a `CFRunLoopObserver` on the main run loop records the longest
@@ -311,10 +334,10 @@ became optional.
            webkit?, window {width, height, backingScale, screenRefreshHz, displayAsleep, placement,
            occluded, occlusionDetection?, scrollerStyle?}, firstPreviewMs, baselineMemoryMiB,
            helperAttribution?, watchdog? {limitMs, hangSeconds}, definitions,
-           imageProvider? {provider, latencyMs, remoteFixtures} },
+           imageProvider? {provider, latencyMs, remoteFixtures}, codeHighlighter?: fake|none },
   "documents": [ { path, name?, bytes?, status: ok|failed|skipped|running|crashed|hung, error?,
                    edit? {offset, kind},
-                   ms? {startup|firstScreen|open|tabSwitch|update|updateWork|updateMain|scrollFrame:
+                   ms? {startup|firstScreen|open|tabSwitch|update|updateWork|updateMain|scrollFrame|scrollDraw:
                         {n, p50, p95, min, max}},
                    memoryMiB? {process, helpers, total, helpersByKind, helperProcesses, view?, viewHeap?},
                    idleCPUPercent? {seconds, process, helpers, total, helpersByKind},
@@ -335,7 +358,8 @@ became optional.
 
 The image fields (`run.imageProvider`, `documents[].images`, and `imagesLoaded` and
 `imagesShown` under `ms` and the aggregate) are optional additions to version 2: documents
-without images and older readers are unaffected.
+without images and older readers are unaffected. So are `run.codeHighlighter` and `scrollDraw`
+(Phase 10), custom only.
 
 `firstPreviewMs` is a warm-up open of a small document, the first preview or view after
 launch. Files the app would refuse (not UTF-8, control characters) are `skipped`. `failed`
@@ -344,7 +368,7 @@ documents keep the samples taken before the failure.
 ## Trace schema (`aletheia-markdown-bench/3`)
 
 Version 3 is the `trace` file; `run` still writes version 2, unchanged. The file is written
-once at the end. `run` is the version 2 header (with `imageProvider` for custom) with `set: "traces"`, `documents` the number
+once at the end. `run` is the version 2 header (with `imageProvider` and `codeHighlighter` for custom) with `set: "traces"`, `documents` the number
 of traces, `filter` the `--trace` names, `debounceMs` 0 for custom, and the trace definitions.
 
 ```

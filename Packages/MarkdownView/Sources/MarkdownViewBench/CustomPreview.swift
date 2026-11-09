@@ -184,6 +184,7 @@ extension Runner {
         "updateWork": "update from setSource, after the debounce, until rendered",
         "updateMain": "the update's main-thread phases from the library's Timings: install plus the first draw",
         "scrollFrame": "one step of a top-to-bottom pass in viewport-height steps: NSView.scroll, setNeedsDisplay(visibleRect), window.displayIfNeeded and CATransaction.flush, with a run loop turn between frames; passes repeat up to the repetitions, stopping after 5,000 frames once a pass is complete",
+        "scrollDraw": "after each scrollFrame, the view drawing the same visible area into a bitmap (cacheDisplay): the draw without the commit",
         "scroll": "over144Hz counts frames over 1000/144 ms, over60Hz frames over 16.7 ms",
         "library": "per repetition, the library's Timings in ms from onTimings: parse, layout (both steps of an open), install and draw of the snapshot reported; firstScreen holds the first report of an open, open the complete one",
         "memoryMiB": "process: phys_footprint of the bench after the idle sample, with one view showing the document; view: footprint after a new view rendered the edited document and settled 1 s, minus the footprint before it was created (no other view, 0.5 s settle, malloc pressure relief); viewHeap: malloc size_in_use over the same span; no helper processes. With idleSeconds 0, process only, right after the scroll passes",
@@ -228,6 +229,7 @@ extension Runner {
             imageProvider?.resetStats()
             let preview = CustomPreview(frame: NSRect(origin: .zero, size: window.contentRect(forFrameRect: window.frame).size))
             preview.view.imageProvider = imageProvider
+            preview.view.codeHighlighter = options.codeHighlighter
             customPreview = preview
             window.contentView = preview.view
             preview.view.tile()
@@ -341,9 +343,10 @@ extension Runner {
                 _ = try await settleImages(preview, since: work)
             }
             let scrollStart = now()
-            let (scroll, frames) = await interval("scroll") { await scrollThrough(preview) }
+            let (scroll, frames, draws) = await interval("scroll") { await scrollThrough(preview) }
             result.scroll = scroll
             samples["scrollFrame"] = frames
+            samples["scrollDraw"] = draws
             _ = try await settleImages(preview, since: scrollStart)
             if options.idleSeconds > 0 {
                 try await Task.sleep(for: .seconds(1)) // settle
@@ -366,15 +369,19 @@ extension Runner {
         return (result, samples)
     }
 
-    /// Scrolls from the top to the bottom in viewport-height steps, drawing the visible area each step.
-    private func scrollThrough(_ preview: CustomPreview) async -> (ScrollResult, [Double]) {
+    /// Scrolls from the top to the bottom in viewport-height steps, drawing the visible area each
+    /// step. Returns each frame's time and, measured after it, the time the view takes to draw the
+    /// same area into a bitmap.
+    private func scrollThrough(_ preview: CustomPreview) async -> (ScrollResult, [Double], [Double]) {
         let viewport = preview.view.contentView.bounds.height
         guard let canvas = preview.view.documentView, viewport > 0 else {
-            return (ScrollResult(passes: 0, frames: 0, documentHeight: 0, viewportHeight: 0, over144Hz: 0, over60Hz: 0), [])
+            return (ScrollResult(passes: 0, frames: 0, documentHeight: 0, viewportHeight: 0, over144Hz: 0, over60Hz: 0), [], [])
         }
         let height = canvas.frame.height
         let last = max(height - viewport, 0)
         var frames: [Double] = []
+        var draws: [Double] = []
+        let bitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.visibleRect)
         var passes = 0
         while passes == 0 || (passes < options.repetitions && frames.count < Self.scrollFrameLimit) {
             var y: CGFloat = 0
@@ -385,6 +392,11 @@ extension Runner {
                 window.displayIfNeeded()
                 CATransaction.flush()
                 frames.append(milliseconds(start, now()))
+                if let bitmap {
+                    let draw = now()
+                    canvas.cacheDisplay(in: canvas.visibleRect, to: bitmap)
+                    draws.append(milliseconds(draw, now()))
+                }
                 await nextRunLoopTurn()
                 if y >= last { break }
                 y = min(y + viewport, last)
@@ -395,7 +407,7 @@ extension Runner {
         return (ScrollResult(passes: passes, frames: frames.count, documentHeight: Double(height),
                              viewportHeight: Double(viewport),
                              over144Hz: frames.filter { $0 > 1000.0 / 144 }.count,
-                             over60Hz: frames.filter { $0 > 16.7 }.count), frames)
+                             over60Hz: frames.filter { $0 > 16.7 }.count), frames, draws)
     }
 
     private func recordEndImages(_ result: inout DocumentResult, _ preview: CustomPreview, requestsBefore: Int) {

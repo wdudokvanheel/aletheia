@@ -311,6 +311,7 @@ struct Generator {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         var mixed100k = ""
         var mixed1m = ""
+        var code100k = ""
         for (label, bytes) in Self.sizes {
             for style in ["prose", "mixed", "code"] {
                 let name = "\(style)-\(label)"
@@ -324,6 +325,7 @@ struct Generator {
                     }
                 }
                 if name == "mixed-100k" { mixed100k = text }
+                if name == "code-100k" { code100k = text }
                 if name == "mixed-1m" { mixed1m = text }
                 try write("sizes", name, text)
             }
@@ -355,6 +357,7 @@ struct Generator {
                         tableName: "tables/rows-1500-cols-4.md", tableRow: 750, suffix: "")
         try writeTraces(mixed: mixed1m, mixedName: "sizes/mixed-1m.md", table: table7200,
                         tableName: "a 7,200-row, 4-column table (about 1 MiB)", tableRow: 3_600, suffix: "-1m")
+        try writeCodeTrace(code: code100k, codeName: "sizes/code-100k.md")
 
         let manifest = GeneratedManifest(
             generator: "MarkdownViewBench generate", version: 2, seed: seed, root: ".",
@@ -618,6 +621,30 @@ struct Generator {
                           description: "Type a link reference definition at the end; earlier [bench-ref] uses become links.",
                           base: referenced, edits: Self.typing("\n[bench-ref]: https://example.com/reference", at: referencedEnd)))
 
+        try write(list)
+    }
+
+    /// Typing inside a code block (Phase 10): a new line after the first line of the first
+    /// fenced block with a language after the middle of `code`.
+    mutating func writeCodeTrace(code: String, codeName: String) throws {
+        let text = code as NSString
+        var location = text.length / 2
+        var fence = NSRange(location: NSNotFound, length: 0)
+        while location < text.length {
+            fence = text.range(of: "\n```", range: NSRange(location: location, length: text.length - location))
+            guard fence.location != NSNotFound, fence.upperBound < text.length else { break }
+            let unit = text.character(at: fence.upperBound)
+            if (97...122).contains(unit) { break }
+            location = fence.upperBound
+        }
+        guard fence.location != NSNotFound else { return }
+        let opening = text.range(of: "\n", range: NSRange(location: fence.upperBound, length: text.length - fence.upperBound))
+        let firstLine = text.range(of: "\n", range: NSRange(location: opening.upperBound, length: text.length - opening.upperBound))
+        try write([Trace(name: "code-block-typing", description: "Type a new line inside the first code block with a language after the middle of \(codeName).",
+                         base: code, edits: Self.typing("\n    let typed = value + 1", at: firstLine.location))])
+    }
+
+    private mutating func write(_ list: [Trace]) throws {
         let directory = output.appendingPathComponent("traces")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()

@@ -19,7 +19,10 @@ struct RunOptions {
     var watchdog: Bool
     /// Custom: delay before each remote image is served, simulating the network.
     var imageLatency = 0.0
+    /// Custom: `fake` highlights code blocks with `FakeCodeHighlighter`, `none` leaves them plain.
+    var highlighter = "fake"
     var custom: Bool { renderer == "custom" }
+    var codeHighlighter: (any MarkdownCodeHighlighter)? { custom && highlighter == "fake" ? FakeCodeHighlighter() : nil }
 }
 
 struct ManifestEntry {
@@ -168,6 +171,8 @@ struct RunHeader: Codable {
     let definitions: [String: String]
     /// Custom: the bench's image provider.
     var imageProvider: ImageProviderInfo? = nil
+    /// Custom: `fake` or `none`; see `RunOptions.highlighter`.
+    var codeHighlighter: String? = nil
 }
 
 struct AggregateLatency: Codable {
@@ -281,7 +286,7 @@ final class ResultWriter {
 @MainActor
 final class Runner {
     static let metrics = ["startup", "firstScreen", "open", "tabSwitch", "update", "updateWork", "updateMain", "scrollFrame",
-                          "imagesLoaded", "imagesShown"]
+                          "scrollDraw", "imagesLoaded", "imagesShown"]
     /// The watchdog's limit for a busy main thread or an open.
     static let limitMs = 1000.0
     static let watchdogDefinition = "blockedMs: longest span the main thread spent between run loop activities (CFRunLoopObserver, waits excluded) while measuring the document; a document is over the limit when that or any open exceeds limitMs. A span over hangSeconds ends the run, marking the document hung"
@@ -368,7 +373,7 @@ final class Runner {
             watchdog: options.watchdog ? WatchdogSettings(limitMs: Self.limitMs, hangSeconds: options.timeout) : nil,
             definitions: (options.custom ? Self.customDefinitions : Self.definitions)
                 .merging(options.watchdog ? ["watchdog": Self.watchdogDefinition] : [:]) { $1 },
-            imageProvider: imageProviderInfo)
+            imageProvider: imageProviderInfo, codeHighlighter: options.custom ? options.highlighter : nil)
         let writer = try ResultWriter(options.output, header: header)
         Interruption.installHandlers()
         let watchdog = options.watchdog ? Watchdog(hangSeconds: options.timeout) : nil
@@ -597,7 +602,7 @@ final class Runner {
 
     static let customTableHeader = pad("document", 34, left: true) + pad("KiB", 8) + pad("first p50/p95", 15)
         + pad("open p50/p95", 15) + pad("tab p50/p95", 14) + pad("update p50/p95", 16) + pad("work p95", 10)
-        + pad("main p95", 10) + pad("scroll p95", 11) + pad(">144Hz", 8) + pad("view MiB", 10) + pad("idle%", 7)
+        + pad("main p95", 10) + pad("scroll p95", 11) + pad("draw p95", 10) + pad(">144Hz", 8) + pad("view MiB", 10) + pad("idle%", 7)
 
     static func row(_ result: DocumentResult, custom: Bool) -> String {
         let label = result.name ?? result.path.split(separator: "/").suffix(2).joined(separator: "/")
@@ -610,7 +615,7 @@ final class Runner {
         if custom {
             return pad(label, 34, left: true) + pad(kib, 8) + pad(pair(ms["firstScreen"]), 15) + pad(pair(ms["open"]), 15)
                 + pad(pair(ms["tabSwitch"]), 14) + pad(pair(ms["update"]), 16) + pad(p95("updateWork"), 10)
-                + pad(p95("updateMain"), 10) + pad(p95("scrollFrame"), 11)
+                + pad(p95("updateMain"), 10) + pad(p95("scrollFrame"), 11) + pad(p95("scrollDraw"), 10)
                 + pad(result.scroll.map { "\($0.over144Hz)" } ?? "-", 8)
                 + pad(result.memoryMiB?.view.map { String(format: "%.1f", $0) } ?? "-", 10)
                 + pad(result.idleCPUPercent.map { String(format: "%.2f", $0.total) } ?? "-", 7) + blocked

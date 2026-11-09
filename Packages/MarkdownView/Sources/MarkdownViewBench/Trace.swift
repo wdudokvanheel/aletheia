@@ -279,7 +279,8 @@ extension Runner {
             previewResources: options.custom ? nil : options.previewResources.path, machine: environment.machine,
             os: environment.os, build: environment.build, git: environment.git, webkit: environment.webkit,
             window: windowInfo(), firstPreviewMs: round2(firstOpen), baselineMemoryMiB: round1(baseline),
-            helperAttribution: nil, watchdog: nil, definitions: Self.traceDefinitions, imageProvider: imageProviderInfo)
+            helperAttribution: nil, watchdog: nil, definitions: Self.traceDefinitions, imageProvider: imageProviderInfo,
+            codeHighlighter: options.custom ? options.highlighter : nil)
         let settings = TraceSettings(
             mode: trace.interval > 0 ? "burst" : "sequential", intervalMs: trace.interval,
             updatePolicy: options.custom ? .init(budgetMs: Self.ms(policy.budget), pauseFactor: policy.pauseFactor,

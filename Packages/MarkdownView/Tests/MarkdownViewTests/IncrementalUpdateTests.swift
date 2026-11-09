@@ -20,8 +20,9 @@ final class IncrementalUpdateTests: XCTestCase {
         return url
     }
 
-    private func full(_ source: String) throws -> MarkdownSnapshot {
-        MarkdownSnapshot.layOut(try MarkdownDocument.parse(source), width: width)
+    private func full(_ source: String, highlighting: CodeHighlighting? = nil) throws -> MarkdownSnapshot {
+        MarkdownSnapshot.layOut(try MarkdownDocument.parse(source, reusing: nil, highlighting: highlighting).document,
+                                width: width)
     }
 
     private func assertEquivalent(_ incremental: MarkdownSnapshot, _ full: MarkdownSnapshot, _ context: String,
@@ -45,19 +46,21 @@ final class IncrementalUpdateTests: XCTestCase {
     /// the end. Returns the layouts reused over all steps.
     @discardableResult
     private func replay(_ base: String, _ edits: [(location: Int, length: Int, replacement: String)], _ name: String,
-                        checkEvery: Int = 1, file: StaticString = #filePath, line: UInt = #line) throws -> Int {
+                        checkEvery: Int = 1, highlighting: CodeHighlighting? = nil,
+                        file: StaticString = #filePath, line: UInt = #line) throws -> Int {
         var text = base
-        var snapshot = try full(text)
+        var snapshot = try full(text, highlighting: highlighting)
         var reused = 0
         for (step, edit) in edits.enumerated() {
             text = (text as NSString).replacingCharacters(in: NSRange(location: edit.location, length: edit.length),
                                                           with: edit.replacement)
-            let result = try MarkdownSnapshot.updating(snapshot, to: text, width: width)
+            let result = try MarkdownSnapshot.updating(snapshot, to: text, width: width, highlighting: highlighting)
             snapshot = result.snapshot
             reused += result.reused
             XCTAssertEqual(result.reused + result.laidOut, snapshot.layouts.count, file: file, line: line)
             if step % checkEvery == 0 || step == edits.count - 1 {
-                assertEquivalent(snapshot, try full(text), "\(name) step \(step)", file: file, line: line)
+                assertEquivalent(snapshot, try full(text, highlighting: highlighting), "\(name) step \(step)",
+                                 file: file, line: line)
             }
         }
         return reused
@@ -77,16 +80,22 @@ final class IncrementalUpdateTests: XCTestCase {
             let edits: [Edit]
         }
         let directory = try generatedFile("traces")
-        // The five traces on 100 KiB documents; their 1 MiB versions are for the bench.
+        // The six traces on 100 KiB documents; their 1 MiB versions are for the bench.
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .filter { $0.hasSuffix(".json") && !$0.hasSuffix("-1m.json") }.sorted()
-        XCTAssertEqual(names.count, 5)
+        XCTAssertEqual(names.count, 6)
+        let highlighting = CodeHighlighting(WordHighlighter())
         for name in names {
             let trace = try JSONDecoder().decode(Trace.self, from: Data(contentsOf: directory.appendingPathComponent(name)))
-            let reused = try replay(trace.base, trace.edits.map { ($0.location, $0.length, $0.replacement) }, trace.name,
-                                    checkEvery: trace.edits.count > 20 ? 4 : 1)
+            let edits = trace.edits.map { ($0.location, $0.length, $0.replacement) }
+            let reused = try replay(trace.base, edits, trace.name, checkEvery: trace.edits.count > 20 ? 4 : 1)
             if trace.name != "link-reference-definition" {
                 XCTAssertGreaterThan(reused, 0, trace.name)
+            }
+            // Typing in and around code, highlighted.
+            if trace.name == "code-block-typing" || trace.name == "fence-open-close" {
+                XCTAssertGreaterThan(try replay(trace.base, edits, trace.name + " highlighted", checkEvery: 4,
+                                                highlighting: highlighting), 0)
             }
         }
     }
