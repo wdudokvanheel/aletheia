@@ -18,7 +18,7 @@ import CoreText
 /// | List markers | 6 pt from the text; bullets 5 pt (disc, circle, then square by depth); numbers in the body font | markers drawn outside, like `list-style-position: outside` |
 /// | Task boxes | 13 pt, in place of the marker | stylesheet keeps the bullet too; see the plan |
 /// | Block quotes | 3 pt bar, text 16 pt past it, 40 pt right margin, muted text | stylesheet `blockquote`, default right margin |
-/// | Code blocks | monospaced 0.9 em (13.5 pt) at line height 1.6, 12 pt padding, 4 pt radius, 13.5 pt margins (1 em of 0.9 em), tabs every 8 spaces, no wrapping | stylesheet `pre`, default `pre` margins and `tab-size` |
+/// | Code blocks | monospaced 0.9 em of 0.9 em (12.15 pt) in 21.6 pt lines (1.6 of 0.9 em), 12 pt padding, 4 pt radius, 13.5 pt margins (1 em of 0.9 em), tabs every 8 spaces, no wrapping | stylesheet `pre`, `pre code`, default `pre` margins and `tab-size` |
 /// | Inline code | 0.9 em, 4 pt beside it | stylesheet `code` |
 /// | Thematic breaks | 1 pt rule, 7.5 pt (0.5 em) margins | stylesheet `hr`, default margins |
 /// | Tables | 1 pt borders in the muted color, cells padded 6 pt above and below and 12 pt beside, text vertically centered, no margins or backgrounds | stylesheet `table`, `th, td`; default `vertical-align: middle` |
@@ -27,8 +27,8 @@ import CoreText
 /// | Table columns | as wide as their widest cell; when the table is wider than the column, the space is shared in proportion to those widths, columns no wider than an equal share keep their width, none gets under 60 pt, and cells wrap; when even that does not fit, it scrolls on its own, with columns at their natural width up to half the space | stylesheet `overflow-x: auto` |
 ///
 /// The stylesheet sets code block text to 0.9 em twice (`pre` and `pre code`),
-/// so WebKit shows it at 12.15 pt in 21.6 pt lines; here it is 13.5 pt in the
-/// same lines.
+/// so it is 12.15 pt, while the `pre`'s own 13.5 pt font sets its 21.6 pt
+/// lines, as in WebKit.
 public final class Typography: @unchecked Sendable {
     public static let standard = Typography()
     /// Marks alt text, whose attributes are otherwise those of the text
@@ -45,7 +45,8 @@ public final class Typography: @unchecked Sendable {
     public let headingTopMargin: CGFloat = 1.4
     /// Margins below headings, as multiples of the heading's size, h1 to h6.
     public let headingBottomMargins: [CGFloat] = [0.67, 0.83, 1, 1.33, 1.67, 2.33]
-    /// Code font size as a multiple of the size around it.
+    /// Code font size as a multiple of the size around it; code block text
+    /// gets it twice.
     public let codeScale: CGFloat = 0.9
 
     /// Padding around the text column.
@@ -121,8 +122,9 @@ public final class Typography: @unchecked Sendable {
                 size = bodyFontSize
                 lineHeight = size * lineHeightMultiple
             case .code:
-                size = bodyFontSize * codeScale
-                lineHeight = size * lineHeightMultiple
+                // `pre code` inside `pre`: the text is 0.9 em of the pre's 0.9 em.
+                size = bodyFontSize * codeScale * codeScale
+                lineHeight = bodyFontSize * codeScale * lineHeightMultiple
             default:
                 size = bodyFontSize * headingScale[Int(role.rawValue - TextRole.heading1.rawValue)]
                 lineHeight = size * headingLineHeightMultiple

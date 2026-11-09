@@ -69,6 +69,9 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(heading.marginTop, 42, accuracy: 0.001)
         XCTAssertEqual(code.lineCount, 2)
         XCTAssertEqual(code.height, 2 * 13.5 * 1.6 + 24, accuracy: 0.001)
+        // WebKit's `pre code` text: 0.9 em of the pre's 0.9 em, in the pre's lines.
+        let codeFont = Typography.standard.fonts[Int(TextRole.code.rawValue)]
+        XCTAssertEqual(CTFontGetSize(codeFont), 12.15, accuracy: 0.001)
     }
 
     func testColumnIsInsetCappedAndCentered() {
