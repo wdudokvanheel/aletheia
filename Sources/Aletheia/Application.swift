@@ -95,17 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func save(_ sender: Any?) { if !terminating && !restoring { current?.saveSelected(sender) } }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(toggleRevealActiveFile(_:)) {
-            item.state = AppSettings.shared.revealActiveFileInTree ? .on : .off
-        }
-        let settings = AppSettings.shared
-        if item.action == #selector(selectMarkdownRenderer(_:)) {
-            item.state = item.representedObject as? String == settings.markdownRenderer.rawValue ? .on : .off
-        }
-        if item.action == #selector(togglePreviewTimings(_:)) {
-            item.state = settings.showsPreviewTimings ? .on : .off
-            return settings.markdownRenderer == .custom
-        }
         if item.action == #selector(save(_:)) {
             return !terminating && !restoring && current?.canEditSelected == true
         }
@@ -293,28 +282,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
 
-    @objc private func toggleRevealActiveFile(_ sender: NSMenuItem) {
-        let settings = AppSettings.shared
-        settings.setRevealActiveFileInTree(!settings.revealActiveFileInTree)
-        sender.state = settings.revealActiveFileInTree ? .on : .off
-    }
-
-    @objc private func selectMarkdownRenderer(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String,
-              let renderer = MarkdownRenderer(rawValue: value) else { return }
-        AppSettings.shared.setMarkdownRenderer(renderer)
-    }
-
-    @objc private func toggleMarkdownRenderer(_ sender: Any?) {
-        let settings = AppSettings.shared
-        settings.setMarkdownRenderer(settings.markdownRenderer == .custom ? .webkit : .custom)
-    }
-
-    @objc private func togglePreviewTimings(_ sender: Any?) {
-        let settings = AppSettings.shared
-        settings.setShowsPreviewTimings(!settings.showsPreviewTimings)
-    }
-
     @objc private func showAbout(_ sender: Any?) {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Aletheia",
@@ -369,22 +336,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(.separator())
         item("Find…", #selector(EditorWindow.showFind(_:)), "f", in: edit)
         item("Replace…", #selector(EditorWindow.showReplace(_:)), "r", in: edit)
-        let view = menu("View")
-        item("Reveal Active File in Tree", #selector(toggleRevealActiveFile(_:)), "", in: view, target: self)
-        view.addItem(.separator())
-        let renderers = NSMenu(title: "Markdown Renderer")
-        for (title, renderer) in [("WebKit", MarkdownRenderer.webkit), ("Custom (Experimental)", .custom)] {
-            let entry = NSMenuItem(title: title, action: #selector(selectMarkdownRenderer(_:)), keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = renderer.rawValue
-            renderers.addItem(entry)
-        }
-        let rendererItem = NSMenuItem(title: "Markdown Renderer", action: nil, keyEquivalent: "")
-        rendererItem.submenu = renderers
-        view.addItem(rendererItem)
-        item("Toggle Markdown Renderer", #selector(toggleMarkdownRenderer(_:)), "r", in: view, target: self,
-             modifiers: [.command, .option])
-        item("Show Preview Timings", #selector(togglePreviewTimings(_:)), "", in: view, target: self)
         let window = menu("Window")
         item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", in: window)
         item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), "", in: window)

@@ -149,6 +149,8 @@ struct AppColorScheme {
 /// The app-wide Markdown preview renderer. WebKit stays the default while Custom is experimental.
 enum MarkdownRenderer: String, CaseIterable {
     case webkit, custom
+
+    var title: String { self == .webkit ? "WebKit" : "Custom (Experimental)" }
 }
 
 @MainActor
@@ -203,6 +205,9 @@ final class AppSettings: NSObject {
 
     private var settingsWindow: NSWindow?
     private var schemePopup: NSPopUpButton?
+    private var revealCheckbox: NSButton?
+    private var rendererPopup: NSPopUpButton?
+    private var timingsCheckbox: NSButton?
     private var projectSettingsViews: [ProjectSettingsView] = []
 
     init(defaults: UserDefaults = .standard) {
@@ -240,10 +245,30 @@ final class AppSettings: NSObject {
             appearance.alignment = .leading
             appearance.spacing = 16
             popup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            let reveal = NSButton(checkboxWithTitle: "Reveal active file in tree", target: self,
+                                  action: #selector(revealChanged(_:)))
+            let renderer = NSPopUpButton(frame: .zero, pullsDown: false)
+            renderer.addItems(withTitles: MarkdownRenderer.allCases.map(\.title))
+            renderer.target = self
+            renderer.action = #selector(rendererChanged(_:))
+            renderer.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            let timings = NSButton(checkboxWithTitle: "Show preview timings", target: self,
+                                   action: #selector(timingsChanged(_:)))
+            let revealNote = SettingsPage.note("Opening or selecting a tab expands its folders and selects the file in the tree.")
+            let general = NSStackView(views: [
+                SettingsPage.heading("File tree"), reveal, revealNote,
+                SettingsPage.heading("Markdown renderer"), renderer, timings,
+                SettingsPage.note("Applies immediately to all windows. Preview timings are shown only by the Custom renderer.")
+            ])
+            general.orientation = .vertical
+            general.alignment = .leading
+            general.spacing = 12
+            general.setCustomSpacing(28, after: revealNote)
             let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .projects)
             let shortcuts = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .shortcuts)
             projectSettingsViews = [projects, shortcuts]
             for (title, symbol, content) in [
+                ("General", "gearshape", general),
                 ("Appearance", "paintpalette", appearance),
                 ("Projects", "folder", projects),
                 ("Shortcuts", "keyboard", shortcuts)
@@ -262,6 +287,9 @@ final class AppSettings: NSObject {
             window.isReleasedWhenClosed = false
             settingsWindow = window
             schemePopup = popup
+            revealCheckbox = reveal
+            rendererPopup = renderer
+            timingsCheckbox = timings
             window.center()
         }
         updateWindow()
@@ -275,8 +303,26 @@ final class AppSettings: NSObject {
         selectScheme(id: Self.schemes[sender.indexOfSelectedItem].id)
     }
 
+    @objc private func revealChanged(_ sender: NSButton) {
+        setRevealActiveFileInTree(sender.state == .on)
+    }
+
+    @objc private func rendererChanged(_ sender: NSPopUpButton) {
+        guard MarkdownRenderer.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
+        setMarkdownRenderer(MarkdownRenderer.allCases[sender.indexOfSelectedItem])
+        updateWindow()
+    }
+
+    @objc private func timingsChanged(_ sender: NSButton) {
+        setShowsPreviewTimings(sender.state == .on)
+    }
+
     private func updateWindow() {
         settingsWindow?.appearance = palette.appearance
         schemePopup?.selectItem(at: Self.schemes.firstIndex { $0.id == selectedSchemeID } ?? 0)
+        revealCheckbox?.state = revealActiveFileInTree ? .on : .off
+        rendererPopup?.selectItem(at: MarkdownRenderer.allCases.firstIndex(of: markdownRenderer) ?? 0)
+        timingsCheckbox?.state = showsPreviewTimings ? .on : .off
+        timingsCheckbox?.isEnabled = markdownRenderer == .custom
     }
 }
