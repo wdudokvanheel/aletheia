@@ -48,7 +48,14 @@ enum SyntaxHighlighting {
 
     static func runs(in text: String, languageID: String) -> [SyntaxRun] {
         guard text.utf8.count <= maximumBytes, !Task.isCancelled else { return [] }
-        let tokens = Language.named(languageID).tokenize(text)
+        return runs(in: text, language: Language.named(languageID))
+    }
+
+    /// `text` tokenized in `language`, as styled UTF-16 ranges: the one mapping
+    /// the editor and the Custom preview's code blocks share, so the same text
+    /// takes the same colors in both. Callable from any thread.
+    static func runs(in text: String, language: Language) -> [SyntaxRun] {
+        let tokens = language.tokenize(text)
         guard !Task.isCancelled else { return [] }
         // Walk scalar boundaries once. NSTextView uses UTF-16; the lexer uses UTF-8.
         var scalars = text.unicodeScalars.makeIterator()
