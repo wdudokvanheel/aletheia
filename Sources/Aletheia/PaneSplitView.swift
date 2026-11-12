@@ -30,6 +30,8 @@ final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
         arrangedSubviews[0].frame = NSRect(x: 0, y: 0, width: position, height: bounds.height)
         arrangedSubviews[1].frame = NSRect(x: position + dividerThickness, y: 0,
                                           width: available - position, height: bounds.height)
+        // Frames set directly do not invalidate the divider, which would stay painted at its old position.
+        needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
