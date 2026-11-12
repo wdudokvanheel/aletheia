@@ -1,7 +1,7 @@
 import AppKit
 
 /// Static syntax roles, independent of UI accents and Git-status colors.
-/// Palette revisions, role adaptations and licenses: docs/theme-provenance.md.
+/// Palette revisions, role adaptations and licenses: theme-authors.md.
 @MainActor
 struct SyntaxPalette {
     let comment: NSColor

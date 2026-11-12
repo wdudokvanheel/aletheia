@@ -66,7 +66,7 @@ struct AppColorScheme {
     let palette: EditorPalette
 
     // Static sRGB adaptations; exact upstream revisions, mapping and licenses:
-    // Resources/ThemeLicenses.md (bundled), docs/theme-provenance.md.
+    // Resources/ThemeLicenses.md (bundled), theme-authors.md.
     static let all: [AppColorScheme] = [
         .init(id: "system", name: "System", palette: .system),
         .init(id: "material-oceanic", name: "Material Oceanic", palette: .init(isDark: true, 0x263238, 0xeeffff, 0x263238, 0x6c8692, 0x80cbc4, 0xc3e88d, 0x82aaff, 0xf07178, 0x89ddff, 0xffcb6b)),
