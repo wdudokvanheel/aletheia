@@ -5,6 +5,10 @@ import AppKit
 final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
     let proportional: Bool
     var preferredSize: CGFloat
+    /// Pins the first pane to this width and disables the divider, keeping `preferredSize`.
+    var collapsedSize: CGFloat? {
+        didSet { applyPreferredSize() }
+    }
 
     init(proportional: Bool, preferredSize: CGFloat) {
         self.proportional = proportional
@@ -21,7 +25,8 @@ final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
         guard arrangedSubviews.count == 2 else { return }
         let available = max(0, bounds.width - dividerThickness)
         let desired = proportional ? available * preferredSize : preferredSize
-        let position = min(max(desired, minimumPosition), maximumPosition)
+        let position = collapsedSize.map { min($0, available) }
+            ?? min(max(desired, minimumPosition), maximumPosition)
         arrangedSubviews[0].frame = NSRect(x: 0, y: 0, width: position, height: bounds.height)
         arrangedSubviews[1].frame = NSRect(x: position + dividerThickness, y: 0,
                                           width: available - position, height: bounds.height)
@@ -46,14 +51,19 @@ final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
     }
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat,
-                   ofSubviewAt dividerIndex: Int) -> CGFloat { minimumPosition }
+                   ofSubviewAt dividerIndex: Int) -> CGFloat { collapsedSize ?? minimumPosition }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat,
-                   ofSubviewAt dividerIndex: Int) -> CGFloat { maximumPosition }
+                   ofSubviewAt dividerIndex: Int) -> CGFloat { collapsedSize ?? maximumPosition }
+
+    func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect,
+                   forDrawnRect drawnRect: NSRect, ofDividerAt dividerIndex: Int) -> NSRect {
+        collapsedSize == nil ? proposedEffectiveRect : .zero
+    }
 
     // Called after native divider tracking, never after automatic window layout.
     func rememberDividerPosition() {
-        guard arrangedSubviews.count == 2 else { return }
+        guard arrangedSubviews.count == 2, collapsedSize == nil else { return }
         let available = bounds.width - dividerThickness
         guard available > 0 else { return }
         preferredSize = proportional ? arrangedSubviews[0].frame.width / available : arrangedSubviews[0].frame.width

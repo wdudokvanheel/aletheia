@@ -336,6 +336,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(.separator())
         item("Find…", #selector(EditorWindow.showFind(_:)), "f", in: edit)
         item("Replace…", #selector(EditorWindow.showReplace(_:)), "r", in: edit)
+        let view = menu("View")
+        item("Toggle File Tree", #selector(EditorWindow.toggleFileTree(_:)), "s", in: view,
+             modifiers: [.control, .shift])
         let window = menu("Window")
         item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", in: window)
         item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), "", in: window)

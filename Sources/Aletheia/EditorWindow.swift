@@ -45,6 +45,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     private let editorHost = EditorHostView()
     private let split = PaneSplitView(proportional: false, preferredSize: 230)
     private let markdownSplit = PaneSplitView(proportional: true, preferredSize: 0.5)
+    private let sidebar = NSView()
+    private let sidebarToggle = NSButton()
+    private var treeConstraints: [NSLayoutConstraint] = []
+    private var treeCollapsed: Bool { split.collapsedSize != nil }
     private var contentConstraints: [NSLayoutConstraint] = []
     private let modeControl = NSSegmentedControl(labels: ["Editor", "Split", "Preview"],
         trackingMode: .selectOne, target: nil, action: nil)
@@ -81,7 +85,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
                       }), lastMarkdownMode: lastMarkdownMode, treeState: tree.session,
                       scrollPositions: Dictionary(uniqueKeysWithValues: documents.map {
                           ($0.file.requestedURL.path, $0.scrollPosition)
-                      }), treeWidth: split.preferredSize, editorFraction: markdownSplit.preferredSize)
+                      }), treeWidth: split.preferredSize, editorFraction: markdownSplit.preferredSize,
+                      treeCollapsed: treeCollapsed ? true : nil)
     }
 
     func restore(_ state: WindowSession, completion: @escaping @MainActor ([String]) -> Void) {
@@ -91,6 +96,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             markdownSplit.preferredSize = fraction
         }
         window?.setFrame(state.visibleFrame(on: NSScreen.screens.map(\.visibleFrame)), display: true)
+        setTreeCollapsed(state.treeCollapsed == true)
         split.applyPreferredSize()
         DispatchQueue.global(qos: .userInitiated).async {
             var skipped: [String] = []
@@ -176,7 +182,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         split.dividerStyle = .thin
         split.autoresizingMask = [.width, .height]
         let right = NSView()
-        split.addArrangedSubview(tree.scroll)
+        buildSidebar()
+        split.addArrangedSubview(sidebar)
         split.addArrangedSubview(right)
         window?.contentView = split
         split.applyPreferredSize()
@@ -241,6 +248,55 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             placeholder.centerXAnchor.constraint(equalTo: editorHost.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: editorHost.centerYAnchor)
         ])
+    }
+
+    private func buildSidebar() {
+        sidebarToggle.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle File Tree")
+        sidebarToggle.isBordered = false
+        sidebarToggle.imagePosition = .imageOnly
+        sidebarToggle.contentTintColor = .secondaryLabelColor
+        sidebarToggle.target = self
+        sidebarToggle.action = #selector(toggleFileTree(_:))
+        sidebarToggle.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(sidebarToggle)
+        tree.scroll.translatesAutoresizingMaskIntoConstraints = false
+        treeConstraints = [
+            tree.scroll.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            tree.scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            tree.scroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            tree.scroll.bottomAnchor.constraint(equalTo: sidebarToggle.topAnchor, constant: -4)
+        ]
+        NSLayoutConstraint.activate([
+            sidebarToggle.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 4),
+            sidebarToggle.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -4),
+            sidebarToggle.widthAnchor.constraint(equalToConstant: 20),
+            sidebarToggle.heightAnchor.constraint(equalToConstant: 20)
+        ])
+        setTreeCollapsed(false)
+    }
+
+    @objc func toggleFileTree(_ sender: Any?) { setTreeCollapsed(!treeCollapsed) }
+
+    /// Collapsed, the tree leaves the hierarchy so its frame and pending restoration stay intact.
+    private func setTreeCollapsed(_ collapsed: Bool) {
+        if collapsed {
+            if let responder = window?.firstResponder as? NSView, responder.isDescendant(of: tree.scroll) {
+                window?.makeFirstResponder(focusTarget)
+            }
+            NSLayoutConstraint.deactivate(treeConstraints)
+            tree.scroll.removeFromSuperview()
+        } else if tree.scroll.superview == nil {
+            sidebar.addSubview(tree.scroll)
+            NSLayoutConstraint.activate(treeConstraints)
+        }
+        sidebarToggle.toolTip = (collapsed ? "Show" : "Hide") + " File Tree (⌃⇧S)"
+        if treeCollapsed != collapsed { split.collapsedSize = collapsed ? 28 : nil }
+    }
+
+    private var focusTarget: NSView? {
+        guard let document = selected else { return nil }
+        guard document.isEditable else { return document.contentView }
+        return document.isMarkdown && document.markdownMode == .preview ? preview?.focusView : document.editor
     }
 
     func setRoot(_ url: URL) {

@@ -26,4 +26,34 @@ final class PaneSplitViewTests: XCTestCase {
                            accuracy: 0.001)
         }
     }
+
+    @MainActor func testCollapsedPaneKeepsPreferredWidth() {
+        let split = PaneSplitView(proportional: false, preferredSize: 300)
+        split.frame = NSRect(x: 0, y: 0, width: 1001, height: 600)
+        split.addArrangedSubview(NSView())
+        split.addArrangedSubview(NSView())
+        split.collapsedSize = 28
+        XCTAssertEqual(split.arrangedSubviews[0].frame.width, 28)
+        split.setPosition(350, ofDividerAt: 0)
+        split.rememberDividerPosition()
+        XCTAssertEqual(split.arrangedSubviews[0].frame.width, 28)
+        XCTAssertEqual(split.preferredSize, 300)
+        split.collapsedSize = nil
+        XCTAssertEqual(split.arrangedSubviews[0].frame.width, 300)
+    }
+
+    @MainActor func testFileTreeCollapseIsRestoredFromSession() async {
+        let controller = EditorWindow()
+        controller.toggleFileTree(nil)
+        let state = controller.session
+        XCTAssertEqual(state.treeCollapsed, true)
+        controller.toggleFileTree(nil)
+        XCTAssertNil(controller.session.treeCollapsed)
+        let restored = EditorWindow()
+        _ = await withCheckedContinuation { continuation in
+            restored.restore(state) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(restored.session.treeCollapsed, true)
+        XCTAssertEqual(restored.session.treeWidth, state.treeWidth)
+    }
 }

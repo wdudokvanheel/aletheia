@@ -28,6 +28,7 @@ struct WindowSession: Codable, Equatable, Sendable {
 
     var treeWidth: CGFloat? = nil
     var editorFraction: CGFloat? = nil
+    var treeCollapsed: Bool? = nil
 
     func visibleFrame(on screens: [CGRect]) -> CGRect {
         let fallback = CGRect(x: 0, y: 0, width: 1080, height: 720)
