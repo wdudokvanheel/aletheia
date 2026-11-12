@@ -139,7 +139,7 @@ extension MarkdownDocumentView {
         showCodeScroller(id)
         guard new != old else { return }
         codeOffsets[id] = new > 0 ? new : nil
-        let dirty = box.intersection(visibleRect)
+        let dirty = box.intersection(drawnRect)
         if !dirty.isNull, !dirty.isEmpty { setNeedsDisplay(dirty) }
     }
 
@@ -161,7 +161,7 @@ extension MarkdownDocumentView {
     }
 
     private func invalidateScroller(of id: CodeBlockID) {
-        guard let rect = scrollerRect(of: id)?.insetBy(dx: -1, dy: -1).intersection(visibleRect),
+        guard let rect = scrollerRect(of: id)?.insetBy(dx: -1, dy: -1).intersection(drawnRect),
               !rect.isNull, !rect.isEmpty else { return }
         setNeedsDisplay(rect)
     }

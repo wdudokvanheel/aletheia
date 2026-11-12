@@ -173,23 +173,28 @@ extension MarkdownDocumentView: NSMenuItemValidation, NSUserInterfaceValidations
         setSelection(min(anchor.lowerBound, unit.lowerBound)..<max(anchor.upperBound, unit.upperBound))
     }
 
-    /// Changes the selection and redraws only the visible lines that changed.
+    /// What may hold drawn content: the visible rect and the overdraw the
+    /// scroll view keeps around it for responsive scrolling. A change clipped
+    /// to the visible rect alone leaves stale overdraw to scroll back into view.
+    var drawnRect: CGRect { visibleRect.union(preparedContentRect) }
+
+    /// Changes the selection and redraws only the drawn lines that changed.
     func setSelection(_ range: Range<TextPosition>?) {
         let new = range?.isEmpty == false ? range : nil
         guard new != selection else { return }
         let old = selection
         selection = new
-        let visible = visibleRect
+        let drawn = drawnRect
         for rect in snapshot.selectionDirtyRects(from: old, to: new) {
-            let dirty = rect.intersection(visible)
+            let dirty = rect.intersection(drawn)
             if !dirty.isNull, !dirty.isEmpty { setNeedsDisplay(dirty) }
         }
     }
 
-    /// Redraws the visible part of the selection, for a color change.
+    /// Redraws the drawn part of the selection, for a color change.
     private func invalidateSelection() {
         guard let selection else { return }
-        let dirty = snapshot.lineBand(selection.lowerBound, selection.upperBound).intersection(visibleRect)
+        let dirty = snapshot.lineBand(selection.lowerBound, selection.upperBound).intersection(drawnRect)
         if !dirty.isNull, !dirty.isEmpty { setNeedsDisplay(dirty) }
     }
 
