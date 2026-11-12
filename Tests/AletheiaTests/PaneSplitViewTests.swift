@@ -42,6 +42,28 @@ final class PaneSplitViewTests: XCTestCase {
         XCTAssertEqual(split.arrangedSubviews[0].frame.width, 300)
     }
 
+    @MainActor func testDividerFollowsCollapse() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 400),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let split = PaneSplitView(proportional: false, preferredSize: 300)
+        window.contentView = split
+        split.addArrangedSubview(NSView())
+        split.addArrangedSubview(NSView())
+        split.applyPreferredSize()
+        window.displayIfNeeded()
+        func dividerX() -> [CGFloat] {
+            (split.layer?.sublayers ?? []).filter { !($0.delegate is NSView) || $0.delegate === split }.map(\.frame.minX)
+        }
+        for (size, expected) in [(CGFloat(28), CGFloat(28)), (nil, 300)] {
+            split.collapsedSize = size
+            split.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            XCTAssertEqual(dividerX(), [expected])
+        }
+    }
+
     @MainActor func testFileTreeCollapseIsRestoredFromSession() async {
         let controller = EditorWindow()
         controller.toggleFileTree(nil)

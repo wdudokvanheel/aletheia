@@ -7,7 +7,8 @@ final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
     var preferredSize: CGFloat
     /// Pins the first pane to this width and disables the divider, keeping `preferredSize`.
     var collapsedSize: CGFloat? {
-        didSet { applyPreferredSize() }
+        // The divider is its own layer and only follows the panes on the next layout pass.
+        didSet { applyPreferredSize(); needsLayout = true }
     }
 
     init(proportional: Bool, preferredSize: CGFloat) {
@@ -30,8 +31,6 @@ final class PaneSplitView: NSSplitView, NSSplitViewDelegate {
         arrangedSubviews[0].frame = NSRect(x: 0, y: 0, width: position, height: bounds.height)
         arrangedSubviews[1].frame = NSRect(x: position + dividerThickness, y: 0,
                                           width: available - position, height: bounds.height)
-        // Frames set directly do not invalidate the divider, which would stay painted at its old position.
-        needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
