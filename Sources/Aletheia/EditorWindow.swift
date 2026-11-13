@@ -59,6 +59,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     private var rendererSwitch: Task<Void, Never>?
     private let placeholder = NSTextField(labelWithString: "Open a folder or file from the File menu")
     private let watcher = FileWatcher()
+    private var createdFile: URL?
     private var diskCheckTask: Task<Void, Never>?
     private var diskCheckPending = false
     private var diskErrors: [ObjectIdentifier: String] = [:]
@@ -371,7 +372,49 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     }
 
     @objc private func revealSelectedFile() {
-        tree.reveal(AppSettings.shared.revealActiveFileInTree ? selected?.file.requestedURL : nil)
+        let url = selected?.file.requestedURL
+        // A file created here is shown in the tree once, whatever the preference says.
+        let created = url != nil && url?.path == createdFile?.path
+        if created { createdFile = nil }
+        tree.reveal(AppSettings.shared.revealActiveFileInTree || created ? url : nil)
+    }
+
+    @objc func newFile(_ sender: Any?) { promptForNewItem(directory: false) }
+    @objc func newFolder(_ sender: Any?) { promptForNewItem(directory: true) }
+
+    private func promptForNewItem(directory: Bool) {
+        guard let window, window.attachedSheet == nil, let parent = tree.creationDirectory else { return }
+        let alert = NSAlert()
+        alert.messageText = directory ? "New Folder" : "New File"
+        alert.informativeText = "In " + (parent.path as NSString).abbreviatingWithTildeInPath
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Name"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard response == .alertFirstButtonReturn, !name.isEmpty else { return }
+            self?.createItem(named: name, in: parent, directory: directory)
+        }
+    }
+
+    /// Never replaces an existing item. A new file opens in a tab; either kind is selected in the tree.
+    func createItem(named name: String, in parent: URL, directory: Bool) {
+        let url = parent.appendingPathComponent(name, isDirectory: directory)
+        do {
+            guard !name.contains("/"), name != ".", name != ".." else {
+                throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: url.path])
+            }
+            if directory { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false) }
+            else { try Data().write(to: url, options: .withoutOverwriting) }
+        } catch { present(error); return }
+        tree.noteCreated(url)
+        if directory { tree.reveal(url) } else {
+            createdFile = url
+            openFile(url)
+        }
     }
 
     @objc private func changeMarkdownMode(_ sender: NSSegmentedControl) {
@@ -595,6 +638,9 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(showFind(_:)) || item.action == #selector(showReplace(_:)) {
             return canEditSelected
+        }
+        if item.action == #selector(newFile(_:)) || item.action == #selector(newFolder(_:)) {
+            return hasRoot && !restoring && window?.attachedSheet == nil
         }
         return true
     }

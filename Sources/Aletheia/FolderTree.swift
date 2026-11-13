@@ -169,6 +169,11 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         outline.setDraggingSourceOperationMask(.copy, forLocal: false)
         outline.setDraggingSourceOperationMask([], forLocal: true)
         outline.verticalMotionCanBeginDrag = true
+        // No target: the window creates the item, so the menu bar and shortcuts share the code.
+        let menu = NSMenu()
+        menu.addItem(withTitle: ShortcutCommand.newFile.title, action: #selector(EditorWindow.newFile(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: ShortcutCommand.newFolder.title, action: #selector(EditorWindow.newFolder(_:)), keyEquivalent: "")
+        outline.menu = menu
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -177,6 +182,16 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
             name: NSView.frameDidChangeNotification, object: scroll.contentView)
         applyTheme()
     }
+
+    /// Where a new item goes: the clicked or selected folder, the folder holding that file, or the root.
+    var creationDirectory: URL? {
+        let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
+        guard let node = outline.item(atRow: row) as? FolderNode else { return root?.url }
+        return node.isDirectory ? node.url : node.url.deletingLastPathComponent()
+    }
+
+    /// Lists an item the app just created, without waiting for the file watcher.
+    func noteCreated(_ url: URL) { refresh(changedPaths: [url.path]) }
 
     func setRoot(_ url: URL) {
         pendingReveal = nil
