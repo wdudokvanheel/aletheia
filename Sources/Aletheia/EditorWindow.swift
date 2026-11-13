@@ -161,6 +161,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             name: AppSettings.revealActiveFileDidChange, object: AppSettings.shared)
         NotificationCenter.default.addObserver(self, selector: #selector(markdownRendererDidChange),
             name: AppSettings.markdownRendererDidChange, object: AppSettings.shared)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateTreeToggleTip),
+            name: Shortcuts.didChange, object: Shortcuts.shared)
         applyTheme()
         watcher.onChange = { [weak self] paths in
             guard let self, !self.closed else { return }
@@ -289,8 +291,13 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             sidebar.addSubview(tree.scroll)
             NSLayoutConstraint.activate(treeConstraints)
         }
-        sidebarToggle.toolTip = (collapsed ? "Show" : "Hide") + " File Tree (⌃⇧S)"
         if treeCollapsed != collapsed { split.collapsedSize = collapsed ? 28 : nil }
+        updateTreeToggleTip()
+    }
+
+    @objc private func updateTreeToggleTip() {
+        sidebarToggle.toolTip = (treeCollapsed ? "Show" : "Hide") + " File Tree"
+            + Shortcuts.shared.hint(for: .toggleFileTree)
     }
 
     private var focusTarget: NSView? {

@@ -3,7 +3,8 @@ import AppKit
 /// A small native preferences page. All preference storage stays in the existing models.
 @MainActor
 final class SettingsPage: NSViewController {
-    init(title: String, content: NSView) {
+    /// `fills` stretches the content to the page's full height instead of its natural one.
+    init(title: String, content: NSView, fills: Bool = false) {
         super.init(nibName: nil, bundle: nil)
         self.title = title
         let container = NSView()
@@ -13,7 +14,8 @@ final class SettingsPage: NSViewController {
             content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 32),
             content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -32),
             content.topAnchor.constraint(equalTo: container.topAnchor, constant: 28),
-            content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -28)
+            fills ? content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -28)
+                : content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -28)
         ])
         view = container
         preferredContentSize = NSSize(width: 700, height: 590)

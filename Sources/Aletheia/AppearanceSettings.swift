@@ -208,10 +208,12 @@ final class AppSettings: NSObject {
     private var revealCheckbox: NSButton?
     private var rendererPopup: NSPopUpButton?
     private var timingsCheckbox: NSButton?
-    private var projectSettingsViews: [ProjectSettingsView] = []
+    private var projectSettingsView: ProjectSettingsView?
+    private let shortcuts: Shortcuts
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, shortcuts: Shortcuts = .shared) {
         self.defaults = defaults
+        self.shortcuts = shortcuts
         let saved = defaults.string(forKey: Self.colorSchemeKey)
         selectedSchemeID = Self.schemes.first { $0.id == saved }?.id ?? "system"
         super.init()
@@ -264,16 +266,16 @@ final class AppSettings: NSObject {
             general.alignment = .leading
             general.spacing = 12
             general.setCustomSpacing(28, after: revealNote)
-            let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .projects)
-            let shortcuts = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), section: .shortcuts)
-            projectSettingsViews = [projects, shortcuts]
+            let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), shortcuts: shortcuts)
+            projectSettingsView = projects
+            let shortcutList = ShortcutSettingsView(shortcuts: shortcuts)
             for (title, symbol, content) in [
                 ("General", "gearshape", general),
                 ("Appearance", "paintpalette", appearance),
                 ("Projects", "folder", projects),
-                ("Shortcuts", "keyboard", shortcuts)
-            ] {
-                let controller = SettingsPage(title: title, content: content)
+                ("Shortcuts", "keyboard", shortcutList)
+            ] as [(String, String, NSView)] {
+                let controller = SettingsPage(title: title, content: content, fills: content === shortcutList)
                 let item = NSTabViewItem(viewController: controller)
                 item.label = title
                 item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
@@ -293,7 +295,7 @@ final class AppSettings: NSObject {
             window.center()
         }
         updateWindow()
-        projectSettingsViews.forEach { $0.refresh() }
+        projectSettingsView?.refresh()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

@@ -24,18 +24,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let defaults: UserDefaults
     private weak var activeProjectWindow: EditorWindow?
     private var picker: ProjectPicker?
+    private let shortcuts: Shortcuts
+    private(set) var commandItems: [ShortcutCommand: NSMenuItem] = [:]
     private var keyMonitor: Any?
-    private var prefixPending = false
+    /// The first key of a two-step shortcut, waiting for the second.
+    private var pendingStroke: KeyStroke?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, shortcuts: Shortcuts = .shared) {
         self.defaults = defaults
+        self.shortcuts = shortcuts
         projectSessions = ProjectSessions.load(from: defaults)
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        installProjectShortcut()
+        installShortcutMonitor()
         launched = true
         restoreSession()
         NSApp.activate(ignoringOtherApps: true)
@@ -57,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         controller.onActivate = { [weak self, weak controller] in
             guard let self, let controller else { return }
-            self.prefixPending = false
+            self.pendingStroke = nil
             self.activeProjectWindow = controller
             guard !self.restoring, !self.terminating else { return }
             self.persistOpenProjects()
@@ -256,29 +260,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         picker?.present(relativeTo: current?.window) { [weak self] url in self?.openProject(url) }
     }
 
-    private func installProjectShortcut() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
-            let consumed = MainActor.assumeIsolated { () -> Bool in
-                guard let self else { return false }
-                guard event.type == .keyDown else { self.prefixPending = false; return false }
-                let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-                let key = event.charactersIgnoringModifiers?.lowercased()
-                if modifiers == .control, key == "s" {
-                    self.prefixPending = true
-                    return true
-                }
-                if self.prefixPending {
-                    self.prefixPending = false
-                    if modifiers.isEmpty, key == "s" { self.showProjects(nil); return true }
-                    if event.keyCode == 53 { return true }
-                }
-                return false
-            }
-            return consumed ? nil : event
+    private func installShortcutMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated { self?.consumeShortcutEvent(event) } == true ? nil : event
         }
     }
 
-    func applicationDidResignActive(_ notification: Notification) { prefixPending = false }
+    /// Menus match one-step shortcuts natively; this adds two-step ones and feeds the settings recorder.
+    func consumeShortcutEvent(_ event: NSEvent) -> Bool {
+        if let recorder = ShortcutField.recording {
+            pendingStroke = nil
+            return recorder.handle(event)
+        }
+        if event.type == .flagsChanged { return false }
+        guard event.type == .keyDown, let stroke = KeyStroke(event) else { pendingStroke = nil; return false }
+        if let first = pendingStroke {
+            // Holding the first key down must not complete or drop the shortcut.
+            if event.isARepeat { return true }
+            pendingStroke = nil
+            if let command = shortcuts.command(for: [first, stroke]) { perform(command); return true }
+            if stroke == KeyStroke("\u{1B}") { return true }
+        }
+        guard shortcuts.startsSequence(stroke) else { return false }
+        pendingStroke = stroke
+        return true
+    }
+
+    /// Runs the command through its menu item, so it stays subject to the menu's validation.
+    private func perform(_ command: ShortcutCommand) {
+        guard let item = commandItems[command], let menu = item.menu else { return }
+        menu.update()
+        if item.isEnabled { menu.performActionForItem(at: menu.index(of: item)) }
+    }
+
+    @objc private func applyShortcuts() {
+        for (command, item) in commandItems {
+            let strokes = shortcuts.strokes(for: command)
+            item.keyEquivalent = strokes.count == 1 ? strokes[0].menuKeyEquivalent : ""
+            item.keyEquivalentModifierMask = strokes.count == 1 ? strokes[0].flags : []
+            // Menus cannot draw a two-step key equivalent.
+            item.badge = strokes.count == 2 ? NSMenuItemBadge(string: Shortcuts.text(strokes)) : nil
+        }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) { pendingStroke = nil }
 
     @objc private func showSettings(_ sender: Any?) { AppSettings.shared.showWindow() }
 
@@ -291,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ])
     }
 
-    private func buildMenu() {
+    func buildMenu() {
         let main = NSMenu()
         func menu(_ title: String) -> NSMenu {
             let item = NSMenuItem()
@@ -300,48 +325,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.submenu = submenu
             return submenu
         }
-        func item(_ title: String, _ action: Selector, _ key: String, in menu: NSMenu,
-                  target: AnyObject? = nil, modifiers: NSEvent.ModifierFlags = .command) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        func item(_ title: String, _ action: Selector, in menu: NSMenu, target: AnyObject? = nil) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = target
-            item.keyEquivalentModifierMask = modifiers
             menu.addItem(item)
         }
+        func item(_ command: ShortcutCommand, _ action: Selector, in menu: NSMenu, target: AnyObject? = nil) {
+            item(command.title, action, in: menu, target: target)
+            commandItems[command] = menu.items.last
+        }
         let app = menu("Aletheia")
-        item("About Aletheia", #selector(showAbout(_:)), "", in: app, target: self)
+        item("About Aletheia", #selector(showAbout(_:)), in: app, target: self)
         app.addItem(.separator())
-        item("Settings…", #selector(showSettings(_:)), ",", in: app, target: self)
+        item(.settings, #selector(showSettings(_:)), in: app, target: self)
         app.addItem(.separator())
-        item("Hide Aletheia", #selector(NSApplication.hide(_:)), "h", in: app)
-        item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", in: app, modifiers: [.command, .option])
-        item("Show All", #selector(NSApplication.unhideAllApplications(_:)), "", in: app)
+        item(.hide, #selector(NSApplication.hide(_:)), in: app)
+        item(.hideOthers, #selector(NSApplication.hideOtherApplications(_:)), in: app)
+        item("Show All", #selector(NSApplication.unhideAllApplications(_:)), in: app)
         app.addItem(.separator())
-        item("Quit Aletheia", #selector(NSApplication.terminate(_:)), "q", in: app)
+        item(.quit, #selector(NSApplication.terminate(_:)), in: app)
         let file = menu("File")
-        item("Open File…", #selector(openFiles(_:)), "o", in: file, target: self)
-        item("Open Folder…", #selector(openFolder(_:)), "o", in: file, target: self, modifiers: [.command, .shift])
-        item("Switch Project… (⌃S, S)", #selector(showProjects(_:)), "", in: file, target: self)
+        item(.openFile, #selector(openFiles(_:)), in: file, target: self)
+        item(.openFolder, #selector(openFolder(_:)), in: file, target: self)
+        item(.switchProject, #selector(showProjects(_:)), in: file, target: self)
         file.addItem(.separator())
-        item("Save", #selector(save(_:)), "s", in: file, target: self)
-        item("Close Tab", #selector(closeTab(_:)), "w", in: file, target: self)
-        item("Close Window", #selector(closeWindow(_:)), "w", in: file, target: self, modifiers: [.command, .shift])
+        item(.save, #selector(save(_:)), in: file, target: self)
+        item(.closeTab, #selector(closeTab(_:)), in: file, target: self)
+        item(.closeWindow, #selector(closeWindow(_:)), in: file, target: self)
         let edit = menu("Edit")
-        item("Undo", Selector(("undo:")), "z", in: edit)
-        item("Redo", Selector(("redo:")), "z", in: edit, modifiers: [.command, .shift])
+        item(.undo, Selector(("undo:")), in: edit)
+        item(.redo, Selector(("redo:")), in: edit)
         edit.addItem(.separator())
-        item("Cut", #selector(NSText.cut(_:)), "x", in: edit)
-        item("Copy", #selector(NSText.copy(_:)), "c", in: edit)
-        item("Paste", #selector(NSText.paste(_:)), "v", in: edit)
-        item("Select All", #selector(NSText.selectAll(_:)), "a", in: edit)
+        item(.cut, #selector(NSText.cut(_:)), in: edit)
+        item(.copy, #selector(NSText.copy(_:)), in: edit)
+        item(.paste, #selector(NSText.paste(_:)), in: edit)
+        item(.selectAll, #selector(NSText.selectAll(_:)), in: edit)
         edit.addItem(.separator())
-        item("Find…", #selector(EditorWindow.showFind(_:)), "f", in: edit)
-        item("Replace…", #selector(EditorWindow.showReplace(_:)), "r", in: edit)
+        item(.find, #selector(EditorWindow.showFind(_:)), in: edit)
+        item(.replace, #selector(EditorWindow.showReplace(_:)), in: edit)
         let view = menu("View")
-        item("Toggle File Tree", #selector(EditorWindow.toggleFileTree(_:)), "s", in: view,
-             modifiers: [.control, .shift])
+        item(.toggleFileTree, #selector(EditorWindow.toggleFileTree(_:)), in: view)
         let window = menu("Window")
-        item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", in: window)
-        item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), "", in: window)
+        item(.minimize, #selector(NSWindow.performMiniaturize(_:)), in: window)
+        item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), in: window)
+        applyShortcuts()
+        NotificationCenter.default.addObserver(self, selector: #selector(applyShortcuts),
+            name: Shortcuts.didChange, object: shortcuts)
         NSApp.windowsMenu = window
         NSApp.mainMenu = main
     }

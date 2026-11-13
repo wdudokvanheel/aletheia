@@ -42,58 +42,58 @@ final class ProjectSettings {
 /// Native project preferences; each assignment is an explicit folder choice.
 @MainActor
 final class ProjectSettingsView: NSStackView {
-    enum Section { case projects, shortcuts }
-    private let section: Section
     private let settings: ProjectSettings
+    private let shortcuts: Shortcuts
     private var assignmentMenus: [NSPopUpButton] = []
     private let baseLabel = NSTextField(labelWithString: "")
+    private let selectorNote = SettingsPage.note("")
 
-    init(settings: ProjectSettings, section: Section) {
+    init(settings: ProjectSettings, shortcuts: Shortcuts) {
         self.settings = settings
-        self.section = section
+        self.shortcuts = shortcuts
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
         spacing = 12
-        if section == .projects {
-            addArrangedSubview(SettingsPage.heading("Project discovery"))
-            addArrangedSubview(SettingsPage.note("Choose the folder whose projects appear in the project selector."))
-            let baseButton = NSButton(title: "Choose Folder…", target: self, action: #selector(chooseBase))
-            addRow(label: baseLabel, controls: [baseButton])
-            addArrangedSubview(SettingsPage.note("Open the project selector with Control-S, then S."))
-        } else {
-            addArrangedSubview(SettingsPage.heading("Numbered projects"))
-            addArrangedSubview(SettingsPage.note("Press Control-S, then S to open the project selector. With its search empty, press a number to open the assigned project."))
-            let assignments = NSStackView()
-            assignments.orientation = .vertical
-            assignments.alignment = .leading
-            assignments.spacing = 8
-            for index in 0..<10 {
-                let badge = NSTextField(labelWithString: ProjectSettings.digits[index])
-                badge.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-                badge.alignment = .center
-                badge.isBezeled = true
-                badge.bezelStyle = .roundedBezel
-                badge.drawsBackground = true
-                badge.backgroundColor = .controlBackgroundColor
-                badge.textColor = .secondaryLabelColor
-                badge.widthAnchor.constraint(equalToConstant: 30).isActive = true
-                let menu = NSPopUpButton(frame: .zero, pullsDown: true)
-                menu.lineBreakMode = .byTruncatingMiddle
-                menu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                assignmentMenus.append(menu)
-                let row = NSStackView(views: [badge, menu])
-                row.alignment = .centerY
-                row.spacing = 12
-                assignments.addArrangedSubview(row)
-                NSLayoutConstraint.activate([
-                    row.widthAnchor.constraint(equalTo: assignments.widthAnchor),
-                    row.heightAnchor.constraint(equalToConstant: 32)
-                ])
-            }
-            addArrangedSubview(assignments)
-            assignments.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        addArrangedSubview(SettingsPage.heading("Project discovery"))
+        addArrangedSubview(SettingsPage.note("Choose the folder whose projects appear in the project selector."))
+        let baseButton = NSButton(title: "Choose Folder…", target: self, action: #selector(chooseBase))
+        addRow(label: baseLabel, controls: [baseButton])
+        setCustomSpacing(28, after: arrangedSubviews.last!)
+        addArrangedSubview(SettingsPage.heading("Numbered projects"))
+        addArrangedSubview(selectorNote)
+        let assignments = NSStackView()
+        assignments.orientation = .vertical
+        assignments.alignment = .leading
+        assignments.spacing = 6
+        for index in 0..<10 {
+            let badge = NSTextField(labelWithString: ProjectSettings.digits[index])
+            badge.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
+            badge.alignment = .center
+            badge.isBezeled = true
+            badge.bezelStyle = .roundedBezel
+            badge.drawsBackground = true
+            badge.backgroundColor = .controlBackgroundColor
+            badge.textColor = .secondaryLabelColor
+            badge.widthAnchor.constraint(equalToConstant: 30).isActive = true
+            let menu = NSPopUpButton(frame: .zero, pullsDown: true)
+            menu.lineBreakMode = .byTruncatingMiddle
+            menu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            assignmentMenus.append(menu)
+            let row = NSStackView(views: [badge, menu])
+            row.alignment = .centerY
+            row.spacing = 12
+            assignments.addArrangedSubview(row)
+            NSLayoutConstraint.activate([
+                row.widthAnchor.constraint(equalTo: assignments.widthAnchor),
+                row.heightAnchor.constraint(equalToConstant: 28)
+            ])
         }
+        addArrangedSubview(assignments)
+        assignments.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        NotificationCenter.default.addObserver(self, selector: #selector(updateSelectorNote),
+            name: Shortcuts.didChange, object: shortcuts)
+        updateSelectorNote()
         updateLabels()
     }
 
@@ -112,6 +112,13 @@ final class ProjectSettingsView: NSStackView {
         row.spacing = 8
         addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+    }
+
+    @objc private func updateSelectorNote() {
+        let strokes = shortcuts.strokes(for: .switchProject)
+        let open = strokes.isEmpty ? "Choose File › Switch Project…"
+            : "Press \(Shortcuts.text(strokes, separator: ", then "))"
+        selectorNote.stringValue = "\(open) to open the project selector. With its search empty, press a number to open the assigned project."
     }
 
     private func updateLabels() {
