@@ -115,6 +115,22 @@ struct TextFile: Sendable {
         return try result.get()
     }
 
+    /// Writes `text` to another path with this file's BOM, then reads that file back as the new snapshot.
+    /// The save panel has already confirmed replacing an existing item.
+    func save(_ text: String, as target: URL) throws -> TextFile {
+        var output = Data()
+        if hasBOM { output.append(contentsOf: [0xEF, 0xBB, 0xBF]) }
+        output.append(contentsOf: text.utf8)
+        var result: Result<Void, Error> = .success(())
+        var coordinationError: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: target, options: .forReplacing, error: &coordinationError) { coordinated in
+            result = Result { try output.write(to: coordinated, options: .atomic) }
+        }
+        if let coordinationError { throw coordinationError }
+        try result.get()
+        return try Self.read(target)
+    }
+
     static func insertingNewlines(in text: String, style: String) -> String {
         text.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")

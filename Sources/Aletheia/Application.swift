@@ -98,8 +98,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func save(_ sender: Any?) { if !terminating && !restoring { current?.saveSelected(sender) } }
+    @objc private func saveAs(_ sender: Any?) { if !terminating && !restoring { current?.saveSelectedAs(sender) } }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(save(_:)) {
+        if item.action == #selector(save(_:)) || item.action == #selector(saveAs(_:)) {
             return !terminating && !restoring && current?.canEditSelected == true
         }
         return true
@@ -355,6 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         item(.switchProject, #selector(showProjects(_:)), in: file, target: self)
         file.addItem(.separator())
         item(.save, #selector(save(_:)), in: file, target: self)
+        item(.saveAs, #selector(saveAs(_:)), in: file, target: self)
         item(.closeTab, #selector(closeTab(_:)), in: file, target: self)
         item(.closeWindow, #selector(closeWindow(_:)), in: file, target: self)
         let edit = menu("Edit")

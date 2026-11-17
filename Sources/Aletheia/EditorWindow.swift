@@ -471,14 +471,16 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             moved.append(document)
         }
         guard !moved.isEmpty else { return }
-        if let selected, moved.contains(where: { $0 === selected }) {
-            // Markdown follows the extension; a shown preview resolves images from the new folder.
-            if selected.isMarkdown != wasMarkdown { layoutEditor() }
-            else if selected.isMarkdown, selected.markdownMode != .editor { preview?.show(selected) }
-        }
+        if let selected, moved.contains(where: { $0 === selected }) { showMoved(selected, wasMarkdown: wasMarkdown) }
         updateWatching()
         refreshTabs()
         updateTitle()
+    }
+
+    /// Markdown follows the extension; a shown preview resolves images from the new folder.
+    private func showMoved(_ document: EditorDocument, wasMarkdown: Bool?) {
+        if document.isMarkdown != wasMarkdown { layoutEditor() }
+        else if document.isMarkdown, document.markdownMode != .editor { preview?.show(document) }
     }
 
     /// Puts the item on the pasteboard as a file, so Finder can paste it, and as its path.
@@ -823,6 +825,63 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     }
     @objc func saveSelected(_ sender: Any?) {
         if let selected { save(selected) { _ in } }
+    }
+
+    /// Writes the buffer to a chosen path; the tab then edits that file and the original stays as it was on disk.
+    @objc func saveSelectedAs(_ sender: Any?) {
+        guard canEditSelected, let document = selected, !document.busy, let window, window.attachedSheet == nil else { return }
+        let panel = NSSavePanel()
+        panel.directoryURL = document.file.requestedURL.deletingLastPathComponent()
+        panel.nameFieldStringValue = document.file.requestedURL.lastPathComponent
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let target = panel.url else { return }
+            if self.selected === document { self.saveSelected(as: target) }
+        }
+    }
+
+    func saveSelected(as target: URL) {
+        guard canEditSelected, let document = selected else { return }
+        guard !document.busy else { NSSound.beep(); return }
+        let canonical = target.resolvingSymlinksInPath()
+        // Its own path keeps the ordinary save, which refuses to overwrite changes made on disk.
+        if canonical == document.file.url { save(document) { _ in }; return }
+        if documents.contains(where: { $0 !== document && $0.file.url == canonical }), let window {
+            let alert = NSAlert()
+            alert.messageText = "“\(target.lastPathComponent)” is open in another tab"
+            alert.informativeText = "Close that tab first, then use Save As again."
+            alert.beginSheetModal(for: window)
+            return
+        }
+        document.editor.breakUndoCoalescing()
+        document.busy = true
+        document.editor.isEditable = false
+        let text = document.editor.string
+        let file = document.file
+        let wasMarkdown = document.isMarkdown
+        refreshTabs()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try file.save(text, as: target) }
+            DispatchQueue.main.async {
+                document.busy = false
+                document.editor.isEditable = !self.closing
+                switch result {
+                case .success(let saved):
+                    self.diskErrors[ObjectIdentifier(document)] = nil
+                    document.diskUnavailable = false
+                    document.move(to: saved)
+                    if self.selected === document { self.showMoved(document, wasMarkdown: wasMarkdown) }
+                    self.tree.refreshGitStatus()
+                    self.updateWatching()
+                    self.refreshTabs()
+                    self.updateTitle()
+                case .failure(let error):
+                    self.refreshTabs()
+                    self.present(error)
+                }
+                self.checkDiskChanges()
+            }
+        }
     }
 
     private func close(_ document: EditorDocument) {

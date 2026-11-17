@@ -58,7 +58,7 @@ struct KeyStroke: Codable, Hashable {
 /// Every command with a configurable shortcut, in menu order.
 enum ShortcutCommand: String, CaseIterable {
     case settings, hide, hideOthers, quit
-    case newFile, newFolder, rename, delete, openFile, openFolder, switchProject, save, closeTab, closeWindow
+    case newFile, newFolder, rename, delete, openFile, openFolder, switchProject, save, saveAs, closeTab, closeWindow
     case undo, redo, cut, copy, paste, selectAll, duplicateLine, deleteLine, find, replace
     case toggleFileTree
     case minimize
@@ -77,6 +77,7 @@ enum ShortcutCommand: String, CaseIterable {
         case .openFolder: "Open Folder…"
         case .switchProject: "Switch Project…"
         case .save: "Save"
+        case .saveAs: "Save As…"
         case .closeTab: "Close Tab"
         case .closeWindow: "Close Window"
         case .undo: "Undo"
@@ -98,7 +99,7 @@ enum ShortcutCommand: String, CaseIterable {
     var group: String {
         switch self {
         case .settings, .hide, .hideOthers, .quit: "Aletheia"
-        case .newFile, .newFolder, .rename, .delete, .openFile, .openFolder, .switchProject, .save, .closeTab, .closeWindow: "File"
+        case .newFile, .newFolder, .rename, .delete, .openFile, .openFolder, .switchProject, .save, .saveAs, .closeTab, .closeWindow: "File"
         case .undo, .redo, .cut, .copy, .paste, .selectAll, .duplicateLine, .deleteLine, .find, .replace: "Edit"
         case .toggleFileTree: "View"
         case .minimize: "Window"
@@ -119,6 +120,7 @@ enum ShortcutCommand: String, CaseIterable {
         case .openFolder: [KeyStroke("o", [.command, .shift])]
         case .switchProject: [KeyStroke("s", .control), KeyStroke("s")]
         case .save: [KeyStroke("s", .command)]
+        case .saveAs: [KeyStroke("s", [.command, .shift])]
         case .closeTab: [KeyStroke("w", .command)]
         case .closeWindow: [KeyStroke("w", [.command, .shift])]
         case .undo: [KeyStroke("z", .command)]

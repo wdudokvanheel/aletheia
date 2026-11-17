@@ -44,6 +44,11 @@ enum DocumentFile: Sendable {
         return .text(try file.save(text))
     }
 
+    func save(_ text: String, as target: URL) throws -> DocumentFile {
+        guard case .text(let file) = self else { throw PreviewFile.LoadError.readOnly }
+        return .text(try file.save(text, as: target))
+    }
+
     /// True when the file is `item` or lies inside it, by either path.
     func isInside(_ item: URL) -> Bool {
         [item, FileOperations.canonical(item)].contains { requestedURL.isSameOrInside($0) || url.isSameOrInside($0) }
