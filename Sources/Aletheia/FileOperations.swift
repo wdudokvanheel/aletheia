@@ -51,6 +51,16 @@ enum FileOperations {
         }
     }
 
+    /// Writes pasted image data as a new PNG named like a macOS screenshot. Never replaces a file.
+    static func pasteImage(_ png: Data, into directory: URL, date: Date = Date()) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let destination = freeURL(for: "Image \(formatter.string(from: date)).png", in: directory, isDirectory: false)
+        try png.write(to: destination, options: .withoutOverwriting)
+        return destination
+    }
+
     /// Finder's naming: "name.ext", then "name copy.ext", "name copy 2.ext", and so on.
     static func freeURL(for name: String, in directory: URL, isDirectory: Bool) -> URL {
         let plain = directory.appendingPathComponent(name)

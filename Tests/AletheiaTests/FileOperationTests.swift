@@ -99,6 +99,20 @@ final class FileOperationTests: XCTestCase {
         XCTAssertEqual(try FileOperations.paste([folder], into: sibling).map(\.lastPathComponent), ["folder"])
     }
 
+    func testPastedImagesGetScreenshotNamesAndNeverReplace() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var parts = DateComponents()
+        (parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second) = (2026, 11, 17, 9, 5, 3)
+        let date = try XCTUnwrap(Calendar.current.date(from: parts))
+        let first = try FileOperations.pasteImage(Data([1]), into: root, date: date)
+        let second = try FileOperations.pasteImage(Data([2]), into: root, date: date)
+        XCTAssertEqual(first.lastPathComponent, "Image 2026-11-17 at 09.05.03.png")
+        XCTAssertEqual(second.lastPathComponent, "Image 2026-11-17 at 09.05.03 copy.png")
+        XCTAssertEqual(try Data(contentsOf: first), Data([1]))
+        XCTAssertEqual(try Data(contentsOf: second), Data([2]))
+    }
+
     func testMovedSnapshotsKeepTheirIdentity() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -430,7 +430,8 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
 
     private func canPaste(_ sender: Any?) -> Bool {
         canChangeTree && (tree.hasFocus || tree.ownsMenuItem(sender)) && tree.creationDirectory != nil
-            && NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            && (NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+                || NSPasteboard.general.availableType(from: [.png, .tiff]) != nil)
     }
 
     @objc func renameFileItem(_ sender: Any?) {
@@ -493,11 +494,25 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         NSPasteboard.general.writeObjects([item])
     }
 
+    /// Pastes copied files, or else a copied image as a new PNG file.
     @objc func pasteFileItems(_ sender: Any?) {
-        guard canPaste(sender), let directory = tree.creationDirectory,
-              let sources = NSPasteboard.general.readObjects(forClasses: [NSURL.self],
-                  options: [.urlReadingFileURLsOnly: true]) as? [URL], !sources.isEmpty else { return }
-        pasteItems(sources, into: directory)
+        guard canPaste(sender), let directory = tree.creationDirectory else { return }
+        let pasteboard = NSPasteboard.general
+        if let sources = pasteboard.readObjects(forClasses: [NSURL.self],
+               options: [.urlReadingFileURLsOnly: true]) as? [URL], !sources.isEmpty {
+            pasteItems(sources, into: directory)
+        } else if let png = pasteboard.data(forType: .png) {
+            pasteImage(png, into: directory)
+        } else if let tiff = pasteboard.data(forType: .tiff) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+                DispatchQueue.main.async { if let png { self.pasteImage(png, into: directory) } }
+            }
+        }
+    }
+
+    private func pasteImage(_ png: Data, into directory: URL) {
+        finishPaste { [try FileOperations.pasteImage(png, into: directory)] }
     }
 
     // Edit > Copy and Paste reach the window only when no focused view handles them.
@@ -506,8 +521,13 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
 
     /// Copies in the background. A name clash gets a Finder-style "copy" name; nothing is replaced.
     func pasteItems(_ sources: [URL], into directory: URL) {
+        finishPaste { try FileOperations.paste(sources, into: directory) }
+    }
+
+    /// Writes in the background, then shows the new items in the tree.
+    private func finishPaste(_ write: @escaping @Sendable () throws -> [URL]) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try FileOperations.paste(sources, into: directory) }
+            let result = Result { try write() }
             DispatchQueue.main.async {
                 guard !self.closed else { return }
                 switch result {
