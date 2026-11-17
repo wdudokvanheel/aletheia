@@ -783,9 +783,20 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         findBar.show(replacing: true)
     }
 
+    /// Line commands act on the editor only while it has focus, not on the find fields.
+    private var focusedEditor: EditorDocument? {
+        guard canEditSelected, let selected, window?.firstResponder === selected.editor else { return nil }
+        return selected
+    }
+    @objc func duplicateLines(_ sender: Any?) { focusedEditor?.duplicateLine() }
+    @objc func deleteLines(_ sender: Any?) { focusedEditor?.deleteLine() }
+
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(showFind(_:)) || item.action == #selector(showReplace(_:)) {
             return canEditSelected
+        }
+        if item.action == #selector(duplicateLines(_:)) || item.action == #selector(deleteLines(_:)) {
+            return focusedEditor != nil
         }
         if item.action == #selector(newFile(_:)) || item.action == #selector(newFolder(_:)) {
             return hasRoot && !restoring && window?.attachedSheet == nil

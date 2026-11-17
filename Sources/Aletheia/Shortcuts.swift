@@ -59,7 +59,7 @@ struct KeyStroke: Codable, Hashable {
 enum ShortcutCommand: String, CaseIterable {
     case settings, hide, hideOthers, quit
     case newFile, newFolder, rename, delete, openFile, openFolder, switchProject, save, closeTab, closeWindow
-    case undo, redo, cut, copy, paste, selectAll, find, replace
+    case undo, redo, cut, copy, paste, selectAll, duplicateLine, deleteLine, find, replace
     case toggleFileTree
     case minimize
 
@@ -85,6 +85,8 @@ enum ShortcutCommand: String, CaseIterable {
         case .copy: "Copy"
         case .paste: "Paste"
         case .selectAll: "Select All"
+        case .duplicateLine: "Duplicate Line"
+        case .deleteLine: "Delete Line"
         case .find: "Find…"
         case .replace: "Replace…"
         case .toggleFileTree: "Toggle File Tree"
@@ -97,7 +99,7 @@ enum ShortcutCommand: String, CaseIterable {
         switch self {
         case .settings, .hide, .hideOthers, .quit: "Aletheia"
         case .newFile, .newFolder, .rename, .delete, .openFile, .openFolder, .switchProject, .save, .closeTab, .closeWindow: "File"
-        case .undo, .redo, .cut, .copy, .paste, .selectAll, .find, .replace: "Edit"
+        case .undo, .redo, .cut, .copy, .paste, .selectAll, .duplicateLine, .deleteLine, .find, .replace: "Edit"
         case .toggleFileTree: "View"
         case .minimize: "Window"
         }
@@ -125,6 +127,8 @@ enum ShortcutCommand: String, CaseIterable {
         case .copy: [KeyStroke("c", .command)]
         case .paste: [KeyStroke("v", .command)]
         case .selectAll: [KeyStroke("a", .command)]
+        case .duplicateLine: [KeyStroke("d", [.command, .shift])]
+        case .deleteLine: [KeyStroke("d", .command)]
         case .find: [KeyStroke("f", .command)]
         case .replace: [KeyStroke("r", .command)]
         case .toggleFileTree: [KeyStroke("s", [.control, .shift])]

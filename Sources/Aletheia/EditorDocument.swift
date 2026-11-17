@@ -210,6 +210,56 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
 
     func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
+    /// Copies the selection after itself, or the caret's line below it, and moves to the copy.
+    func duplicateLine() {
+        guard editor.isEditable, !busy else { return }
+        let text = editor.string as NSString
+        let selection = editor.selectedRange()
+        if selection.length > 0 {
+            replace(NSRange(location: NSMaxRange(selection), length: 0), with: text.substring(with: selection))
+            editor.setSelectedRange(NSRange(location: NSMaxRange(selection), length: selection.length))
+            return
+        }
+        let line = text.lineRange(for: selection)
+        var contentsEnd = 0
+        text.getLineStart(nil, end: nil, contentsEnd: &contentsEnd, for: selection)
+        // The last line has no break of its own, so the copy starts with one.
+        let lineBreak = contentsEnd == NSMaxRange(line) ? file.newline : ""
+        replace(NSRange(location: NSMaxRange(line), length: 0), with: lineBreak + text.substring(with: line))
+        editor.setSelectedRange(NSRange(location: NSMaxRange(line) + (lineBreak as NSString).length
+                                        + selection.location - line.location, length: 0))
+    }
+
+    /// Removes every line the selection touches; the caret keeps its column on the line that follows.
+    func deleteLine() {
+        guard editor.isEditable, !busy else { return }
+        let text = editor.string as NSString
+        let selection = editor.selectedRange()
+        var removed = text.lineRange(for: selection)
+        let column = selection.location - removed.location
+        var lineStart = removed.location
+        var contentsEnd = 0
+        text.getLineStart(nil, end: nil, contentsEnd: &contentsEnd, for: selection)
+        if contentsEnd == NSMaxRange(removed) && removed.location > 0 {
+            // The last line also takes the break before it, so no empty line is left behind.
+            text.getLineStart(&lineStart, end: nil, contentsEnd: &contentsEnd,
+                              for: NSRange(location: removed.location - 1, length: 0))
+            removed = NSRange(location: contentsEnd, length: NSMaxRange(removed) - contentsEnd)
+        }
+        guard removed.length > 0 else { return }
+        replace(removed, with: "")
+        let remaining = editor.string as NSString
+        remaining.getLineStart(nil, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: lineStart, length: 0))
+        editor.setSelectedRange(NSRange(location: min(lineStart + column, contentsEnd), length: 0))
+    }
+
+    /// One undo step per command, through the delegate so line breaks follow the file.
+    private func replace(_ range: NSRange, with string: String) {
+        editor.breakUndoCoalescing()
+        editor.insertText(string, replacementRange: range)
+        editor.breakUndoCoalescing()
+    }
+
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
                      range editedRange: NSRange, changeInLength delta: Int) {
         if editedMask.contains(.editedCharacters) {
