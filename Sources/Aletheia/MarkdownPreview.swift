@@ -116,11 +116,12 @@ final class MarkdownPreview: NSObject, WKNavigationDelegate, MarkdownPreviewing 
     func show(_ document: EditorDocument?) {
         let changed = self.document !== document || document == nil
         self.document = document
+        // Also when the shown file was renamed or moved with its folder.
+        resources.directory = document?.file.url.deletingLastPathComponent()
         if changed {
             searchQuery = ""
             searchRange = nil
             committedGeneration = nil
-            resources.directory = document?.file.url.deletingLastPathComponent()
             resources.token = UUID().uuidString
             resetScroll = true
             carriedFraction = document == nil ? nil : nextFraction

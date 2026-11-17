@@ -38,7 +38,7 @@ final class NewItemTests: XCTestCase {
             (view as? NSOutlineView).map { [$0] } ?? view.subviews.flatMap(outlines)
         }
         let outline = try XCTUnwrap(outlines(try XCTUnwrap(window.contentView)).first)
-        XCTAssertEqual(outline.menu?.items.map(\.action),
+        XCTAssertEqual(outline.menu?.items.prefix(2).map(\.action),
                        [#selector(EditorWindow.newFile(_:)), #selector(EditorWindow.newFolder(_:))])
         func waitForTreeSelection(_ url: URL) async throws {
             let deadline = Date().addingTimeInterval(5)

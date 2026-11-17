@@ -43,6 +43,40 @@ enum DocumentFile: Sendable {
         guard case .text(let file) = self else { throw PreviewFile.LoadError.readOnly }
         return .text(try file.save(text))
     }
+
+    /// True when the file is `item` or lies inside it, by either path.
+    func isInside(_ item: URL) -> Bool {
+        [item, FileOperations.canonical(item)].contains { requestedURL.isSameOrInside($0) || url.isSameOrInside($0) }
+    }
+
+    /// The same snapshot after `old` moved to `new`, or nil when neither path is affected.
+    /// A move keeps the file's identity, so the disk check still sees it as unchanged.
+    func moved(from old: URL, to new: URL) -> DocumentFile? {
+        // Tree paths and resolved paths can name the same folder differently, as /private/var and /var.
+        let pairs = [(old, new), (FileOperations.canonical(old), FileOperations.canonical(new))]
+        func move(_ url: URL) -> URL? { pairs.lazy.compactMap { url.moving(from: $0.0, to: $0.1) }.first }
+        let requested = move(requestedURL)
+        let resolved = move(url)
+        guard requested != nil || resolved != nil else { return nil }
+        switch self {
+        case .text(let file): return .text(file.moved(requestedURL: requested ?? requestedURL, url: resolved ?? url))
+        case .preview(let file): return .preview(file.moved(requestedURL: requested ?? requestedURL, url: resolved ?? url))
+        }
+    }
+}
+
+extension URL {
+    func isSameOrInside(_ item: URL) -> Bool {
+        let path = standardizedFileURL.path, prefix = item.standardizedFileURL.path
+        return path == prefix || path.hasPrefix(prefix + "/")
+    }
+
+    /// This path with the `old` prefix replaced by `new`, or nil when it is not `old` or inside it.
+    func moving(from old: URL, to new: URL) -> URL? {
+        guard isSameOrInside(old) else { return nil }
+        let rest = standardizedFileURL.path.dropFirst(old.standardizedFileURL.path.count)
+        return URL(fileURLWithPath: new.standardizedFileURL.path + rest)
+    }
 }
 
 struct PreviewFile: Sendable, Equatable {
@@ -104,5 +138,9 @@ struct PreviewFile: Sendable, Equatable {
         }
         if let coordinationError { throw coordinationError }
         return try result.get()
+    }
+
+    func moved(requestedURL: URL, url: URL) -> PreviewFile {
+        PreviewFile(requestedURL: requestedURL, url: url, kind: kind, data: data, inode: inode, modified: modified)
     }
 }

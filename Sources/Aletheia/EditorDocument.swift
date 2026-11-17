@@ -239,6 +239,16 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         return false
     }
 
+    /// The same file at a new path: the buffer, undo history and dirty state stay.
+    func move(to file: DocumentFile) {
+        let language = SyntaxHighlighting.languageID(for: self.file.url)
+        self.file = file
+        // A new extension can change the language; clear the old colors at once.
+        guard isEditable, SyntaxHighlighting.languageID(for: file.url) != language else { return }
+        scheduleHighlighting()
+        renderSyntax()
+    }
+
     func reload(_ file: DocumentFile) {
         guard isEditable, file.isText else {
             nativePreview?.view.removeFromSuperview()

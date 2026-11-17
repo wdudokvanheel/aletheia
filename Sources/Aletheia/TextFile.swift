@@ -71,6 +71,11 @@ struct TextFile: Sendable {
                         newline: newline, bytes: bytes, identity: before)
     }
 
+    func moved(requestedURL: URL, url: URL) -> TextFile {
+        TextFile(requestedURL: requestedURL, url: url, text: text, hasBOM: hasBOM,
+                 newline: newline, bytes: bytes, identity: identity)
+    }
+
     func matches(_ other: TextFile) -> Bool {
         url == other.url && identity == other.identity && bytes == other.bytes
     }

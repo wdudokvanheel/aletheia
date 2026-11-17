@@ -24,6 +24,14 @@ private final class FileOutlineView: NSOutlineView {
         guard event.clickCount == 1 else { return }
         super.mouseDown(with: event)
     }
+
+    /// Delete and Forward Delete move the selected item to the Trash, after the window confirms.
+    override func keyDown(with event: NSEvent) {
+        let key = event.charactersIgnoringModifiers
+        if event.modifierFlags.intersection(KeyStroke.modifierMask).isEmpty, key == "\u{7F}" || key == "\u{F728}" {
+            NSApp.sendAction(#selector(EditorWindow.trashFileItem(_:)), to: nil, from: self)
+        } else { super.keyDown(with: event) }
+    }
 }
 
 @MainActor
@@ -170,9 +178,16 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         outline.setDraggingSourceOperationMask([], forLocal: true)
         outline.verticalMotionCanBeginDrag = true
         // No target: the window creates the item, so the menu bar and shortcuts share the code.
+        // Copy and Paste use their own actions, so they never reach a focused text view.
         let menu = NSMenu()
         menu.addItem(withTitle: ShortcutCommand.newFile.title, action: #selector(EditorWindow.newFile(_:)), keyEquivalent: "")
         menu.addItem(withTitle: ShortcutCommand.newFolder.title, action: #selector(EditorWindow.newFolder(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: ShortcutCommand.rename.title, action: #selector(EditorWindow.renameFileItem(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: ShortcutCommand.copy.title, action: #selector(EditorWindow.copyFileItem(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: ShortcutCommand.paste.title, action: #selector(EditorWindow.pasteFileItems(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: ShortcutCommand.delete.title, action: #selector(EditorWindow.trashFileItem(_:)), keyEquivalent: "")
         outline.menu = menu
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
@@ -192,6 +207,31 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
 
     /// Lists an item the app just created, without waiting for the file watcher.
     func noteCreated(_ url: URL) { refresh(changedPaths: [url.path]) }
+
+    /// The clicked row (context menu), else the selected row. The root counts only when asked for.
+    func targetItem(includingRoot: Bool) -> URL? {
+        let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
+        guard let node = outline.item(atRow: row) as? FolderNode, includingRoot || node !== root else { return nil }
+        return node.url
+    }
+
+    var hasFocus: Bool { outline.window?.firstResponder === outline }
+
+    func ownsMenuItem(_ sender: Any?) -> Bool { (sender as? NSMenuItem)?.menu === outline.menu }
+
+    /// Shows a renamed item in place: the folder and its open subfolders stay expanded, and it is selected.
+    func noteMoved(from old: URL, to new: URL) {
+        var state = session
+        state.expandedPaths = state.expandedPaths.map {
+            URL(fileURLWithPath: $0).moving(from: old, to: new)?.path ?? $0
+        }
+        state.selectedPath = new.path
+        failedRestorationPaths = failedRestorationPaths.filter { !URL(fileURLWithPath: $0).isSameOrInside(new) }
+        pendingReveal = nil
+        pendingState = state
+        refresh(changedPaths: [old.path, new.path])
+        restoreLoadedBranches()
+    }
 
     func setRoot(_ url: URL) {
         pendingReveal = nil
@@ -313,7 +353,8 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
                 case .failure(let error):
                     // Keep nil so collapsing/re-expanding can retry after access changes.
                     self.failedRestorationPaths.insert(node.url.path)
-                    self.onError?(error)
+                    // A folder that was renamed or removed leaves with its parent's reload.
+                    if (error as? CocoaError)?.code != .fileReadNoSuchFile { self.onError?(error) }
                 }
                 if node.refreshAgain {
                     node.refreshAgain = false

@@ -347,6 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let file = menu("File")
         item(.newFile, #selector(EditorWindow.newFile(_:)), in: file)
         item(.newFolder, #selector(EditorWindow.newFolder(_:)), in: file)
+        item(.rename, #selector(EditorWindow.renameFileItem(_:)), in: file)
+        item(.delete, #selector(EditorWindow.trashFileItem(_:)), in: file)
         file.addItem(.separator())
         item(.openFile, #selector(openFiles(_:)), in: file, target: self)
         item(.openFolder, #selector(openFolder(_:)), in: file, target: self)

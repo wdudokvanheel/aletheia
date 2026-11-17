@@ -404,9 +404,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     func createItem(named name: String, in parent: URL, directory: Bool) {
         let url = parent.appendingPathComponent(name, isDirectory: directory)
         do {
-            guard !name.contains("/"), name != ".", name != ".." else {
-                throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: url.path])
-            }
+            try FileOperations.checkName(name, for: url)
             if directory { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false) }
             else { try Data().write(to: url, options: .withoutOverwriting) }
         } catch { present(error); return }
@@ -415,6 +413,143 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             createdFile = url
             openFile(url)
         }
+    }
+
+    /// Tree changes wait for sheets, restoration and saves.
+    private var canChangeTree: Bool {
+        hasRoot && !restoring && !closing && !closed && window?.attachedSheet == nil
+            && !documents.contains(where: \.busy)
+    }
+
+    /// The item a tree command acts on, or nil when it is unavailable. Some commands act only from
+    /// the tree's menu or with the tree focused, so ⌘⌫, ⌘C and ⌘V keep working in text.
+    private func treeItem(for sender: Any?, includingRoot: Bool, needsFocus: Bool) -> URL? {
+        guard canChangeTree, !needsFocus || tree.hasFocus || tree.ownsMenuItem(sender) else { return nil }
+        return tree.targetItem(includingRoot: includingRoot)
+    }
+
+    private func canPaste(_ sender: Any?) -> Bool {
+        canChangeTree && (tree.hasFocus || tree.ownsMenuItem(sender)) && tree.creationDirectory != nil
+            && NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
+    @objc func renameFileItem(_ sender: Any?) {
+        guard let window, let url = treeItem(for: sender, includingRoot: false, needsFocus: false) else { return }
+        let name = url.lastPathComponent
+        let alert = NSAlert()
+        alert.messageText = "Rename “\(name)”"
+        alert.informativeText = "In " + (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = name
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard response == .alertFirstButtonReturn, !name.isEmpty else { return }
+            self?.renameItem(at: url, to: name)
+        }
+        // Select a file's name without its extension, as Finder does.
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        let stem = isDirectory ? name : (name as NSString).deletingPathExtension
+        alert.window.makeFirstResponder(field)
+        field.currentEditor()?.selectedRange = NSRange(location: 0, length: (stem as NSString).length)
+    }
+
+    /// Never replaces another item. Open tabs follow the move and keep their edits and undo history.
+    func renameItem(at url: URL, to name: String) {
+        let destination: URL
+        do { destination = try FileOperations.rename(url, to: name) } catch { present(error); return }
+        guard destination != url else { return }
+        tree.noteMoved(from: url, to: destination)
+        var moved: [EditorDocument] = []
+        let wasMarkdown = selected?.isMarkdown
+        for document in documents {
+            guard let file = document.file.moved(from: url, to: destination) else { continue }
+            document.move(to: file)
+            moved.append(document)
+        }
+        guard !moved.isEmpty else { return }
+        if let selected, moved.contains(where: { $0 === selected }) {
+            // Markdown follows the extension; a shown preview resolves images from the new folder.
+            if selected.isMarkdown != wasMarkdown { layoutEditor() }
+            else if selected.isMarkdown, selected.markdownMode != .editor { preview?.show(selected) }
+        }
+        updateWatching()
+        refreshTabs()
+        updateTitle()
+    }
+
+    /// Puts the item on the pasteboard as a file, so Finder can paste it, and as its path.
+    @objc func copyFileItem(_ sender: Any?) {
+        guard let url = treeItem(for: sender, includingRoot: true, needsFocus: true) else { return }
+        let item = NSPasteboardItem()
+        item.setString(url.absoluteString, forType: .fileURL)
+        item.setString(url.path, forType: .string)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([item])
+    }
+
+    @objc func pasteFileItems(_ sender: Any?) {
+        guard canPaste(sender), let directory = tree.creationDirectory,
+              let sources = NSPasteboard.general.readObjects(forClasses: [NSURL.self],
+                  options: [.urlReadingFileURLsOnly: true]) as? [URL], !sources.isEmpty else { return }
+        pasteItems(sources, into: directory)
+    }
+
+    // Edit > Copy and Paste reach the window only when no focused view handles them.
+    @objc func copy(_ sender: Any?) { copyFileItem(sender) }
+    @objc func paste(_ sender: Any?) { pasteFileItems(sender) }
+
+    /// Copies in the background. A name clash gets a Finder-style "copy" name; nothing is replaced.
+    func pasteItems(_ sources: [URL], into directory: URL) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try FileOperations.paste(sources, into: directory) }
+            DispatchQueue.main.async {
+                guard !self.closed else { return }
+                switch result {
+                case .success(let pasted):
+                    self.tree.refresh(changedPaths: Set(pasted.map(\.path)))
+                    self.tree.reveal(pasted.first)
+                case .failure(let error): self.present(error)
+                }
+            }
+        }
+    }
+
+    @objc func trashFileItem(_ sender: Any?) {
+        guard let window, let url = treeItem(for: sender, includingRoot: false, needsFocus: true) else { return }
+        let open = documents.filter { $0.file.isInside(url) }
+        let edited = open.filter(\.isDirty)
+        let alert = NSAlert()
+        alert.messageText = "Move “\(url.lastPathComponent)” to the Trash?"
+        if edited.isEmpty {
+            alert.informativeText = "You can restore it from the Trash." + (open.isEmpty ? "" : open.count == 1 ? " Its tab closes." : " Its open tabs close.")
+        } else {
+            let names = edited.map { "“\($0.file.url.lastPathComponent)”" }.joined(separator: ", ")
+            alert.informativeText = names + (edited.count == 1
+                ? " has unsaved changes. Its tab stays open with your edits, which cannot be saved while the file is in the Trash."
+                : " have unsaved changes. Their tabs stay open with your edits, which cannot be saved while the files are in the Trash.")
+        }
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.trashItem(at: url)
+        }
+    }
+
+    /// Reversible: the item goes to the Trash. Clean tabs for it close; edited tabs keep their content.
+    /// Returns the item's place in the Trash.
+    @discardableResult func trashItem(at url: URL) -> URL? {
+        guard !documents.contains(where: \.busy) else { NSSound.beep(); return nil }
+        var trashed: NSURL?
+        do { try FileManager.default.trashItem(at: url, resultingItemURL: &trashed) } catch { present(error); return nil }
+        tree.refresh(changedPaths: [url.path])
+        documents.filter { !$0.isDirty && $0.file.isInside(url) }.forEach(close)
+        checkDiskChanges()
+        return trashed as URL?
     }
 
     @objc private func changeMarkdownMode(_ sender: NSSegmentedControl) {
@@ -642,6 +777,18 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         if item.action == #selector(newFile(_:)) || item.action == #selector(newFolder(_:)) {
             return hasRoot && !restoring && window?.attachedSheet == nil
         }
+        if item.action == #selector(renameFileItem(_:)) {
+            return treeItem(for: item, includingRoot: false, needsFocus: false) != nil
+        }
+        if item.action == #selector(trashFileItem(_:)) {
+            return treeItem(for: item, includingRoot: false, needsFocus: true) != nil
+        }
+        if item.action == #selector(copyFileItem(_:)) || item.action == #selector(copy(_:)) {
+            return treeItem(for: item, includingRoot: true, needsFocus: true) != nil
+        }
+        if item.action == #selector(pasteFileItems(_:)) || item.action == #selector(paste(_:)) {
+            return canPaste(item)
+        }
         return true
     }
 
@@ -749,6 +896,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
                 }.value
                 guard !self.closed, !self.closing, self.window?.attachedSheet == nil, !document.busy,
                       self.documents.contains(where: { $0 === document }),
+                      document.file.requestedURL == baseline.requestedURL,
                       document.file.matches(baseline) else { self.diskCheckPending = true; continue }
                 switch result {
                 case .success(let current):
