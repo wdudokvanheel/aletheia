@@ -292,4 +292,42 @@ final class FileOperationTests: XCTestCase {
         XCTAssertNil(window.attachedSheet)
         editor.undoManager?.undo()
     }
+
+    /// An image tab has no view that takes the key, so handing ⌘⌫ back must not re-enter the menu forever.
+    @MainActor func testCommandBackspaceDoesNothingWithAnImageOpen() async throws {
+        _ = NSApplication.shared
+        let suite = "AletheiaFileOperationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previousMenu = NSApp.mainMenu
+        defer { NSApp.mainMenu = previousMenu }
+        let app = AppDelegate(defaults: defaults, shortcuts: Shortcuts(defaults: defaults))
+        app.buildMenu()
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("picture.png")
+        let image = NSImage(size: NSSize(width: 4, height: 4), flipped: false) { rect in
+            NSColor.red.setFill(); rect.fill(); return true
+        }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: file)
+        let controller = EditorWindow()
+        let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                  rootPath: root.path, filePaths: [file.path], selectedPath: file.path)
+        let failures: [String] = await withCheckedContinuation { continuation in
+            controller.restore(state) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(failures.isEmpty)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.performClose(nil) }
+        try XCTUnwrap(app.commandItems[.delete]).target = controller
+        let key = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 51, keyDown: true))
+        key.flags = .maskCommand
+        let event = try XCTUnwrap(NSEvent(cgEvent: key))
+        NSApp.postEvent(event, atStart: true)
+        let current = try XCTUnwrap(NSApp.nextEvent(matching: .keyDown, until: Date(), inMode: .default, dequeue: true))
+        XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: current))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Nothing goes to the Trash")
+        XCTAssertNil(window.attachedSheet)
+    }
 }

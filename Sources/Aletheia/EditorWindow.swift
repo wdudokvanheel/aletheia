@@ -549,9 +549,16 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             && stroke.flags == item.keyEquivalentModifierMask.intersection(KeyStroke.modifierMask)
     }
 
+    /// Set while ⌘⌫ is handed back. A view that does not take the key passes it up to the window,
+    /// which offers it to the menu again; without this guard that loops until the stack overflows.
+    private var forwardingKey = false
+
     @objc func trashFileItem(_ sender: Any?) {
         if isKeyOutsideTree(sender) {
-            if let event = NSApp.currentEvent { window?.firstResponder?.keyDown(with: event) }
+            guard !forwardingKey, let event = NSApp.currentEvent else { return }
+            forwardingKey = true
+            defer { forwardingKey = false }
+            window?.firstResponder?.keyDown(with: event)
             return
         }
         guard let window, let url = treeItem(for: sender, includingRoot: false, needsFocus: true) else { return }
