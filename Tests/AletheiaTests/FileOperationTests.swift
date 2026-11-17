@@ -237,4 +237,45 @@ final class FileOperationTests: XCTestCase {
         XCTAssertEqual(document.editor.string, "Original edited again")
         window.endSheet(try XCTUnwrap(window.attachedSheet))
     }
+
+    /// A disabled menu item would still swallow its key, so ⌘⌫ must reach the editor through the main menu.
+    @MainActor func testCommandBackspaceStillDeletesToLineStartInTheEditor() async throws {
+        _ = NSApplication.shared
+        let suite = "AletheiaFileOperationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previousMenu = NSApp.mainMenu
+        defer { NSApp.mainMenu = previousMenu }
+        let app = AppDelegate(defaults: defaults, shortcuts: Shortcuts(defaults: defaults))
+        app.buildMenu()
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("text.txt")
+        try Data("Hello world".utf8).write(to: file)
+        let controller = EditorWindow()
+        let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                  rootPath: root.path, filePaths: [file.path], selectedPath: file.path)
+        let failures: [String] = await withCheckedContinuation { continuation in
+            controller.restore(state) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(failures.isEmpty)
+        let window = try XCTUnwrap(controller.window)
+        defer { window.performClose(nil) }
+        // A test process has no key window to resolve the item's nil target, so name the window.
+        try XCTUnwrap(app.commandItems[.delete]).target = controller
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        editor.setSelectedRange(NSRange(location: 11, length: 0))
+        // A keyboard event as the hardware sends it: ⌘ and the Backspace key.
+        let key = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 51, keyDown: true))
+        key.flags = .maskCommand
+        let event = try XCTUnwrap(NSEvent(cgEvent: key))
+        // Dequeue it, as the run loop does, so it is the app's current event.
+        NSApp.postEvent(event, atStart: true)
+        let current = try XCTUnwrap(NSApp.nextEvent(matching: .keyDown, until: Date(), inMode: .default, dequeue: true))
+        XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: current))
+        XCTAssertEqual(editor.string, "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Nothing goes to the Trash")
+        XCTAssertNil(window.attachedSheet)
+        editor.undoManager?.undo()
+    }
 }

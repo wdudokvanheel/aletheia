@@ -518,7 +518,20 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         }
     }
 
+    /// AppKit consumes a menu key equivalent even when its item is disabled. So without tree focus,
+    /// Move to Trash stays enabled for its own key and hands that key back to the focused view.
+    private func isKeyOutsideTree(_ item: Any?) -> Bool {
+        guard let item = item as? NSMenuItem, !item.keyEquivalent.isEmpty, !tree.ownsMenuItem(item), !tree.hasFocus,
+              let event = NSApp.currentEvent, event.type == .keyDown, let stroke = KeyStroke(event) else { return false }
+        return stroke.menuKeyEquivalent == item.keyEquivalent
+            && stroke.flags == item.keyEquivalentModifierMask.intersection(KeyStroke.modifierMask)
+    }
+
     @objc func trashFileItem(_ sender: Any?) {
+        if isKeyOutsideTree(sender) {
+            if let event = NSApp.currentEvent { window?.firstResponder?.keyDown(with: event) }
+            return
+        }
         guard let window, let url = treeItem(for: sender, includingRoot: false, needsFocus: true) else { return }
         let open = documents.filter { $0.file.isInside(url) }
         let edited = open.filter(\.isDirty)
@@ -781,7 +794,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
             return treeItem(for: item, includingRoot: false, needsFocus: false) != nil
         }
         if item.action == #selector(trashFileItem(_:)) {
-            return treeItem(for: item, includingRoot: false, needsFocus: true) != nil
+            return isKeyOutsideTree(item) || treeItem(for: item, includingRoot: false, needsFocus: true) != nil
         }
         if item.action == #selector(copyFileItem(_:)) || item.action == #selector(copy(_:)) {
             return treeItem(for: item, includingRoot: true, needsFocus: true) != nil
