@@ -819,12 +819,15 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     }
     @objc func duplicateLines(_ sender: Any?) { focusedEditor?.duplicateLine() }
     @objc func deleteLines(_ sender: Any?) { focusedEditor?.deleteLine() }
+    @objc func moveLinesUp(_ sender: Any?) { focusedEditor?.moveLine(up: true) }
+    @objc func moveLinesDown(_ sender: Any?) { focusedEditor?.moveLine(up: false) }
 
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(showFind(_:)) || item.action == #selector(showReplace(_:)) {
             return canEditSelected
         }
-        if item.action == #selector(duplicateLines(_:)) || item.action == #selector(deleteLines(_:)) {
+        if [#selector(duplicateLines(_:)), #selector(deleteLines(_:)), #selector(moveLinesUp(_:)),
+            #selector(moveLinesDown(_:))].contains(item.action) {
             return focusedEditor != nil
         }
         if item.action == #selector(newFile(_:)) || item.action == #selector(newFolder(_:)) {

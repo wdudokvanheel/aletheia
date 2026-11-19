@@ -59,7 +59,7 @@ struct KeyStroke: Codable, Hashable {
 enum ShortcutCommand: String, CaseIterable {
     case settings, hide, hideOthers, quit
     case newFile, newFolder, rename, delete, openFile, openFolder, switchProject, save, saveAs, closeTab, closeWindow
-    case undo, redo, cut, copy, paste, selectAll, duplicateLine, deleteLine, find, replace
+    case undo, redo, cut, copy, paste, selectAll, duplicateLine, deleteLine, moveLineUp, moveLineDown, find, replace
     case toggleFileTree
     case minimize
 
@@ -88,6 +88,8 @@ enum ShortcutCommand: String, CaseIterable {
         case .selectAll: "Select All"
         case .duplicateLine: "Duplicate Line"
         case .deleteLine: "Delete Line"
+        case .moveLineUp: "Move Line Up"
+        case .moveLineDown: "Move Line Down"
         case .find: "Find…"
         case .replace: "Replace…"
         case .toggleFileTree: "Toggle File Tree"
@@ -100,7 +102,7 @@ enum ShortcutCommand: String, CaseIterable {
         switch self {
         case .settings, .hide, .hideOthers, .quit: "Aletheia"
         case .newFile, .newFolder, .rename, .delete, .openFile, .openFolder, .switchProject, .save, .saveAs, .closeTab, .closeWindow: "File"
-        case .undo, .redo, .cut, .copy, .paste, .selectAll, .duplicateLine, .deleteLine, .find, .replace: "Edit"
+        case .undo, .redo, .cut, .copy, .paste, .selectAll, .duplicateLine, .deleteLine, .moveLineUp, .moveLineDown, .find, .replace: "Edit"
         case .toggleFileTree: "View"
         case .minimize: "Window"
         }
@@ -131,6 +133,8 @@ enum ShortcutCommand: String, CaseIterable {
         case .selectAll: [KeyStroke("a", .command)]
         case .duplicateLine: [KeyStroke("d", [.command, .shift])]
         case .deleteLine: [KeyStroke("d", .command)]
+        case .moveLineUp: [KeyStroke("\u{F700}", [.command, .shift])]
+        case .moveLineDown: [KeyStroke("\u{F701}", [.command, .shift])]
         case .find: [KeyStroke("f", .command)]
         case .replace: [KeyStroke("r", .command)]
         case .toggleFileTree: [KeyStroke("s", [.control, .shift])]

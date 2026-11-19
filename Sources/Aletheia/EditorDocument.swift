@@ -253,6 +253,35 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
         editor.setSelectedRange(NSRange(location: min(lineStart + column, contentsEnd), length: 0))
     }
 
+    /// Swaps every line the selection touches with the line above or below; the selection moves along.
+    func moveLine(up: Bool) {
+        guard editor.isEditable, !busy else { return }
+        let text = editor.string as NSString
+        let selection = editor.selectedRange()
+        var start = 0, end = 0, contentsEnd = 0
+        text.getLineStart(&start, end: &end, contentsEnd: &contentsEnd, for: selection)
+        let block = text.substring(with: NSRange(location: start, length: contentsEnd - start))
+        let blockBreak = text.substring(with: NSRange(location: contentsEnd, length: end - contentsEnd))
+        if up {
+            guard start > 0 else { return }
+            var other = 0, otherEnd = 0
+            text.getLineStart(&other, end: nil, contentsEnd: &otherEnd, for: NSRange(location: start - 1, length: 0))
+            let line = text.substring(with: NSRange(location: other, length: otherEnd - other))
+            let lineBreak = text.substring(with: NSRange(location: otherEnd, length: start - otherEnd))
+            replace(NSRange(location: other, length: end - other), with: block + lineBreak + line + blockBreak)
+            editor.setSelectedRange(NSRange(location: selection.location - (start - other), length: selection.length))
+        } else {
+            guard end < text.length else { return }
+            var otherEnd = 0, otherContentsEnd = 0
+            text.getLineStart(nil, end: &otherEnd, contentsEnd: &otherContentsEnd, for: NSRange(location: end, length: 0))
+            let line = text.substring(with: NSRange(location: end, length: otherContentsEnd - end))
+            let lineBreak = text.substring(with: NSRange(location: otherContentsEnd, length: otherEnd - otherContentsEnd))
+            replace(NSRange(location: start, length: otherEnd - start), with: line + blockBreak + block + lineBreak)
+            editor.setSelectedRange(NSRange(location: selection.location + (line as NSString).length
+                                            + (blockBreak as NSString).length, length: selection.length))
+        }
+    }
+
     /// One undo step per command, through the delegate so line breaks follow the file.
     private func replace(_ range: NSRange, with string: String) {
         editor.breakUndoCoalescing()

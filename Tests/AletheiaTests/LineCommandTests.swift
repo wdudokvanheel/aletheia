@@ -54,4 +54,37 @@ final class LineCommandTests: XCTestCase {
         only.deleteLine()
         XCTAssertEqual(only.editor.string, "")
     }
+
+    @MainActor func testMoveSwapsTouchedLinesAndCarriesSelection() throws {
+        let middle = try document("ab\ncd\nef", caret: 4)
+        middle.moveLine(up: true)
+        XCTAssertEqual(middle.editor.string, "cd\nab\nef")
+        XCTAssertEqual(middle.editor.selectedRange(), NSRange(location: 1, length: 0))
+        middle.moveLine(up: true)
+        XCTAssertEqual(middle.editor.string, "cd\nab\nef")
+        middle.editor.undoManager?.undo()
+        XCTAssertEqual(middle.editor.string, "ab\ncd\nef")
+
+        let last = try document("ab\r\ncd", caret: 5)
+        last.moveLine(up: true)
+        XCTAssertEqual(last.editor.string, "cd\r\nab")
+        XCTAssertEqual(last.editor.selectedRange(), NSRange(location: 1, length: 0))
+        last.moveLine(up: false)
+        XCTAssertEqual(last.editor.string, "ab\r\ncd")
+        XCTAssertEqual(last.editor.selectedRange(), NSRange(location: 5, length: 0))
+        last.moveLine(up: false)
+        XCTAssertEqual(last.editor.string, "ab\r\ncd")
+
+        let span = try document("ab\ncd\nef\n", caret: 1, length: 3)
+        span.moveLine(up: false)
+        XCTAssertEqual(span.editor.string, "ef\nab\ncd\n")
+        XCTAssertEqual(span.editor.selectedRange(), NSRange(location: 4, length: 3))
+        span.moveLine(up: false)
+        XCTAssertEqual(span.editor.string, "ef\nab\ncd\n")
+
+        let lineOnly = try document("ab\ncd\nef", caret: 0, length: 3)
+        lineOnly.moveLine(up: false)
+        XCTAssertEqual(lineOnly.editor.string, "cd\nab\nef")
+        XCTAssertEqual(lineOnly.editor.selectedRange(), NSRange(location: 3, length: 3))
+    }
 }

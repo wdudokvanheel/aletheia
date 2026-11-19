@@ -370,6 +370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(.separator())
         item(.duplicateLine, #selector(EditorWindow.duplicateLines(_:)), in: edit)
         item(.deleteLine, #selector(EditorWindow.deleteLines(_:)), in: edit)
+        item(.moveLineUp, #selector(EditorWindow.moveLinesUp(_:)), in: edit)
+        item(.moveLineDown, #selector(EditorWindow.moveLinesDown(_:)), in: edit)
         edit.addItem(.separator())
         item(.find, #selector(EditorWindow.showFind(_:)), in: edit)
         item(.replace, #selector(EditorWindow.showReplace(_:)), in: edit)
