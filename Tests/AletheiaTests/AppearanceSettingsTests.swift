@@ -17,6 +17,40 @@ final class AppearanceSettingsTests: XCTestCase {
         XCTAssertTrue(AppSettings(defaults: defaults).revealActiveFileInTree)
     }
 
+    @MainActor func testPreviewTextScalePersistsStepsAndClamps() throws {
+        let suite = "AletheiaTextScaleTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.previewTextScale, 1)
+        XCTAssertEqual(settings.largerPreviewTextScale, 1.1)
+        XCTAssertEqual(settings.smallerPreviewTextScale, 0.9)
+        let changed = expectation(forNotification: AppSettings.previewTextScaleDidChange, object: settings)
+        settings.setPreviewTextScale(1.5)
+        wait(for: [changed], timeout: 1)
+        XCTAssertEqual(AppSettings(defaults: defaults).previewTextScale, 1.5)
+        XCTAssertEqual(settings.largerPreviewTextScale, 1.75)
+        XCTAssertEqual(settings.smallerPreviewTextScale, 1.25)
+
+        settings.setPreviewTextScale(9)
+        XCTAssertEqual(settings.previewTextScale, 2)
+        XCTAssertNil(settings.largerPreviewTextScale)
+        settings.setPreviewTextScale(0.1)
+        XCTAssertEqual(settings.previewTextScale, 0.7)
+        XCTAssertNil(settings.smallerPreviewTextScale)
+        settings.setPreviewTextScale(.infinity)
+        XCTAssertEqual(settings.previewTextScale, 1)
+        XCTAssertNil(defaults.object(forKey: AppSettings.previewTextScaleKey), "the standard size is not stored")
+        // Values stored out of range or between steps still step to a listed size.
+        defaults.set(5.0, forKey: AppSettings.previewTextScaleKey)
+        XCTAssertEqual(settings.previewTextScale, 2)
+        defaults.set(-1.0, forKey: AppSettings.previewTextScaleKey)
+        XCTAssertEqual(settings.previewTextScale, 1)
+        defaults.set(1.3, forKey: AppSettings.previewTextScaleKey)
+        XCTAssertEqual(settings.largerPreviewTextScale, 1.5)
+        XCTAssertEqual(settings.smallerPreviewTextScale, 1.25)
+    }
+
     @MainActor func testSelectionPersistsAndUnknownValueFallsBackToSystem() throws {
         let suite = "AletheiaAppearanceTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

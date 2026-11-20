@@ -22,7 +22,8 @@ public struct MarkdownSnapshot: Sendable {
     /// False while some blocks still carry estimated layouts or layouts for
     /// another width, between the two steps of an open or a resize.
     public let isComplete: Bool
-    let typography: Typography
+    /// The fonts and spacing it was laid out with.
+    public let typography: Typography
     /// Unique per snapshot, so an update can name its base.
     let id: UInt64
     /// How `document` relates to the snapshot it was diffed against, kept by

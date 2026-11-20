@@ -146,6 +146,51 @@ final class ShortcutsTests: XCTestCase {
         XCTAssertNil(ShortcutField.recording)
     }
 
+    /// The keypad's + and − reach the menu as ⌘+ and ⌘−, which step the Custom preview's size.
+    @MainActor func testKeypadPlusAndMinusStepThePreviewTextSize() throws {
+        let (shortcuts, defaults, suite) = try makeShortcuts()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(Shortcuts.text(shortcuts.strokes(for: .increasePreviewTextSize)), "⌘+")
+        XCTAssertEqual(Shortcuts.text(shortcuts.strokes(for: .decreasePreviewTextSize)), "⌘-")
+        XCTAssertEqual(ShortcutCommand.increasePreviewTextSize.group, "View")
+        XCTAssertEqual(ShortcutCommand.decreasePreviewTextSize.group, "View")
+        _ = NSApplication.shared
+        let previousMenu = NSApp.mainMenu
+        defer { NSApp.mainMenu = previousMenu }
+        let settings = AppSettings(defaults: defaults, shortcuts: shortcuts)
+        let app = AppDelegate(defaults: defaults, shortcuts: shortcuts, settings: settings)
+        app.buildMenu()
+        let menu = try XCTUnwrap(NSApp.mainMenu)
+        let increase = try XCTUnwrap(app.commandItems[.increasePreviewTextSize])
+        XCTAssertEqual(increase.menu?.title, "View")
+        XCTAssertEqual(increase.keyEquivalent, "+")
+        XCTAssertEqual(increase.keyEquivalentModifierMask, .command)
+        let plus = try key(69, "+", [.command, .numericPad])
+        let minus = try key(78, "-", [.command, .numericPad])
+        XCTAssertEqual(KeyStroke(plus), shortcuts.strokes(for: .increasePreviewTextSize).first)
+        XCTAssertEqual(KeyStroke(minus), shortcuts.strokes(for: .decreasePreviewTextSize).first)
+
+        // Only the Custom renderer has a size to change.
+        XCTAssertTrue(menu.performKeyEquivalent(with: plus))
+        XCTAssertEqual(settings.previewTextScale, 1)
+        settings.setMarkdownRenderer(.custom)
+        XCTAssertTrue(menu.performKeyEquivalent(with: plus))
+        XCTAssertEqual(settings.previewTextScale, 1.1)
+        XCTAssertTrue(menu.performKeyEquivalent(with: plus))
+        XCTAssertEqual(settings.previewTextScale, 1.25)
+        XCTAssertTrue(menu.performKeyEquivalent(with: minus))
+        XCTAssertTrue(menu.performKeyEquivalent(with: minus))
+        XCTAssertEqual(settings.previewTextScale, 1)
+        // ⌘− on the main row too.
+        XCTAssertTrue(menu.performKeyEquivalent(with: try key(27, "-", .command)))
+        XCTAssertEqual(settings.previewTextScale, 0.9)
+        for _ in 0..<12 { _ = menu.performKeyEquivalent(with: minus) }
+        XCTAssertEqual(settings.previewTextScale, AppSettings.previewTextScales.first)
+        menu.update()
+        XCTAssertFalse(try XCTUnwrap(app.commandItems[.decreasePreviewTextSize]).isEnabled)
+        XCTAssertTrue(increase.isEnabled)
+    }
+
     @MainActor func testMenuShowsShortcutsAndTwoStepKeysAreConsumed() throws {
         let (shortcuts, defaults, suite) = try makeShortcuts()
         defer { defaults.removePersistentDomain(forName: suite) }

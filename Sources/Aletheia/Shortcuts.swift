@@ -60,7 +60,7 @@ enum ShortcutCommand: String, CaseIterable {
     case settings, hide, hideOthers, quit
     case newFile, newFolder, rename, delete, openFile, openFolder, switchProject, save, saveAs, closeTab, closeWindow
     case undo, redo, cut, copy, paste, selectAll, duplicateLine, deleteLine, moveLineUp, moveLineDown, find, replace
-    case toggleFileTree
+    case toggleFileTree, increasePreviewTextSize, decreasePreviewTextSize
     case minimize
 
     var title: String {
@@ -93,6 +93,8 @@ enum ShortcutCommand: String, CaseIterable {
         case .find: "Find…"
         case .replace: "Replace…"
         case .toggleFileTree: "Toggle File Tree"
+        case .increasePreviewTextSize: "Increase Preview Text Size"
+        case .decreasePreviewTextSize: "Decrease Preview Text Size"
         case .minimize: "Minimize"
         }
     }
@@ -103,7 +105,7 @@ enum ShortcutCommand: String, CaseIterable {
         case .settings, .hide, .hideOthers, .quit: "Aletheia"
         case .newFile, .newFolder, .rename, .delete, .openFile, .openFolder, .switchProject, .save, .saveAs, .closeTab, .closeWindow: "File"
         case .undo, .redo, .cut, .copy, .paste, .selectAll, .duplicateLine, .deleteLine, .moveLineUp, .moveLineDown, .find, .replace: "Edit"
-        case .toggleFileTree: "View"
+        case .toggleFileTree, .increasePreviewTextSize, .decreasePreviewTextSize: "View"
         case .minimize: "Window"
         }
     }
@@ -138,6 +140,9 @@ enum ShortcutCommand: String, CaseIterable {
         case .find: [KeyStroke("f", .command)]
         case .replace: [KeyStroke("r", .command)]
         case .toggleFileTree: [KeyStroke("s", [.control, .shift])]
+        // The keypad's + and − type these characters; ⌘− on the main row matches too.
+        case .increasePreviewTextSize: [KeyStroke("+", .command)]
+        case .decreasePreviewTextSize: [KeyStroke("-", .command)]
         case .minimize: [KeyStroke("m", .command)]
         }
     }

@@ -25,14 +25,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private weak var activeProjectWindow: EditorWindow?
     private var picker: ProjectPicker?
     private let shortcuts: Shortcuts
+    private let settings: AppSettings
     private(set) var commandItems: [ShortcutCommand: NSMenuItem] = [:]
     private var keyMonitor: Any?
     /// The first key of a two-step shortcut, waiting for the second.
     private var pendingStroke: KeyStroke?
 
-    init(defaults: UserDefaults = .standard, shortcuts: Shortcuts = .shared) {
+    init(defaults: UserDefaults = .standard, shortcuts: Shortcuts = .shared, settings: AppSettings = .shared) {
         self.defaults = defaults
         self.shortcuts = shortcuts
+        self.settings = settings
         projectSessions = ProjectSessions.load(from: defaults)
         super.init()
     }
@@ -103,7 +105,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if item.action == #selector(save(_:)) || item.action == #selector(saveAs(_:)) {
             return !terminating && !restoring && current?.canEditSelected == true
         }
+        if item.action == #selector(increasePreviewTextSize(_:)) {
+            return settings.markdownRenderer == .custom && settings.largerPreviewTextScale != nil
+        }
+        if item.action == #selector(decreasePreviewTextSize(_:)) {
+            return settings.markdownRenderer == .custom && settings.smallerPreviewTextScale != nil
+        }
         return true
+    }
+    /// The Custom renderer's size, in every window.
+    @objc private func increasePreviewTextSize(_ sender: Any?) {
+        guard settings.markdownRenderer == .custom, let scale = settings.largerPreviewTextScale else { return }
+        settings.setPreviewTextScale(scale)
+    }
+    @objc private func decreasePreviewTextSize(_ sender: Any?) {
+        guard settings.markdownRenderer == .custom, let scale = settings.smallerPreviewTextScale else { return }
+        settings.setPreviewTextScale(scale)
     }
     @objc private func closeTab(_ sender: Any?) { if !terminating && !restoring { current?.closeSelectedTab(sender) } }
     @objc private func closeWindow(_ sender: Any?) { if !terminating && !restoring { current?.window?.performClose(sender) } }
@@ -377,6 +394,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         item(.replace, #selector(EditorWindow.showReplace(_:)), in: edit)
         let view = menu("View")
         item(.toggleFileTree, #selector(EditorWindow.toggleFileTree(_:)), in: view)
+        view.addItem(.separator())
+        item(.increasePreviewTextSize, #selector(increasePreviewTextSize(_:)), in: view, target: self)
+        item(.decreasePreviewTextSize, #selector(decreasePreviewTextSize(_:)), in: view, target: self)
         let window = menu("Window")
         item(.minimize, #selector(NSWindow.performMiniaturize(_:)), in: window)
         item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), in: window)

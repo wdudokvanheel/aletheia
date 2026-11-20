@@ -65,6 +65,41 @@ final class CustomMarkdownPreviewTests: XCTestCase {
         XCTAssertEqual(AppSettings(defaults: defaults).markdownRenderer, .webkit)
     }
 
+    @MainActor func testTextScaleLaysTheShownDocumentOutAgainAndDropsKeptSnapshots() async throws {
+        _ = NSApplication.shared
+        let suite = "AletheiaTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        settings.setPreviewTextScale(1.5)
+        let first = try temporaryMarkdown("# First\n\nBody")
+        let second = try temporaryMarkdown("# Second\n\nBody")
+        defer { [first, second].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let a = EditorDocument(file: try TextFile.read(first))
+        let b = EditorDocument(file: try TextFile.read(second))
+        let preview = CustomMarkdownPreview(settings: settings)
+        preview.view.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        // A new preview starts at the stored size, with the instance every preview shares.
+        XCTAssertTrue(preview.preview.typography === CustomMarkdownPreview.typography(scale: 1.5))
+        XCTAssertEqual(preview.preview.typography.bodyFontSize, 22.5)
+        preview.show(a)
+        try await eventually { preview.preview.snapshot.document.blocks.first?.text == "First" }
+        preview.show(b)
+        try await eventually { preview.preview.snapshot.document.blocks.first?.text == "Second" }
+        XCTAssertEqual(preview.keptSnapshotCount, 1)
+        let height = preview.preview.snapshot.totalHeight
+
+        settings.setPreviewTextScale(2)
+        let double = CustomMarkdownPreview.typography(scale: 2)
+        XCTAssertTrue(preview.preview.typography === double)
+        XCTAssertEqual(preview.keptSnapshotCount, 0, "snapshots of the old size lend nothing")
+        try await eventually { preview.preview.snapshot.typography === double && preview.preview.snapshot.isComplete }
+        XCTAssertGreaterThan(preview.preview.snapshot.totalHeight, height)
+        XCTAssertEqual(preview.preview.snapshot.document.blocks.first?.text, "Second")
+        XCTAssertTrue(CustomMarkdownPreview.typography(scale: 1) === Typography.standard)
+        preview.prepareForRelease()
+    }
+
     @MainActor func testHiddenCustomPreviewKeepsContentAndDefersUpdates() async throws {
         _ = NSApplication.shared
         let url = try temporaryMarkdown("# Title\n\nBody")

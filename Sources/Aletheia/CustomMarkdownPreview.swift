@@ -22,6 +22,8 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
     var openInSystem: (URL) -> Void = { NSWorkspace.shared.open($0) }
     /// Loads the preview's images; shared by every window.
     private let imageLoader: PreviewImageLoader
+    /// Holds the page size shared by every window.
+    private let settings: AppSettings
     private weak var document: EditorDocument?
     /// The buffer changed since it was last pushed.
     private var stale = false
@@ -51,14 +53,18 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
     /// Documents with a kept snapshot; for tests.
     var keptSnapshotCount: Int { kept.count }
 
-    init(imageLoader: PreviewImageLoader = .shared) {
+    init(imageLoader: PreviewImageLoader = .shared, settings: AppSettings = .shared) {
         self.imageLoader = imageLoader
+        self.settings = settings
         super.init()
+        preview.typography = Self.typography(scale: settings.previewTextScale)
         preview.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged),
             name: NSView.boundsDidChangeNotification, object: preview.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(updateTimingsOverlay),
             name: AppSettings.previewTimingsDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(applyTextScale),
+            name: AppSettings.previewTextScaleDidChange, object: settings)
         preview.onTimings = { [weak self] _ in self?.updateTimingsOverlay() }
         preview.onInstall = { [weak self] snapshot in self?.didInstall(snapshot) }
         preview.onOpenLink = { [weak self] destination in self?.openLink(destination) }
@@ -132,6 +138,27 @@ final class CustomMarkdownPreview: NSObject, MarkdownPreviewing, MarkdownImagePr
         stale = false
         preview.setSource(document.editor.string)
         sendSearch()
+    }
+
+    /// One typography per size, shared by every preview: their fonts are
+    /// built once, and kept snapshots of the same size stay reusable.
+    private static var typographies: [Double: Typography] = [1: .standard]
+
+    static func typography(scale: Double) -> Typography {
+        if let typography = typographies[scale] { return typography }
+        let typography = Typography(scale: CGFloat(scale))
+        typographies[scale] = typography
+        return typography
+    }
+
+    /// Lays the shown document out again at the new size. Kept snapshots
+    /// are of the old size, which lends nothing, so they go.
+    @objc private func applyTextScale() {
+        let typography = Self.typography(scale: settings.previewTextScale)
+        guard typography !== preview.typography else { return }
+        preview.typography = typography
+        release(kept.values.map(\.snapshot))
+        kept.removeAll()
     }
 
     /// Code blocks take the scheme's syntax colors, as files in the editor do.

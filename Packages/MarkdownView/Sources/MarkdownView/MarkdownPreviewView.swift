@@ -67,6 +67,21 @@ public final class MarkdownPreviewView: NSScrollView {
         }
     }
 
+    /// Fonts and spacing, `Typography.standard` by default. Setting another
+    /// instance lays out the current source again in one update, which
+    /// supersedes the one in flight, keeping the block at the top of the
+    /// visible area in place. A snapshot laid out with another typography
+    /// lends no layouts to `setSource(_:reusing:)`.
+    public var typography: Typography {
+        get { pipeline.typography }
+        set {
+            guard newValue !== pipeline.typography else { return }
+            pipeline.typography = newValue
+            scheduleUpdate()
+            if !isShown || canvas.frame.width < 1 { cancelUpdates() }
+        }
+    }
+
     /// The decoded images the view keeps, and their bytes. See `ImageStore`
     /// for the limits.
     public var retainedImageCount: Int { canvas.images.retainedCount }
@@ -79,8 +94,8 @@ public final class MarkdownPreviewView: NSScrollView {
     private var highlighting: CodeHighlighting?
     private var sourceGeneration: UInt64 = 0
     private var installedSourceGeneration: UInt64 = 0
-    private var submitted: (sourceGeneration: UInt64, width: CGFloat, complete: Bool, plan: RenderPlan,
-                            images: ImageSizes)?
+    private var submitted: (sourceGeneration: UInt64, width: CGFloat, typography: Typography, complete: Bool,
+                            plan: RenderPlan, images: ImageSizes)?
     /// The generation of the update in flight and when it was submitted,
     /// until its last snapshot installs.
     private var inFlight: (generation: UInt64, start: ContinuousClock.Instant)?
@@ -335,18 +350,20 @@ public final class MarkdownPreviewView: NSScrollView {
 
     /// Submits an update unless one for the same source, width, and image
     /// sizes is out. A newer source or new sizes alone (`waiting`) wait for
-    /// the update in flight and for the pause after a slow one; a new width
-    /// or a finished live resize supersedes it at once.
+    /// the update in flight and for the pause after a slow one; a new width,
+    /// a new typography, or a finished live resize supersedes it at once.
     private func scheduleUpdate(waiting: Bool = true) {
         let width = canvas.frame.width
         guard isShown, sourceGeneration > 0, width >= 1 else { return }
         let complete = !inLiveResize
         let images = canvas.images.sizes
+        let typography = pipeline.typography
         if let submitted, submitted.sourceGeneration == sourceGeneration, submitted.width == width,
-           submitted.images === images, submitted.complete || !complete {
+           submitted.typography === typography, submitted.images === images, submitted.complete || !complete {
             return
         }
-        if waiting, let submitted, submitted.width == width, submitted.complete == complete {
+        if waiting, let submitted, submitted.width == width, submitted.typography === typography,
+           submitted.complete == complete {
             if inFlight != nil { return }
             if let resumeAt, resumeAt > .now {
                 waitForResume(until: resumeAt)
@@ -356,7 +373,7 @@ public final class MarkdownPreviewView: NSScrollView {
         resumeTask?.cancel()
         resumeTask = nil
         let plan = RenderPlan(firstStep)
-        submitted = (sourceGeneration, width, complete, plan, images)
+        submitted = (sourceGeneration, width, typography, complete, plan, images)
         let base = reusedBase.flatMap { $0.sourceGeneration == sourceGeneration ? $0.snapshot : nil } ?? canvas.snapshot
         let generation = pipeline.submit(sourceGeneration: sourceGeneration, source: source, width: width,
                                          scrollFraction: CGFloat(scrollFraction),
@@ -416,7 +433,7 @@ public final class MarkdownPreviewView: NSScrollView {
         let sourceChanged = sourceGeneration != installedSourceGeneration
         // Images loaded or failed: the same blocks at the same width.
         let sameBlocks = !sourceChanged && old.width == snapshot.width && old.layouts.count == snapshot.layouts.count
-            && old.images !== snapshot.images
+            && old.images !== snapshot.images && old.typography === snapshot.typography
         let anchor = !sourceChanged && !sameBlocks && old.layouts.count == snapshot.layouts.count
             ? old.anchor(atY: oldY) : nil
         let update = sourceChanged ? snapshot.update(from: old) : nil
@@ -714,7 +731,7 @@ final class MarkdownDocumentView: NSView {
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let top = visibleRect.minY
-        let line = Typography.standard.lineHeight(.body)
+        let line = snapshot.typography.lineHeight(.body)
         let page = max(visibleRect.height - line, line)
         let end = CGFloat.greatestFiniteMagnitude
         switch key {
@@ -755,8 +772,10 @@ struct DrawStyle {
     let background: CGColor
     let codeBlockCornerRadius: CGFloat
     let taskBoxCornerRadius: CGFloat
+    let typography: Typography
 
     init(_ palette: Palette, _ typography: Typography) {
+        self.typography = typography
         text = palette.cgColors
         codeBackground = Self.composite(palette.codeBackground, over: palette.background)
         muted = palette.mutedText.cgColor
@@ -934,7 +953,7 @@ extension BlockLayout {
     private func drawMarkers(in context: CGContext, at origin: CGPoint, clip: CGRect, style: DrawStyle) {
         guard !markers.isEmpty else { return }
         // No marker reaches farther than a line from its baseline.
-        let reach: CGFloat = 32
+        let reach = 32 * style.typography.scale
         var low = 0
         var high = markers.count
         while low < high {
@@ -959,7 +978,7 @@ extension BlockLayout {
             case .number(let number):
                 context.setFillColor(style.text[Int(marker.color)])
                 context.textPosition = CGPoint(x: rect.minX, y: origin.y + marker.baseline)
-                CTLineDraw(MarkerNumbers.line(number, typography: Typography.standard), context)
+                CTLineDraw(MarkerNumbers.line(number, typography: style.typography), context)
             case .task(let checked):
                 drawTaskBox(in: rect, checked: checked, context: context, style: style)
             }

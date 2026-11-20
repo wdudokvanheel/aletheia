@@ -4,7 +4,9 @@ import CoreText
 /// Fonts, line heights, and spacing, starting from the WebKit preview
 /// stylesheet (`Resources/Preview/preview.css`) and WebKit's default styles
 /// for what it leaves out. CSS pixels are points. Immutable and safe to share
-/// across threads; every value below is here to be reviewed and tuned.
+/// across threads; every value below is here to be reviewed and tuned. The
+/// table gives `standard`'s values; `init(scale:)` multiplies every size in
+/// points.
 ///
 /// | Metric | Value | Source |
 /// | --- | --- | --- |
@@ -30,12 +32,14 @@ import CoreText
 /// so it is 12.15 pt, while the `pre`'s own 13.5 pt font sets its 21.6 pt
 /// lines, as in WebKit.
 public final class Typography: @unchecked Sendable {
-    public static let standard = Typography()
+    public static let standard = Typography(scale: 1)
     /// Marks alt text, whose attributes are otherwise those of the text
     /// around it, so Core Text keeps it in runs of its own to color.
     nonisolated(unsafe) static let imageAttribute = "MarkdownViewImage" as CFString
 
-    public let bodyFontSize: CGFloat = 15
+    /// The factor every size in points is multiplied by.
+    public let scale: CGFloat
+    public let bodyFontSize: CGFloat
     /// Line height as a multiple of the font size: body, quote, and code text.
     public let lineHeightMultiple: CGFloat = 1.6
     public let headingLineHeightMultiple: CGFloat = 1.3
@@ -50,49 +54,49 @@ public final class Typography: @unchecked Sendable {
     public let codeScale: CGFloat = 0.9
 
     /// Padding around the text column.
-    public let topInset: CGFloat = 16
-    public let bottomInset: CGFloat = 40
-    public let horizontalInset: CGFloat = 24
-    public let maximumColumnWidth: CGFloat = 900
+    public let topInset: CGFloat
+    public let bottomInset: CGFloat
+    public let horizontalInset: CGFloat
+    public let maximumColumnWidth: CGFloat
 
     /// Margins above and below paragraphs, top-level lists, and block quotes.
-    public let blockSpacing: CGFloat = 15
+    public let blockSpacing: CGFloat
     /// Margins above and below code blocks: 1 em of their font.
-    public let codeBlockMargin: CGFloat = 13.5
-    public let codeBlockPadding: CGFloat = 12
-    public let codeBlockCornerRadius: CGFloat = 4
+    public let codeBlockMargin: CGFloat
+    public let codeBlockPadding: CGFloat
+    public let codeBlockCornerRadius: CGFloat
     /// Tab stops in code blocks, in spaces of the code font.
     public let codeTabWidth = 8
     /// Horizontal padding inside an inline code background.
-    public let inlineCodePadding: CGFloat = 4
-    public let ruleThickness: CGFloat = 1
-    public let ruleMargin: CGFloat = 7.5
+    public let inlineCodePadding: CGFloat
+    public let ruleThickness: CGFloat
+    public let ruleMargin: CGFloat
 
     /// Table borders, collapsed between cells.
-    public let tableBorderWidth: CGFloat = 1
-    public let tableCellVerticalPadding: CGFloat = 6
-    public let tableCellHorizontalPadding: CGFloat = 12
+    public let tableBorderWidth: CGFloat
+    public let tableCellVerticalPadding: CGFloat
+    public let tableCellHorizontalPadding: CGFloat
     /// The narrowest a column's text gets when its table is wider than the
     /// space it has; a column that is narrower by nature keeps its width.
-    public let tableMinimumColumnWidth: CGFloat = 60
+    public let tableMinimumColumnWidth: CGFloat
 
     /// How far each list level indents its items' text.
-    public let listIndent: CGFloat = 40
+    public let listIndent: CGFloat
     /// The gap between a list marker or task box and the item's text.
-    public let listMarkerSpacing: CGFloat = 6
+    public let listMarkerSpacing: CGFloat
     /// The diameter of a disc or circle bullet and the side of a square one.
-    public let bulletSize: CGFloat = 5
-    public let taskBoxSize: CGFloat = 13
-    public let taskBoxCornerRadius: CGFloat = 3
+    public let bulletSize: CGFloat
+    public let taskBoxSize: CGFloat
+    public let taskBoxCornerRadius: CGFloat
 
-    public let quoteBarWidth: CGFloat = 3
+    public let quoteBarWidth: CGFloat
     /// The space between a quote's bar and its text.
-    public let quotePadding: CGFloat = 16
+    public let quotePadding: CGFloat
     /// The space a quote leaves on its right, like WebKit's default margin.
-    public let quoteRightMargin: CGFloat = 40
+    public let quoteRightMargin: CGFloat
 
     /// The narrowest column, and the narrowest text in deeply nested blocks.
-    let minimumColumnWidth: CGFloat = 60
+    let minimumColumnWidth: CGFloat
 
     /// Each role's own font, indexed by `TextRole.rawValue`.
     let fonts: [CTFont]
@@ -105,7 +109,38 @@ public final class Typography: @unchecked Sendable {
     /// Left-to-right and right-to-left paragraphs.
     private let directionStyles: [CTParagraphStyle]
 
-    private init() {
+    /// Every size above in points, multiplied by `scale`: 2 doubles the
+    /// fonts, line heights, spacing, and column width, while the multiples
+    /// and ratios stay. `standard` is scale 1. A scale that is not positive
+    /// and finite is 1.
+    public init(scale: CGFloat) {
+        let scale = scale.isFinite && scale > 0 ? scale : 1
+        self.scale = scale
+        bodyFontSize = 15 * scale
+        topInset = 16 * scale
+        bottomInset = 40 * scale
+        horizontalInset = 24 * scale
+        maximumColumnWidth = 900 * scale
+        blockSpacing = 15 * scale
+        codeBlockMargin = 13.5 * scale
+        codeBlockPadding = 12 * scale
+        codeBlockCornerRadius = 4 * scale
+        inlineCodePadding = 4 * scale
+        ruleThickness = 1 * scale
+        ruleMargin = 7.5 * scale
+        tableBorderWidth = 1 * scale
+        tableCellVerticalPadding = 6 * scale
+        tableCellHorizontalPadding = 12 * scale
+        tableMinimumColumnWidth = 60 * scale
+        listIndent = 40 * scale
+        listMarkerSpacing = 6 * scale
+        bulletSize = 5 * scale
+        taskBoxSize = 13 * scale
+        taskBoxCornerRadius = 3 * scale
+        quoteBarWidth = 3 * scale
+        quotePadding = 16 * scale
+        quoteRightMargin = 40 * scale
+        minimumColumnWidth = 60 * scale
         var fonts: [CTFont] = []
         var lineHeights: [CGFloat] = []
         var styledFonts: [CTFont] = []
@@ -134,7 +169,7 @@ public final class Typography: @unchecked Sendable {
             let codeScale = codeScale
             let variants = (0..<8).map { traits in
                 let monospaced = role == .code || traits & 4 != 0
-                return Self.makeFont(size: monospaced && role != .code ? size * codeScale : size,
+                return Self.makeFont(size: monospaced && role != .code ? size * codeScale : size, scale: scale,
                                      bold: isHeading || traits & 1 != 0, italic: traits & 2 != 0,
                                      monospaced: monospaced)
             }
@@ -174,10 +209,18 @@ public final class Typography: @unchecked Sendable {
     /// A paragraph style that sets the base writing direction.
     func paragraphStyle(_ isRightToLeft: Bool) -> CTParagraphStyle { directionStyles[isRightToLeft ? 1 : 0] }
 
-    private static func makeFont(size: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> CTFont {
+    /// A system font. Scaled, it keeps the optical size of its unscaled
+    /// size: the system font is narrower at larger sizes, which would break
+    /// lines elsewhere than at scale 1.
+    private static func makeFont(size: CGFloat, scale: CGFloat, bold: Bool, italic: Bool, monospaced: Bool) -> CTFont {
         var font = monospaced
             ? NSFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .regular) as CTFont
             : CTFontCreateUIFontForLanguage(bold ? .emphasizedSystem : .system, size, nil)!
+        if scale != 1 {
+            let descriptor = CTFontDescriptorCreateCopyWithAttributes(
+                CTFontCopyFontDescriptor(font), [kCTFontOpticalSizeAttribute: size / scale as NSNumber] as CFDictionary)
+            font = CTFontCreateWithFontDescriptor(descriptor, size, nil)
+        }
         if italic, let italicFont = CTFontCreateCopyWithSymbolicTraits(font, 0, nil, .traitItalic, .traitItalic) {
             font = italicFont
         }

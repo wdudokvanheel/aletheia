@@ -166,6 +166,10 @@ final class AppSettings: NSObject {
     static let markdownRendererDidChange = Notification.Name("AletheiaMarkdownRendererDidChange")
     static let previewTimingsKey = "showPreviewTimings"
     static let previewTimingsDidChange = Notification.Name("AletheiaPreviewTimingsDidChange")
+    static let previewTextScaleKey = "customPreviewTextScale"
+    static let previewTextScaleDidChange = Notification.Name("AletheiaPreviewTextScaleDidChange")
+    /// The sizes the Custom renderer steps through, as multiples of its standard size.
+    static let previewTextScales: [Double] = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
     static let schemes = AppColorScheme.all
 
     private let defaults: UserDefaults
@@ -204,6 +208,27 @@ final class AppSettings: NSObject {
         defaults.set(enabled, forKey: Self.previewTimingsKey)
         NotificationCenter.default.post(name: Self.previewTimingsDidChange, object: self)
     }
+
+    /// The Custom renderer's page size in every window, clamped to `previewTextScales`.
+    var previewTextScale: Double {
+        let stored = defaults.double(forKey: Self.previewTextScaleKey)
+        guard stored.isFinite, stored > 0 else { return 1 }
+        return min(max(stored, Self.previewTextScales[0]), Self.previewTextScales[Self.previewTextScales.count - 1])
+    }
+
+    func setPreviewTextScale(_ scale: Double) {
+        let scales = Self.previewTextScales
+        let clamped = scale.isFinite ? min(max(scale, scales[0]), scales[scales.count - 1]) : 1
+        guard previewTextScale != clamped else { return }
+        if clamped == 1 { defaults.removeObject(forKey: Self.previewTextScaleKey) }
+        else { defaults.set(clamped, forKey: Self.previewTextScaleKey) }
+        NotificationCenter.default.post(name: Self.previewTextScaleDidChange, object: self)
+    }
+
+    /// The next larger size, or nil at the largest.
+    var largerPreviewTextScale: Double? { Self.previewTextScales.first { $0 > previewTextScale + 0.001 } }
+    /// The next smaller size, or nil at the smallest.
+    var smallerPreviewTextScale: Double? { Self.previewTextScales.last { $0 < previewTextScale - 0.001 } }
 
     private var settingsWindow: NSWindow?
     private var schemePopup: NSPopUpButton?

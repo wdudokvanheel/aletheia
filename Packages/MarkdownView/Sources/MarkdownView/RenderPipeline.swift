@@ -112,6 +112,9 @@ struct RenderRequest: Sendable {
     var sourceGeneration: UInt64
     var source: String
     var width: CGFloat
+    /// What to lay out with. A relayout of the same source with another
+    /// typography lays out every block again.
+    var typography: Typography
     /// For a relayout of the same source: where the visible area starts, as a
     /// fraction of the document height.
     var scrollFraction: CGFloat
@@ -147,13 +150,8 @@ final class RenderWorker: @unchecked Sendable {
     let latestGeneration = Atomic<UInt64>(0)
     /// Requests that started work, rather than finding themselves superseded.
     let runs = Atomic<Int>(0)
-    private let typography: Typography
     private var current: MarkdownSnapshot?
     private var currentSourceGeneration: UInt64 = 0
-
-    init(typography: Typography) {
-        self.typography = typography
-    }
 
     func isSuperseded(_ generation: UInt64) -> Bool {
         latestGeneration.load(ordering: .relaxed) != generation
@@ -168,6 +166,7 @@ final class RenderWorker: @unchecked Sendable {
         let generation = request.generation
         guard !isSuperseded(generation) else { return }
         runs.add(1, ordering: .relaxed)
+        let typography = request.typography
         let columnWidth = typography.column(forWidth: request.width).width
         let images = request.images
         let isCancelled: @Sendable () -> Bool = { [self] in isSuperseded(generation) }
@@ -178,16 +177,29 @@ final class RenderWorker: @unchecked Sendable {
         /// For blocks whose layout in `base` is an estimate, earlier layouts
         /// whose tables lend rows and natural widths.
         var lent: [BlockLayout?]?
+        /// For a relayout: where the visible area starts in `base`.
+        var relayoutTop: CGFloat?
 
         if let current, currentSourceGeneration == request.sourceGeneration {
-            if current.width == request.width, current.isComplete, current.images === images {
+            if current.typography !== typography {
+                // Every layout is for other fonts: start from estimates, and
+                // from where the block at the top of the visible area lands.
+                let layouts = current.document.blocks.map {
+                    BlockLayout.estimate(for: $0, columnWidth: columnWidth, typography: typography)
+                }
+                base = MarkdownSnapshot(document: current.document, layouts: layouts, width: request.width,
+                                        typography: typography, generation: generation, update: current.update,
+                                        images: images)
+                relayoutTop = current.anchor(atY: request.scrollFraction * current.totalHeight).map(base.y(for:)) ?? 0
+            } else if current.width == request.width, current.isComplete, current.images === images {
                 timings.blockCount = current.layouts.count
                 timings.reusedBlocks = current.layouts.count
                 post(.snapshot(current.with(generation: generation), sourceGeneration: request.sourceGeneration,
                                timings: timings))
                 return
+            } else {
+                base = current
             }
-            base = current
         } else {
             // A new source: parse it in full, diff it against the installed
             // snapshot, and keep the layouts of unchanged blocks.
@@ -256,7 +268,7 @@ final class RenderWorker: @unchecked Sendable {
                 // A relayout: from the top of the visible area down, enough
                 // to fill it, serially. A table there starts at the row at
                 // the top; the scroll anchor holds that row in place.
-                let top = request.scrollFraction * base.totalHeight
+                let top = relayoutTop ?? request.scrollFraction * base.totalHeight
                 var index = base.firstBlock(endingBelow: top)
                 var covered: CGFloat = 0
                 while index < layouts.count, covered < target {
@@ -362,14 +374,16 @@ final class RenderWorker: @unchecked Sendable {
 @MainActor
 final class RenderPipeline {
     let queue = DispatchQueue(label: "MarkdownView.render", qos: .userInitiated)
-    private let worker: RenderWorker
+    private let worker = RenderWorker()
+    /// What requests lay out with from now on.
+    var typography: Typography
     private(set) var generation: UInt64 = 0
     /// Set by `cancel()` until the next request.
     private var isCancelled = false
     var onOutcome: (@MainActor (RenderOutcome) -> Void)?
 
     init(typography: Typography) {
-        worker = RenderWorker(typography: typography)
+        self.typography = typography
     }
 
     /// Requests that started work on the background queue.
@@ -389,7 +403,7 @@ final class RenderPipeline {
         isCancelled = false
         worker.latestGeneration.store(generation, ordering: .relaxed)
         let request = RenderRequest(generation: generation, sourceGeneration: sourceGeneration, source: source,
-                                    width: width, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
+                                    width: width, typography: typography, scrollFraction: scrollFraction, viewportHeight: viewportHeight,
                                     plan: plan ?? RenderPlan(visibleFirst ? .offset(0) : .everything),
                                     complete: complete, base: base, images: images, highlighting: highlighting)
         let post: @Sendable (RenderOutcome) -> Void = { [weak self] outcome in
