@@ -3,7 +3,7 @@
 Verified by fetching the official upstream raw files at the revisions below on
 2026-11-05. These are static sRGB UI color adaptations, not imported theme engines,
 libraries, syntax rules or runtime parsers. No package or network access is added.
-74 bundled variants plus native System are defined in `AppearanceSettings.swift`.
+76 bundled variants plus native System are defined in `AppearanceSettings.swift`.
 The project dependency maintenance gate concerns executable libraries; these
 small, fixed color tables are attributed design data, including classic palettes.
 
@@ -100,7 +100,7 @@ Revision `df4792accde9db0043121f32628bcf8e645d9aea`.
 
 ## Native syntax roles
 
-`SyntaxPalette.swift` supplies a separate static table for each of the 74 bundled
+`SyntaxPalette.swift` supplies a separate static table for each of the 76 bundled
 variants; System uses dynamic AppKit colors. These colors were re-read from the
 same pinned palette files above on 2026-11-05. Existing license notices cover the
 additional values. No theme engine, dependency, or runtime lookup is added.
@@ -122,7 +122,7 @@ type, and tag names share the name role; literal constants share the number role
 | One | grey, green, purple, orange, blue, red, blue, red |
 
 Settings changes recolor cached visible tokens immediately through the existing
-window notification. Tests cycle all 75 schemes through a real EditorWindow and
+window notification. Tests cycle all 77 schemes through a real EditorWindow and
 check native temporary token colors, background, unchanged text/selection, and
 unmodified undo state. Tokenization is not needed to change schemes.
 
@@ -1418,3 +1418,55 @@ Pinned files and SHA-256:
 - [extensions/theme-abyss/themes/abyss-color-theme.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/theme-abyss/themes/abyss-color-theme.json): `5ccb5fa5c6f66b43295f68852b7cc88b1ba35eb44a3a17c813e9094aaca755c4`
 - [extensions/theme-abyss/cgmanifest.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/theme-abyss/cgmanifest.json): `bdd5d6c06d1205a0221732d5a5b4b1684c4bc15080090c9a71b3bbec591b811d`
 - [extensions/git/package.json](https://raw.githubusercontent.com/microsoft/vscode/03d396a6e01bf958211fde9f2b279619881d68b2/extensions/git/package.json): `213a8586480b96f1ecb8f39c6b10939c9772f6caf06668332e608ff8e791f305`
+
+## Inkwell and Harbor Night — added 2026-11-20
+
+The owner's own custom terminal palettes from Rex (Superlogical's terminal
+app), renamed: Inkwell was "Static Noir (Duplicated)" and Harbor Night was
+"Merino Dark (Duplicated)". Values are the sRGB fallbacks stored next to the
+Display P3 colors in Rex's preferences, copied once as static literals. No
+import feature, file parsing, runtime lookup or dependency is added. Being the
+owner's own palettes, they need no upstream license notice.
+
+Terminal palettes have no editor roles, so Aletheia maps them as follows.
+UI: background, foreground, surface, ANSI 8 (bright black) muted, cursor
+accent, ANSI 2 green added, ANSI 3 yellow modified, ANSI 1 red deleted, ANSI 6
+cyan staged, ANSI 5 magenta conflict. Syntax: ANSI 8 comment, green string,
+magenta keyword, yellow number, ANSI 4 blue name, cyan property, blue markup,
+red invalid. Normal (0-7) colors are used; bright variants are unused.
+
+Surface: Inkwell uses ANSI 0 `#1a1a1a`. Harbor Night's ANSI 0 `#484f58` is
+too light for a panel surface, so it uses a derived `#161b22`, one subtle step
+above the background. Selection colors are not palette columns and are not
+used. Comment contrast against the background is 3.45:1 (Inkwell `#666666`
+on `#0a0a0a`) and 4.12:1 (Harbor Night `#6e7681` on `#0d1117`), above several
+existing bundled schemes.
+
+| Role | Inkwell | Harbor Night |
+| --- | --- | --- |
+| ui.background | `#0a0a0a` | `#0d1117` |
+| ui.foreground | `#ededed` | `#e6edf3` |
+| ui.surface | `#1a1a1a` | `#161b22` (derived) |
+| ui.muted | `#666666` | `#6e7681` |
+| ui.accent | `#2a69ff` | `#2f81f7` |
+| ui.added | `#9fd08a` | `#3fb950` |
+| ui.modified | `#e6c15c` | `#d29922` |
+| ui.deleted | `#ff4d42` | `#ff7b72` |
+| ui.staged | `#74cfd1` | `#39c5cf` |
+| ui.conflict | `#d093d0` | `#bc8cff` |
+| syntax.comment | `#666666` | `#6e7681` |
+| syntax.string | `#9fd08a` | `#3fb950` |
+| syntax.keyword | `#d093d0` | `#bc8cff` |
+| syntax.number | `#e6c15c` | `#d29922` |
+| syntax.name | `#7fb2e8` | `#58a6ff` |
+| syntax.property | `#74cfd1` | `#39c5cf` |
+| syntax.markup | `#7fb2e8` | `#58a6ff` |
+| syntax.invalid | `#ff4d42` | `#ff7b72` |
+
+Harbor Night's colors closely resemble GitHub's dark palette: background
+`#0d1117`, foreground `#e6edf3` and its ANSI accents correspond to GitHub's
+dark default editor and terminal colors, and the derived surface `#161b22` is
+also a GitHub dark tone. This is noted as a resemblance only. The
+primer/github-vscode-theme source and its MIT license, recorded above for the
+GitHub themes and in [ThemeLicenses.md](Sources/Aletheia/Resources/ThemeLicenses.md),
+cover that palette family.

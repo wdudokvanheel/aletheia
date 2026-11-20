@@ -34,7 +34,7 @@ Markdown view. So I wrote this.
   common formats.
 - PDFs and images open read-only in tabs.
 - The file tree shows Git status colors.
-- 74 color schemes applied to the UI, syntax highlighter and even Markdown code 
+- 76 color schemes applied to the UI, syntax highlighter and even Markdown code 
   blocks.
 - Saving checks whether the file changed on disk first, so it never silently
   overwrites someone else's edit.
