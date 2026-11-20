@@ -885,7 +885,10 @@ extension BlockLayout {
                 }
             }
         }
-        for decoration in line.decorations where decoration.kind != .codeBackground {
+        // Code backgrounds are drawn with the backgrounds and images with the
+        // images: a fill in an image's place would show through its
+        // transparent pixels.
+        for decoration in line.decorations where decoration.kind == .underline || decoration.kind == .strikethrough {
             context.setFillColor(style.text[Int(decoration.color)])
             context.fill(decoration.rect.offsetBy(dx: x, dy: top))
         }

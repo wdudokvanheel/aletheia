@@ -29,6 +29,8 @@ private final class StubImageProvider: MarkdownImageProvider {
     /// Sources answered as soon as they are asked for, before returning.
     var immediate: Set<String> = []
     var animated: [String: (delays: [TimeInterval], frames: FrameCounter)] = [:]
+    /// Sources answered with fully transparent images.
+    var transparent: Set<String> = []
 
     var pending: [Int] { requests.indices.filter { !requests[$0].isCancelled && !requests[$0].isAnswered } }
     var cancelled: [String] { requests.filter(\.isCancelled).map(\.source) }
@@ -53,7 +55,7 @@ private final class StubImageProvider: MarkdownImageProvider {
         requests[index].isAnswered = true
         let source = requests[index].source
         guard let size = sizes[source] else { return requests[index].completion(.failure(Failure())) }
-        let image = Self.bitmap(size)
+        let image = Self.bitmap(size, clear: transparent.contains(source))
         if let animation = animated[source] {
             let frames = animation.frames
             requests[index].completion(.success(MarkdownImage(image: image, size: size, frameDelays: animation.delays) { _ in
@@ -67,10 +69,11 @@ private final class StubImageProvider: MarkdownImageProvider {
 
     func answerAll() { pending.forEach(answer) }
 
-    static func bitmap(_ size: CGSize) -> CGImage {
+    static func bitmap(_ size: CGSize, clear: Bool = false) -> CGImage {
         let context = CGContext(data: nil, width: max(Int(size.width), 1), height: max(Int(size.height), 1),
                                 bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        if clear { return context.makeImage()! }
         context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
         context.fill(CGRect(origin: .zero, size: size))
         return context.makeImage()!
@@ -381,5 +384,36 @@ final class ImageLoadingTests: XCTestCase {
         waitUntil { store.image(for: "a.png") != nil }
         settle(0.1)
         XCTAssertTrue(view.snapshot.layouts[2] === saved.layouts[2])
+    }
+
+    func testATransparentImageShowsTheBackgroundThroughIt() throws {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            window.appearance = NSAppearance(named: appearance)
+            stub.sizes = ["clear.png": CGSize(width: 80, height: 60)]
+            stub.transparent = ["clear.png"]
+            load("Before.\n\n![clear](clear.png)\n\nAfter \(appearance.rawValue).")
+            waitUntil { stub.requests.contains { $0.source == "clear.png" } }
+            stub.answerAll()
+            waitUntil { view.snapshot.layouts[1].drawsImages }
+            var imageRect: CGRect?
+            let snapshot = view.snapshot
+            snapshot.layouts[1].forEachImage(intersecting: .infinite,
+                                             at: CGPoint(x: snapshot.columnX, y: snapshot.blockTops[1]),
+                                             codeOffset: { _ in 0 }) { _, rect, _ in imageRect = rect }
+            let rect = try XCTUnwrap(imageRect)
+            XCTAssertGreaterThan(rect.minX, 8)
+            func pixel(at point: CGPoint) throws -> NSColor {
+                let area = CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)
+                let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: area))
+                canvas.cacheDisplay(in: area, to: bitmap)
+                return try XCTUnwrap(bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB))
+            }
+            // The image's place shows what the margin beside it shows.
+            let inside = try pixel(at: CGPoint(x: rect.midX, y: rect.midY))
+            let margin = try pixel(at: CGPoint(x: rect.minX / 2, y: rect.midY))
+            XCTAssertEqual(inside.redComponent, margin.redComponent, accuracy: 0.01, appearance.rawValue)
+            XCTAssertEqual(inside.greenComponent, margin.greenComponent, accuracy: 0.01, appearance.rawValue)
+            XCTAssertEqual(inside.blueComponent, margin.blueComponent, accuracy: 0.01, appearance.rawValue)
+        }
     }
 }
