@@ -3,7 +3,7 @@
 Verified by fetching the official upstream raw files at the revisions below on
 2026-11-05. These are static sRGB UI color adaptations, not imported theme engines,
 libraries, syntax rules or runtime parsers. No package or network access is added.
-77 bundled variants plus native System are defined in `AppearanceSettings.swift`.
+78 bundled variants plus native System are defined in `AppearanceSettings.swift`.
 The project dependency maintenance gate concerns executable libraries; these
 small, fixed color tables are attributed design data, including classic palettes.
 
@@ -100,7 +100,7 @@ Revision `df4792accde9db0043121f32628bcf8e645d9aea`.
 
 ## Native syntax roles
 
-`SyntaxPalette.swift` supplies a separate static table for each of the 77 bundled
+`SyntaxPalette.swift` supplies a separate static table for each of the 78 bundled
 variants; System uses dynamic AppKit colors. These colors were re-read from the
 same pinned palette files above on 2026-11-05. Existing license notices cover the
 additional values. No theme engine, dependency, or runtime lookup is added.
@@ -122,7 +122,7 @@ type, and tag names share the name role; literal constants share the number role
 | One | grey, green, purple, orange, blue, red, blue, red |
 
 Settings changes recolor cached visible tokens immediately through the existing
-window notification. Tests cycle all 78 schemes through a real EditorWindow and
+window notification. Tests cycle all 79 schemes through a real EditorWindow and
 check native temporary token colors, background, unchanged text/selection, and
 unmodified undo state. Tokenization is not needed to change schemes.
 
@@ -1506,3 +1506,35 @@ contrast against both cream and white.
 | syntax.property | `#d9117d` |
 | syntax.markup | `#2e7a99` |
 | syntax.invalid | `#cc3e3e` |
+
+## Wesley Brutalist Dark — added 2026-11-23
+
+The dark counterpart of Wesley Brutalist, from the same portfolio color
+tokens. Background is the website's dark `#1e1e1e`, foreground its cream
+`#fefbe9` and surface its black `#000000`; muted grey `#9c998e` is an added
+neutral. Accent, Git and syntax roles use the original website accents
+unchanged (pink, green, yellow, red, blue, purple), in the same role mapping as
+the light variant. Every foreground, muted, Git and syntax color has at least
+4.5:1 contrast against both background and surface (lowest: pink `#ff1493` at
+4.58:1 on `#1e1e1e`).
+
+| Role | Wesley Brutalist Dark |
+| --- | --- |
+| ui.background | `#1e1e1e` |
+| ui.foreground | `#fefbe9` |
+| ui.surface | `#000000` |
+| ui.muted | `#9c998e` |
+| ui.accent | `#ff1493` |
+| ui.added | `#74c936` |
+| ui.modified | `#ffc733` |
+| ui.deleted | `#ff4d4d` |
+| ui.staged | `#4dccff` |
+| ui.conflict | `#b26afb` |
+| syntax.comment | `#9c998e` |
+| syntax.string | `#74c936` |
+| syntax.keyword | `#b26afb` |
+| syntax.number | `#ffc733` |
+| syntax.name | `#4dccff` |
+| syntax.property | `#ff1493` |
+| syntax.markup | `#4dccff` |
+| syntax.invalid | `#ff4d4d` |
