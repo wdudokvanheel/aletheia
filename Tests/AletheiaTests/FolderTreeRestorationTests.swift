@@ -27,7 +27,7 @@ final class FolderTreeRestorationTests: XCTestCase {
         window.contentView = tree.scroll
         defer { window.close() }
         var opened = false
-        tree.onOpen = { _ in opened = true }
+        tree.onOpen = { _, _ in opened = true }
         tree.setRoot(root)
         // Reveal takes precedence over a pending restored selection and scroll position.
         tree.restore(FolderTreeState(expandedPaths: [], selectedPath: nil, scrollOrigin: .zero))
@@ -110,7 +110,7 @@ final class FolderTreeRestorationTests: XCTestCase {
         window.contentView = tree.scroll
         defer { window.close() }
         var opened = false
-        tree.onOpen = { _ in opened = true }
+        tree.onOpen = { _, _ in opened = true }
         tree.setRoot(root)
         tree.restore(state)
         XCTAssertEqual(tree.session, state, "Pending loads must preserve the complete requested snapshot")
@@ -162,5 +162,58 @@ final class FolderTreeRestorationTests: XCTestCase {
         XCTAssertTrue(tree.session.expandedPaths.isEmpty)
         XCTAssertNil(tree.session.selectedPath)
         XCTAssertEqual(tree.session.scrollOrigin, .zero)
+    }
+
+    @MainActor func testArrowKeysStepThroughFilesAndExpandOrCollapseFolders() async throws {
+        _ = NSApplication.shared
+        var root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        root = root.resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["sub/inner.txt", "a.txt", "b.txt"] { try Data().write(to: root.appendingPathComponent(name)) }
+        let tree = FolderTree()
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 250),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = tree.scroll
+        defer { window.close() }
+        var opened: [(String, Bool)] = []
+        tree.onOpen = { opened.append(($0.lastPathComponent, $1)) }
+        tree.setRoot(root)
+        let outline = try XCTUnwrap(tree.scroll.documentView as? NSOutlineView)
+        func row(_ name: String) -> Int? {
+            (0..<outline.numberOfRows).first { (outline.item(atRow: $0) as? FolderNode)?.url.lastPathComponent == name }
+        }
+        func waitFor(_ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(5)
+            while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertTrue(condition())
+        }
+        func press(_ key: Int) {
+            let characters = String(UnicodeScalar(UInt16(key))!)
+            outline.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.function, .numericPad],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)!)
+        }
+        try await waitFor { row("sub") != nil && row("b.txt") != nil }
+        outline.selectRowIndexes(IndexSet(integer: row("sub")!), byExtendingSelection: false)
+
+        press(NSRightArrowFunctionKey)
+        try await waitFor { row("inner.txt") != nil }
+        press(NSRightArrowFunctionKey)
+        XCTAssertEqual(tree.selectedURL?.lastPathComponent, "inner.txt")
+        press(NSLeftArrowFunctionKey)
+        XCTAssertEqual(tree.selectedURL?.lastPathComponent, "sub")
+        press(NSLeftArrowFunctionKey)
+        XCTAssertNil(row("inner.txt"))
+        XCTAssertEqual(tree.selectedURL?.lastPathComponent, "sub")
+
+        outline.selectRowIndexes(IndexSet(integer: row("a.txt")!), byExtendingSelection: false)
+        press(NSDownArrowFunctionKey)
+        XCTAssertEqual(tree.selectedURL?.lastPathComponent, "b.txt")
+        press(NSUpArrowFunctionKey)
+        XCTAssertEqual(tree.selectedURL?.lastPathComponent, "a.txt")
+        XCTAssertEqual(opened.map(\.0), ["inner.txt", "b.txt", "a.txt"])
+        XCTAssertTrue(opened.allSatisfy(\.1))
     }
 }

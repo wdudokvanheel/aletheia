@@ -25,11 +25,17 @@ private final class FileOutlineView: NSOutlineView {
         super.mouseDown(with: event)
     }
 
+    var onArrow: ((NSEvent.SpecialKey) -> Bool)?
+
     /// Delete and Forward Delete move the selected item to the Trash, after the window confirms.
+    /// Plain arrow keys go to the tree's own navigation.
     override func keyDown(with event: NSEvent) {
         let key = event.charactersIgnoringModifiers
-        if event.modifierFlags.intersection(KeyStroke.modifierMask).isEmpty, key == "\u{7F}" || key == "\u{F728}" {
+        let plain = event.modifierFlags.intersection(KeyStroke.modifierMask).isEmpty
+        if plain, key == "\u{7F}" || key == "\u{F728}" {
             NSApp.sendAction(#selector(EditorWindow.trashFileItem(_:)), to: nil, from: self)
+        } else if plain, let special = event.specialKey, onArrow?(special) == true {
+            return
         } else { super.keyDown(with: event) }
     }
 }
@@ -158,7 +164,8 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     private var gitRefreshTask: Task<Void, Never>?
     private var gitRefreshRunning = false
     private var gitRefreshPending = false
-    var onOpen: ((URL) -> Void)?
+    /// The Bool is true when the file was reached with the arrow keys rather than clicked.
+    var onOpen: ((URL, Bool) -> Void)?
     var onError: ((Error) -> Void)?
 
     override init() {
@@ -174,6 +181,7 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         outline.delegate = self
         outline.target = self
         outline.action = #selector(openSelection)
+        outline.onArrow = { [weak self] in self?.navigate($0) ?? false }
         outline.setDraggingSourceOperationMask(.copy, forLocal: false)
         outline.setDraggingSourceOperationMask([], forLocal: true)
         outline.verticalMotionCanBeginDrag = true
@@ -186,6 +194,8 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         menu.addItem(withTitle: ShortcutCommand.rename.title, action: #selector(EditorWindow.renameFileItem(_:)), keyEquivalent: "")
         menu.addItem(withTitle: ShortcutCommand.copy.title, action: #selector(EditorWindow.copyFileItem(_:)), keyEquivalent: "")
         menu.addItem(withTitle: ShortcutCommand.paste.title, action: #selector(EditorWindow.pasteFileItems(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Open in Finder", action: #selector(showInFinder), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: ShortcutCommand.delete.title, action: #selector(EditorWindow.trashFileItem(_:)), keyEquivalent: "")
         outline.menu = menu
@@ -216,6 +226,15 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     var hasFocus: Bool { outline.window?.firstResponder === outline }
+
+    func focus() { outline.window?.makeFirstResponder(outline) }
+
+    var selectedURL: URL? { (outline.item(atRow: outline.selectedRow) as? FolderNode)?.url }
+
+    @objc private func showInFinder() {
+        guard let url = targetItem(includingRoot: true) ?? root?.url else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 
     func ownsMenuItem(_ sender: Any?) -> Bool { (sender as? NSMenuItem)?.menu === outline.menu }
 
@@ -494,13 +513,43 @@ final class FolderTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate
         pendingReveal = nil
         pendingState = nil
         guard let node = outline.item(atRow: outline.clickedRow) as? FolderNode else { return }
-        if node.isDirectory {
-            if node.wantsExpanded {
-                node.wantsExpanded = false
-                outline.collapseItem(node)
-                updateIcon(node)
-            }
-            else { outline.expandItem(node) }
-        } else { onOpen?(node.url) }
+        if node.isDirectory { setExpanded(node, !node.wantsExpanded) } else { onOpen?(node.url, false) }
+    }
+
+    private func setExpanded(_ node: FolderNode, _ expanded: Bool) {
+        if expanded { outline.expandItem(node); return }
+        node.wantsExpanded = false
+        outline.collapseItem(node)
+        updateIcon(node)
+    }
+
+    /// Up and Down open the file they land on, so files can be stepped through from the keyboard.
+    /// Right expands a folder, or enters an expanded one; Left collapses a folder, or goes to the parent.
+    private func navigate(_ key: NSEvent.SpecialKey) -> Bool {
+        guard [.upArrow, .downArrow, .leftArrow, .rightArrow].contains(key) else { return false }
+        pendingReveal = nil
+        pendingState = nil
+        let row = outline.selectedRow
+        let node = outline.item(atRow: row) as? FolderNode
+        let target: Int
+        switch key {
+        case .upArrow: target = row < 0 ? 0 : row - 1
+        case .downArrow: target = row + 1
+        case .rightArrow:
+            guard let node, node.isDirectory else { return true }
+            guard node.wantsExpanded else { setExpanded(node, true); return true }
+            target = row + 1
+            guard outline.parent(forItem: outline.item(atRow: target)) as? FolderNode === node else { return true }
+        default:
+            guard let node else { return true }
+            if node.isDirectory, node.wantsExpanded { setExpanded(node, false); return true }
+            guard let parent = outline.parent(forItem: node) else { return true }
+            target = outline.row(forItem: parent)
+        }
+        guard target >= 0, target < outline.numberOfRows, target != row else { return true }
+        outline.selectRowIndexes(IndexSet(integer: target), byExtendingSelection: false)
+        outline.scrollRowToVisible(target)
+        if let file = outline.item(atRow: target) as? FolderNode, !file.isDirectory { onOpen?(file.url, true) }
+        return true
     }
 }

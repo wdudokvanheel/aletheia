@@ -174,7 +174,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
                 }
             }) { self.checkDiskChanges() }
         }
-        tree.onOpen = { [weak self] in self?.openFile($0) }
+        tree.onOpen = { [weak self] in self?.openFile($0, from: $1 ? .browse : .click) }
         tree.onError = { [weak self] in self?.present($0) }
     }
 
@@ -316,11 +316,18 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
         updateTitle()
     }
 
-    func openFile(_ url: URL) {
+    /// How the file tree opened a file.
+    enum TreeOpening { case click, browse }
+
+    /// The tab the arrow keys last opened in the tree. The next arrow step replaces it, unless it was
+    /// edited, so stepping through files does not pile up tabs. Any other way of showing it keeps it.
+    private weak var browsedDocument: EditorDocument?
+
+    func openFile(_ url: URL, from source: TreeOpening? = nil) {
         guard !closing, !closed, !restoring else { return }
         let canonical = url.resolvingSymlinksInPath()
         if let existing = documents.first(where: { $0.file.url == canonical }) {
-            select(existing)
+            show(existing, from: source, new: false)
             return
         }
         let inheritedMarkdownMode = lastMarkdownMode
@@ -330,8 +337,10 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
                 guard !self.closed, !self.closing else { return }
                 switch result {
                 case .success(let file):
+                    // Arrow steps read in parallel; only the file the tree still has selected opens.
+                    if source == .browse, self.tree.selectedURL != url { return }
                     if let existing = self.documents.first(where: { $0.file.url == file.url }) {
-                        self.select(existing)
+                        self.show(existing, from: source, new: false)
                         return
                     }
                     if self.rootURL == nil { self.setRoot(file.url.deletingLastPathComponent()) }
@@ -339,11 +348,21 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
                     if document.isMarkdown { document.markdownMode = inheritedMarkdownMode }
                     self.configure(document)
                     self.documents.append(document)
-                    self.select(document)
+                    self.show(document, from: source, new: true)
                 case .failure(let error): self.present(error)
                 }
             }
         }
+    }
+
+    /// A tree click focuses a text tab but leaves viewers to the tree; arrow steps always keep tree focus.
+    private func show(_ document: EditorDocument, from source: TreeOpening?, new: Bool) {
+        let replaced = browsedDocument === selected ? browsedDocument : nil
+        browsedDocument = source == .browse && new ? document : nil
+        select(document)
+        guard let source else { return }
+        if source == .browse, let replaced, replaced !== document, !replaced.isDirty, !replaced.busy { close(replaced) }
+        if source == .browse || !document.isEditable { tree.focus() }
     }
 
     private func configure(_ document: EditorDocument) {
