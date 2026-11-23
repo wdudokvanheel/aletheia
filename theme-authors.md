@@ -3,7 +3,7 @@
 Verified by fetching the official upstream raw files at the revisions below on
 2026-11-05. These are static sRGB UI color adaptations, not imported theme engines,
 libraries, syntax rules or runtime parsers. No package or network access is added.
-76 bundled variants plus native System are defined in `AppearanceSettings.swift`.
+77 bundled variants plus native System are defined in `AppearanceSettings.swift`.
 The project dependency maintenance gate concerns executable libraries; these
 small, fixed color tables are attributed design data, including classic palettes.
 
@@ -100,7 +100,7 @@ Revision `df4792accde9db0043121f32628bcf8e645d9aea`.
 
 ## Native syntax roles
 
-`SyntaxPalette.swift` supplies a separate static table for each of the 76 bundled
+`SyntaxPalette.swift` supplies a separate static table for each of the 77 bundled
 variants; System uses dynamic AppKit colors. These colors were re-read from the
 same pinned palette files above on 2026-11-05. Existing license notices cover the
 additional values. No theme engine, dependency, or runtime lookup is added.
@@ -122,7 +122,7 @@ type, and tag names share the name role; literal constants share the number role
 | One | grey, green, purple, orange, blue, red, blue, red |
 
 Settings changes recolor cached visible tokens immediately through the existing
-window notification. Tests cycle all 77 schemes through a real EditorWindow and
+window notification. Tests cycle all 78 schemes through a real EditorWindow and
 check native temporary token colors, background, unchanged text/selection, and
 unmodified undo state. Tokenization is not needed to change schemes.
 
@@ -1470,3 +1470,39 @@ also a GitHub dark tone. This is noted as a resemblance only. The
 primer/github-vscode-theme source and its MIT license, recorded above for the
 GitHub themes and in [ThemeLicenses.md](Sources/Aletheia/Resources/ThemeLicenses.md),
 cover that palette family.
+
+## Wesley Brutalist — added 2026-11-23
+
+A light scheme from the owner's own portfolio website color tokens
+(`wdudokvanheel-portfolio/src/tailwind.css` `@theme`, commit
+`c68e24ebd9e15dcc40a30a63f344118962e94756`), copied once as static literals
+from the owner's color scheme library. No import feature, runtime lookup or
+dependency is added. Being the owner's own palette, it needs no upstream
+license notice.
+
+Cream background, dark text and white surface are the website colors
+unchanged; muted grey `#6b685e` is an added neutral. Accent and Git/syntax
+colors are the website's blue, red, green, purple, yellow and pink mixed with
+black in sRGB (40%, 20%, 37%, 19%, 45%, 15%) so each has at least 4.5:1
+contrast against both cream and white.
+
+| Role | Wesley Brutalist |
+| --- | --- |
+| ui.background | `#fefbe9` |
+| ui.foreground | `#1e1e1e` |
+| ui.surface | `#ffffff` |
+| ui.muted | `#6b685e` |
+| ui.accent | `#d9117d` |
+| ui.added | `#497f22` |
+| ui.modified | `#8c6d1c` |
+| ui.deleted | `#cc3e3e` |
+| ui.staged | `#2e7a99` |
+| ui.conflict | `#9056cb` |
+| syntax.comment | `#6b685e` |
+| syntax.string | `#497f22` |
+| syntax.keyword | `#9056cb` |
+| syntax.number | `#8c6d1c` |
+| syntax.name | `#2e7a99` |
+| syntax.property | `#d9117d` |
+| syntax.markup | `#2e7a99` |
+| syntax.invalid | `#cc3e3e` |

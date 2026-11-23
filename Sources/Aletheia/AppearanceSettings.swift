@@ -145,6 +145,7 @@ struct AppColorScheme {
         .init(id: "one-light", name: "One Light", palette: .init(isDark: false, 0xfafafa, 0x383a42, 0xf0f0f0, 0x818387, 0x4078f2, 0x50a14f, 0x986801, 0xe45649, 0x0184bc, 0xa626a4)),
         .init(id: "inkwell", name: "Inkwell", palette: .init(isDark: true, 0x0a0a0a, 0xededed, 0x1a1a1a, 0x666666, 0x2a69ff, 0x9fd08a, 0xe6c15c, 0xff4d42, 0x74cfd1, 0xd093d0)),
         .init(id: "harbor-night", name: "Harbor Night", palette: .init(isDark: true, 0x0d1117, 0xe6edf3, 0x161b22, 0x6e7681, 0x2f81f7, 0x3fb950, 0xd29922, 0xff7b72, 0x39c5cf, 0xbc8cff)),
+        .init(id: "wesley-brutalist", name: "Wesley Brutalist", palette: .init(isDark: false, 0xfefbe9, 0x1e1e1e, 0xffffff, 0x6b685e, 0xd9117d, 0x497f22, 0x8c6d1c, 0xcc3e3e, 0x2e7a99, 0x9056cb)),
     ]
 }
 
