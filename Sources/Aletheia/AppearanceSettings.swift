@@ -192,7 +192,10 @@ final class AppSettings: NSObject {
     static let previewTextScaleDidChange = Notification.Name("AletheiaPreviewTextScaleDidChange")
     /// The sizes the Custom renderer steps through, as multiples of its standard size.
     static let previewTextScales: [Double] = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
-    static let schemes = AppColorScheme.all
+    /// System first, then the bundled schemes by name.
+    static let schemes = [AppColorScheme.all[0]] + AppColorScheme.all.dropFirst().sorted {
+        $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    }
 
     private let defaults: UserDefaults
     private(set) var selectedSchemeID: String
@@ -293,7 +296,10 @@ final class AppSettings: NSObject {
             tabs.tabStyle = .toolbar
             tabs.transitionOptions = []
             let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-            popup.addItems(withTitles: Self.schemes.map(\.name))
+            for scheme in Self.schemes {
+                popup.addItem(withTitle: scheme.name)
+                popup.lastItem?.image = scheme.swatch
+            }
             popup.target = self
             popup.action = #selector(schemeChanged(_:))
             let appearance = NSStackView(views: [
@@ -409,6 +415,38 @@ final class AppSettings: NSObject {
         for (box, option) in zip(tabReuseCheckboxes, TabReuseOption.allCases) {
             box.state = isEnabled(option) ? .on : .off
             if ![.arrowKeys, .clicks].contains(option) { box.isEnabled = reuses }
+        }
+    }
+}
+
+extension AppColorScheme {
+    /// A miniature editor for the scheme menu: a sidebar strip and two lines of highlighted code.
+    var swatch: NSImage {
+        let ui = palette, syntax = syntaxPalette
+        return NSImage(size: NSSize(width: 48, height: 18), flipped: true) { rect in
+            let frame = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+            ui.background.setFill()
+            frame.fill()
+            NSGraphicsContext.saveGraphicsState()
+            frame.addClip()
+            ui.surface.setFill()
+            NSRect(x: 0, y: 0, width: 9, height: rect.height).fill()
+            ui.muted.withAlphaComponent(0.35).setFill()
+            NSRect(x: 9, y: 0, width: 1, height: rect.height).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            for (line, runs) in [[(syntax.keyword, 7), (syntax.name, 9), (ui.foreground, 5), (syntax.number, 4)],
+                                 [(syntax.string, 13), (syntax.comment, 12)]].enumerated() {
+                var x = 14 + CGFloat(line * 3)
+                for (color, width) in runs {
+                    color.setFill()
+                    NSRect(x: x, y: 5 + CGFloat(line * 5), width: CGFloat(width), height: 2.5).fill()
+                    x += CGFloat(width) + 2
+                }
+            }
+            NSColor.black.withAlphaComponent(0.25).setStroke()
+            frame.lineWidth = 1
+            frame.stroke()
+            return true
         }
     }
 }

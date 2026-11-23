@@ -82,6 +82,12 @@ final class AppearanceSettingsTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: AppSettings.colorSchemeKey), "system")
     }
 
+    @MainActor func testSchemesListSystemFirstThenByName() {
+        XCTAssertEqual(AppSettings.schemes.first?.id, "system")
+        let names = AppSettings.schemes.dropFirst().map(\.name)
+        XCTAssertEqual(names, names.sorted { $0.localizedStandardCompare($1) == .orderedAscending })
+    }
+
     @MainActor func testCatalogUsesUniqueIDsAndCorrectLightDarkForegrounds() throws {
         XCTAssertEqual(AppSettings.schemes.count, 79)
         XCTAssertEqual(Set(AppSettings.schemes.map(\.id)).count, AppSettings.schemes.count)
