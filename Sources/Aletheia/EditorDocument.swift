@@ -159,6 +159,9 @@ final class EditorDocument: NSObject, NSTextViewDelegate, @preconcurrency NSText
 
     private(set) var isDirty = false
 
+    /// Edited since it opened or last reloaded from disk, even if the edits were saved or undone.
+    var hasEdits: Bool { isEditable && (undo.canUndo || undo.canRedo) }
+
     convenience init(file: TextFile) { self.init(file: .text(file)) }
 
     init(file: DocumentFile) {

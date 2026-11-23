@@ -17,6 +17,18 @@ final class AppearanceSettingsTests: XCTestCase {
         XCTAssertTrue(AppSettings(defaults: defaults).revealActiveFileInTree)
     }
 
+    @MainActor func testTabReuseOptionsDefaultOnAndPersist() throws {
+        let suite = "AletheiaTabReuseTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertTrue(TabReuseOption.allCases.allSatisfy(settings.isEnabled))
+        settings.setEnabled(.keepAfterDelay, false)
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertFalse(reloaded.isEnabled(.keepAfterDelay))
+        XCTAssertTrue(reloaded.isEnabled(.clicks))
+    }
+
     @MainActor func testPreviewTextScalePersistsStepsAndClamps() throws {
         let suite = "AletheiaTextScaleTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

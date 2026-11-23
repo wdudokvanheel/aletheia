@@ -319,9 +319,12 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
     /// How the file tree opened a file.
     enum TreeOpening { case click, browse }
 
-    /// The tab the arrow keys last opened in the tree. The next arrow step replaces it, unless it was
-    /// edited, so stepping through files does not pile up tabs. Any other way of showing it keeps it.
+    /// The reusable tab the tree last opened: the next file the tree opens replaces it, so stepping
+    /// through files does not pile up tabs. Settings choose which openings reuse it and what keeps it.
     private weak var browsedDocument: EditorDocument?
+    private var browsedSince = Date.distantPast
+    private var browsedTouched = false
+    private var browseMonitor: Any?
 
     func openFile(_ url: URL, from source: TreeOpening? = nil) {
         guard !closing, !closed, !restoring else { return }
@@ -357,12 +360,54 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
 
     /// A tree click focuses a text tab but leaves viewers to the tree; arrow steps always keep tree focus.
     private func show(_ document: EditorDocument, from source: TreeOpening?, new: Bool) {
-        let replaced = browsedDocument === selected ? browsedDocument : nil
-        browsedDocument = source == .browse && new ? document : nil
+        let reuse = source.map { AppSettings.shared.isEnabled($0 == .browse ? .arrowKeys : .clicks) } ?? false
+        var replaced: EditorDocument?
+        if reuse, let previous = browsedDocument, previous === selected, previous !== document, !keepsOpen(previous) {
+            replaced = previous
+        }
+        if browsedDocument !== document { setBrowsed(reuse && new ? document : nil) }
         select(document)
-        guard let source else { return }
-        if source == .browse, let replaced, replaced !== document, !replaced.isDirty, !replaced.busy { close(replaced) }
-        if source == .browse || !document.isEditable { tree.focus() }
+        if let replaced { close(replaced) }
+        if source == .browse || (source == .click && !document.isEditable) { tree.focus() }
+    }
+
+    /// Unsaved changes always keep a reusable tab open; the settings choose what else does.
+    private func keepsOpen(_ document: EditorDocument) -> Bool {
+        let settings = AppSettings.shared
+        return document.isDirty || document.busy
+            || (settings.isEnabled(.keepEdited) && document.hasEdits)
+            || (settings.isEnabled(.keepMoved) && browsedTouched)
+            || (settings.isEnabled(.keepAfterDelay) && Date().timeIntervalSince(browsedSince) >= 30)
+    }
+
+    /// Watches for scrolling, clicks and keys in the reusable tab's content only while there is one.
+    private func setBrowsed(_ document: EditorDocument?) {
+        browsedDocument = document
+        browsedSince = Date()
+        browsedTouched = false
+        guard document != nil else { removeBrowseMonitor(); return }
+        guard browseMonitor == nil else { return }
+        browseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.scrollWheel, .magnify, .leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]
+        ) { [weak self] event in
+            MainActor.assumeIsolated { self?.noteBrowseInput(event) }
+            return event
+        }
+    }
+
+    private func removeBrowseMonitor() {
+        if let browseMonitor { NSEvent.removeMonitor(browseMonitor) }
+        browseMonitor = nil
+    }
+
+    private func noteBrowseInput(_ event: NSEvent) {
+        guard let window, event.window === window, !browsedTouched else { return }
+        guard let browsed = browsedDocument else { removeBrowseMonitor(); return }
+        guard browsed === selected else { return }
+        let inside = event.type == .keyDown
+            ? (window.firstResponder as? NSView)?.isDescendant(of: editorHost) == true
+            : editorHost.bounds.contains(editorHost.convert(event.locationInWindow, from: nil))
+        if inside { browsedTouched = true }
     }
 
     private func configure(_ document: EditorDocument) {
@@ -1192,6 +1237,7 @@ final class EditorWindow: NSWindowController, NSWindowDelegate, NSUserInterfaceV
 
     func windowWillClose(_ notification: Notification) {
         closed = true
+        removeBrowseMonitor()
         watcher.stop()
         diskCheckTask?.cancel()
         diskCheckTask = nil

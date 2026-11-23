@@ -87,4 +87,44 @@ final class TabInteractionTests: XCTestCase {
         editor.undoManager?.undo()
         window.performClose(nil)
     }
+
+    @MainActor func testTreeClicksReuseTheirTabUntilEditedOrDisabled() async throws {
+        _ = NSApplication.shared
+        let saved = TabReuseOption.allCases.map { UserDefaults.standard.object(forKey: $0.rawValue) }
+        defer { for (option, value) in zip(TabReuseOption.allCases, saved) { UserDefaults.standard.set(value, forKey: option.rawValue) } }
+        for option in TabReuseOption.allCases { AppSettings.shared.setEnabled(option, true) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let urls = ["a", "b", "c", "d", "e"].map { root.appendingPathComponent("\($0).txt") }
+        for url in urls { try Data("Original".utf8).write(to: url) }
+        let controller = EditorWindow()
+        defer { controller.window?.performClose(nil) }
+        let state = WindowSession(frame: CGRect(x: 100, y: 100, width: 900, height: 600),
+                                  rootPath: root.path, filePaths: [], selectedPath: nil)
+        _ = await withCheckedContinuation { continuation in controller.restore(state) { continuation.resume(returning: $0) } }
+        func open(_ index: Int) async throws {
+            controller.openFile(urls[index], from: .click)
+            let deadline = Date().addingTimeInterval(5)
+            while controller.session.selectedPath != urls[index].resolvingSymlinksInPath().path && Date() < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        func names() -> [String] { controller.documents.map(\.file.url.lastPathComponent) }
+
+        try await open(0)
+        try await open(1)
+        XCTAssertEqual(names(), ["b.txt"], "A clicked tab is replaced by the next click")
+        // An edit keeps the tab even once it is undone and the tab is clean again.
+        let editor = try XCTUnwrap(controller.documents.first?.editor)
+        editor.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        editor.undoManager?.undo()
+        XCTAssertFalse(controller.documents[0].isDirty)
+        try await open(2)
+        XCTAssertEqual(names(), ["b.txt", "c.txt"])
+        AppSettings.shared.setEnabled(.clicks, false)
+        try await open(3)
+        try await open(4)
+        XCTAssertEqual(names(), ["b.txt", "c.txt", "d.txt", "e.txt"], "Disabled, every click opens its own tab")
+    }
 }

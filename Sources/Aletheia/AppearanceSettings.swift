@@ -155,6 +155,26 @@ enum MarkdownRenderer: String, CaseIterable {
     var title: String { self == .webkit ? "WebKit" : "Custom (Experimental)" }
 }
 
+/// Whether a tab opened from the file tree is replaced by the next file the tree opens, and what
+/// keeps it open. Every option defaults to on. Unsaved changes always keep the tab, whatever is set.
+enum TabReuseOption: String, CaseIterable {
+    case arrowKeys = "reuseTabForArrowKeys"
+    case clicks = "reuseTabForClicks"
+    case keepEdited = "keepReusedTabWhenEdited"
+    case keepMoved = "keepReusedTabWhenMoved"
+    case keepAfterDelay = "keepReusedTabAfterDelay"
+
+    var title: String {
+        switch self {
+        case .arrowKeys: "Reuse the tab when moving through files with the arrow keys"
+        case .clicks: "Reuse the tab when clicking files"
+        case .keepEdited: "It is edited"
+        case .keepMoved: "You scroll, click or type in it"
+        case .keepAfterDelay: "It has been open for 30 seconds"
+        }
+    }
+}
+
 @MainActor
 final class AppSettings: NSObject {
     static let shared = AppSettings()
@@ -187,6 +207,14 @@ final class AppSettings: NSObject {
         guard revealActiveFileInTree != enabled else { return }
         defaults.set(enabled, forKey: Self.revealActiveFileKey)
         NotificationCenter.default.post(name: Self.revealActiveFileDidChange, object: self)
+    }
+
+    func isEnabled(_ option: TabReuseOption) -> Bool {
+        defaults.object(forKey: option.rawValue) == nil || defaults.bool(forKey: option.rawValue)
+    }
+
+    func setEnabled(_ option: TabReuseOption, _ enabled: Bool) {
+        defaults.set(enabled, forKey: option.rawValue)
     }
 
     /// Unknown stored values fall back to WebKit.
@@ -235,6 +263,7 @@ final class AppSettings: NSObject {
     private var revealCheckbox: NSButton?
     private var rendererPopup: NSPopUpButton?
     private var timingsCheckbox: NSButton?
+    private var tabReuseCheckboxes: [NSButton] = []
     private var projectSettingsView: ProjectSettingsView?
     private let shortcuts: Shortcuts
 
@@ -284,8 +313,22 @@ final class AppSettings: NSObject {
             let timings = NSButton(checkboxWithTitle: "Show preview timings", target: self,
                                    action: #selector(timingsChanged(_:)))
             let revealNote = SettingsPage.note("Opening or selecting a tab expands its folders and selects the file in the tree.")
+            let reuseBoxes = TabReuseOption.allCases.enumerated().map { index, option in
+                let box = NSButton(checkboxWithTitle: option.title, target: self, action: #selector(tabReuseChanged(_:)))
+                box.tag = index
+                return box
+            }
+            tabReuseCheckboxes = reuseBoxes
+            let keepNote = SettingsPage.note("A reused tab is replaced by the next file you open from the tree. Keep it open once:")
+            let reuseNote = SettingsPage.note("Tabs with unsaved changes always stay open.")
+            let keepBoxes = NSStackView(views: Array(reuseBoxes[2...]))
+            keepBoxes.orientation = .vertical
+            keepBoxes.alignment = .leading
+            keepBoxes.spacing = 8
+            keepBoxes.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
             let general = NSStackView(views: [
                 SettingsPage.heading("File tree"), reveal, revealNote,
+                SettingsPage.heading("Tabs opened from the tree"), reuseBoxes[0], reuseBoxes[1], keepNote, keepBoxes, reuseNote,
                 SettingsPage.heading("Markdown renderer"), renderer, timings,
                 SettingsPage.note("Applies immediately to all windows. Preview timings are shown only by the Custom renderer.")
             ])
@@ -293,6 +336,7 @@ final class AppSettings: NSObject {
             general.alignment = .leading
             general.spacing = 12
             general.setCustomSpacing(28, after: revealNote)
+            general.setCustomSpacing(28, after: reuseNote)
             let projects = ProjectSettingsView(settings: ProjectSettings(defaults: defaults), shortcuts: shortcuts)
             projectSettingsView = projects
             let shortcutList = ShortcutSettingsView(shortcuts: shortcuts)
@@ -336,6 +380,12 @@ final class AppSettings: NSObject {
         setRevealActiveFileInTree(sender.state == .on)
     }
 
+    @objc private func tabReuseChanged(_ sender: NSButton) {
+        guard TabReuseOption.allCases.indices.contains(sender.tag) else { return }
+        setEnabled(TabReuseOption.allCases[sender.tag], sender.state == .on)
+        updateWindow()
+    }
+
     @objc private func rendererChanged(_ sender: NSPopUpButton) {
         guard MarkdownRenderer.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
         setMarkdownRenderer(MarkdownRenderer.allCases[sender.indexOfSelectedItem])
@@ -353,5 +403,10 @@ final class AppSettings: NSObject {
         rendererPopup?.selectItem(at: MarkdownRenderer.allCases.firstIndex(of: markdownRenderer) ?? 0)
         timingsCheckbox?.state = showsPreviewTimings ? .on : .off
         timingsCheckbox?.isEnabled = markdownRenderer == .custom
+        let reuses = isEnabled(.arrowKeys) || isEnabled(.clicks)
+        for (box, option) in zip(tabReuseCheckboxes, TabReuseOption.allCases) {
+            box.state = isEnabled(option) ? .on : .off
+            if ![.arrowKeys, .clicks].contains(option) { box.isEnabled = reuses }
+        }
     }
 }
